@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	erofs "github.com/erofs/go-erofs"
+	erofs "github.com/forkcloser/erofs"
 )
 
 const benchTargetSize = 250 * 1024 * 1024

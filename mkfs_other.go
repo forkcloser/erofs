@@ -5,7 +5,7 @@ package erofs
 import (
 	"io/fs"
 
-	"github.com/erofs/go-erofs/internal/builder"
+	"github.com/forkcloser/erofs/internal/builder"
 )
 
 func entryFromSys(info fs.FileInfo) *builder.Entry {

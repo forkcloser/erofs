@@ -12,10 +12,10 @@ import (
 	"testing/fstest"
 	"time"
 
-	erofs "github.com/erofs/go-erofs"
-	"github.com/erofs/go-erofs/internal/builder"
-	"github.com/erofs/go-erofs/internal/disk"
-	"github.com/erofs/go-erofs/internal/erofstest"
+	erofs "github.com/forkcloser/erofs"
+	"github.com/forkcloser/erofs/internal/builder"
+	"github.com/forkcloser/erofs/internal/disk"
+	"github.com/forkcloser/erofs/internal/erofstest"
 )
 
 // TestCreateFSSpool exercises spool mode: CreateFS without a data file.

@@ -3,7 +3,7 @@ package erofs
 import (
 	"sort"
 
-	"github.com/erofs/go-erofs/internal/disk"
+	"github.com/forkcloser/erofs/internal/disk"
 )
 
 // planLayout assigns NIDs and determines trailing data sizes for all entries.

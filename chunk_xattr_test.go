@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	erofs "github.com/erofs/go-erofs"
+	erofs "github.com/forkcloser/erofs"
 )
 
 // TestChunkBasedXattrAlignment guards against the chunk-index map being written

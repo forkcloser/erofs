@@ -1,3 +1,3 @@
-module github.com/erofs/go-erofs
+module github.com/forkcloser/erofs
 
 go 1.23

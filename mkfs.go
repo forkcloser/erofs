@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/erofs/go-erofs/internal/builder"
-	"github.com/erofs/go-erofs/internal/disk"
+	"github.com/forkcloser/erofs/internal/builder"
+	"github.com/forkcloser/erofs/internal/disk"
 )
 
 // --- Exported types ---

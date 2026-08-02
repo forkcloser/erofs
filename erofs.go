@@ -39,7 +39,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/erofs/go-erofs/internal/disk"
+	"github.com/forkcloser/erofs/internal/disk"
 )
 
 // Errors

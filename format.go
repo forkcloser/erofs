@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/erofs/go-erofs/internal/disk"
+	"github.com/forkcloser/erofs/internal/disk"
 )
 
 // Standard xattr name prefix table (index → on-disk NameIndex).

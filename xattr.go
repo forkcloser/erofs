@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/erofs/go-erofs/internal/disk"
+	"github.com/forkcloser/erofs/internal/disk"
 )
 
 /*

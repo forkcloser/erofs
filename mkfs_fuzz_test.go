@@ -11,8 +11,8 @@ import (
 	"testing/fstest"
 	"time"
 
-	erofs "github.com/erofs/go-erofs"
-	"github.com/erofs/go-erofs/internal/erofstest"
+	erofs "github.com/forkcloser/erofs"
+	"github.com/forkcloser/erofs/internal/erofstest"
 )
 
 // buildAndVerify creates an EROFS image using the writer, validates it with

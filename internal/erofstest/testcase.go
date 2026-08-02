@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/erofs/go-erofs"
+	"github.com/forkcloser/erofs"
 )
 
 // TestCase is a reusable test case that produces tar content, converts it
