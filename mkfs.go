@@ -269,6 +269,50 @@ func (fsys *Writer) Symlink(oldname, newname string) error {
 	return nil
 }
 
+// Link creates newname as a hardlink to oldname: an additional directory
+// entry for the SAME inode, matching os.Link semantics. The target must
+// already exist and must not be a directory. On disk the two names share one
+// nid; the inode's link count is computed from the number of live names.
+// Metadata operations (Chmod, Chown, ...) through either name affect the
+// shared inode. Removing the ORIGINAL name while hardlinks to it remain is
+// not supported and surfaces as an error at Close.
+func (fsys *Writer) Link(oldname, newname string) error {
+	if fsys.wErr != nil {
+		return fsys.wErr
+	}
+	oldname = cleanPath(oldname)
+	newname = cleanPath(newname)
+	if newname == "/" {
+		return fmt.Errorf("mkfs: cannot link at root")
+	}
+	target, ok := fsys.byPath[oldname]
+	if !ok {
+		return &fs.PathError{Op: "link", Path: oldname, Err: fs.ErrNotExist}
+	}
+	// A link to a link is a link to the final target: inodes have no chains.
+	if target.linkTo != nil {
+		target = target.linkTo
+	}
+	if target.mode&disk.StatTypeMask == disk.StatTypeDir {
+		return fmt.Errorf("mkfs: cannot hardlink directory %q", oldname)
+	}
+	if err := fsys.checkPath(newname); err != nil {
+		return err
+	}
+
+	fsys.ensureParent(newname)
+
+	e := &fsEntry{
+		path:   newname,
+		mode:   target.mode, // dirent file type; the inode's mode lives on target
+		linkTo: target,
+	}
+	fsys.addChild(e)
+	target.extraLinks++
+
+	return nil
+}
+
 // Mknod creates a device, FIFO, or socket. mode must include type bits
 // (e.g. disk.StatTypeChrdev | 0o666).
 func (fsys *Writer) Mknod(name string, mode uint16, rdev uint32) error {
@@ -606,6 +650,9 @@ func (fsys *Writer) Close() error {
 
 	// Build erofsEntry tree from the fsEntry tree via BFS.
 	root := fsys.buildErofsTree()
+	if fsys.wErr != nil {
+		return fsys.wErr // e.g. a hardlink whose target was removed
+	}
 
 	var chunkBits uint8
 	for cs := fsys.blockSize; cs < 4096; cs <<= 1 {
@@ -635,6 +682,9 @@ func (fsys *Writer) Stat(name string) (fs.FileInfo, error) {
 	if !ok {
 		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
 	}
+	if e.linkTo != nil {
+		e = e.linkTo // hardlink: stat the shared inode
+	}
 	return &writerFileInfo{entry: e}, nil
 }
 
@@ -646,6 +696,9 @@ func (fsys *Writer) Open(name string) (fs.File, error) {
 	e, ok := fsys.byPath[name]
 	if !ok {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+	}
+	if e.linkTo != nil {
+		e = e.linkTo // hardlink: open the shared inode's data
 	}
 
 	typ := e.mode & disk.StatTypeMask
@@ -765,6 +818,13 @@ type fsEntry struct {
 	chunks     []builder.Chunk
 	contiguous bool // data blocks are contiguous; flat-plain is sufficient
 
+	// Hardlinks. linkTo makes this entry a pure additional NAME for another
+	// entry's inode (always the final target: Link resolves chains at call
+	// time); extraLinks counts live aliases pointing AT this entry, feeding
+	// the target's computed nlink.
+	linkTo     *fsEntry
+	extraLinks uint32
+
 	// Tree structure — maintained during add/remove.
 	parent   *fsEntry
 	children []*fsEntry
@@ -858,6 +918,11 @@ type erofsEntry struct {
 
 	// Extended attributes
 	xattrs map[string]string
+
+	// aliasOf marks a hardlink dirent: this entry contributes a directory
+	// entry (name + shared nid) but NO inode of its own — planLayout skips
+	// it and copies the target's nid/file type after assignment.
+	aliasOf *erofsEntry
 
 	// EROFS layout (assigned during planning)
 	nid           uint64
@@ -1199,6 +1264,9 @@ func (fsys *Writer) remove(p string) {
 	}
 	e.removed = true
 	delete(fsys.byPath, p)
+	if e.linkTo != nil {
+		e.linkTo.extraLinks--
+	}
 	if e.mode&disk.StatTypeMask == disk.StatTypeDir {
 		fsys.removeSubtree(e)
 	}
@@ -1221,6 +1289,9 @@ func (fsys *Writer) removeSubtree(e *fsEntry) {
 		if !c.removed {
 			c.removed = true
 			delete(fsys.byPath, c.path)
+			if c.linkTo != nil {
+				c.linkTo.extraLinks--
+			}
 			if c.mode&disk.StatTypeMask == disk.StatTypeDir {
 				fsys.removeSubtree(c)
 			}
@@ -1238,6 +1309,19 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 
 	rootEr := fsys.fsToErofs(fsys.root)
 	queue := []pair{{fsys.root, rootEr}}
+
+	// Hardlink wiring happens after the walk: an alias may sit in a
+	// directory the BFS reaches before (or after) its target's, so targets
+	// are looked up once every entry is converted.
+	type aliasFixup struct {
+		target *fsEntry
+		er     *erofsEntry
+	}
+
+	var (
+		aliases   []aliasFixup
+		converted map[*fsEntry]*erofsEntry
+	)
 
 	for len(queue) > 0 {
 		cur := queue[0]
@@ -1262,8 +1346,26 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 			if c.removed {
 				continue
 			}
+			if c.linkTo != nil {
+				// Dirent-only alias: name here, inode on the target
+				// (nid/file type copied once the target has one).
+				ent := &erofsEntry{
+					mode: c.mode,
+					name: path.Base(c.path),
+					path: c.path,
+				}
+				cur.er.children = append(cur.er.children, ent)
+				aliases = append(aliases, aliasFixup{target: c.linkTo, er: ent})
+				continue
+			}
 			ent := fsys.fsToErofs(c)
 			cur.er.children = append(cur.er.children, ent)
+			if c.extraLinks > 0 {
+				if converted == nil {
+					converted = map[*fsEntry]*erofsEntry{}
+				}
+				converted[c] = ent
+			}
 			if c.mode&disk.StatTypeMask == disk.StatTypeDir {
 				queue = append(queue, pair{c, ent})
 			}
@@ -1274,6 +1376,19 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 			return cur.er.children[i].name < cur.er.children[j].name
 		})
 	}
+
+	for _, a := range aliases {
+		target, ok := converted[a.target]
+		if !ok {
+			// The target name was removed (or never converted) while links
+			// to it remain — the inode has no owner to serialize.
+			fsys.wErr = fmt.Errorf("mkfs: hardlink %s: target %s no longer exists", a.er.path, a.target.path)
+
+			continue
+		}
+		a.er.aliasOf = target
+	}
+
 	return rootEr
 }
 
@@ -1286,7 +1401,7 @@ func (fsys *Writer) fsToErofs(e *fsEntry) *erofsEntry {
 	case e.mode&disk.StatTypeMask == disk.StatTypeDir:
 		nlink = 2 // adjusted by buildErofsTree
 	default:
-		nlink = 1
+		nlink = 1 + e.extraLinks // one per name: the entry's own plus hardlinks
 	}
 
 	var data io.Reader
@@ -1471,6 +1586,11 @@ func (fsys *Writer) lookup(name string) (*fsEntry, error) {
 	e, ok := fsys.byPath[name]
 	if !ok {
 		return nil, fmt.Errorf("mkfs: path not found %q", name)
+	}
+	// A hardlink name IS its target's inode: metadata operations through
+	// either name must hit the shared entry.
+	if e.linkTo != nil {
+		e = e.linkTo
 	}
 	return e, nil
 }

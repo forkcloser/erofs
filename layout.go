@@ -12,8 +12,19 @@ func (w *erofsWriter) planLayout(root *erofsEntry) {
 	// DFS keeps directory contents close to their parent inode,
 	// improving locality for operations like find and ls -lR.
 	w.entries = nil
+
+	// Hardlink aliases are dirents without inodes: they get no slot in
+	// w.entries (and so no nid of their own); once real nids exist they copy
+	// their target's, which is all writeDirents reads from them.
+	var aliases []*erofsEntry
+
 	var walk func(e *erofsEntry)
 	walk = func(e *erofsEntry) {
+		if e.aliasOf != nil {
+			aliases = append(aliases, e)
+
+			return
+		}
 		w.entries = append(w.entries, e)
 		if e.mode&disk.StatTypeMask == disk.StatTypeDir {
 			sort.Slice(e.children, func(i, j int) bool {
@@ -132,6 +143,11 @@ func (w *erofsWriter) planLayout(root *erofsEntry) {
 		}
 
 		currentOff += totalInodeSize
+	}
+
+	for _, a := range aliases {
+		a.nid = a.aliasOf.nid
+		a.erofsFileType = a.aliasOf.erofsFileType
 	}
 
 	w.rootNid = root.nid
