@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"path"
+	"slices"
 
 	"github.com/forkcloser/erofs/internal/builder"
 	"github.com/forkcloser/erofs/internal/disk"
@@ -169,6 +170,14 @@ func (fsys *Writer) copyFromImage(img *image) error {
 	// legitimately appears under several names when the source has
 	// hardlinks, and each name needs its own entry here.
 	expanded := make(map[uint64]struct{})
+
+	// A chunk map is parsed once per inode, not once per name. Non-directory
+	// nids are deliberately not de-duped above, so a file with hardlinks is
+	// visited once per name, and each visit would otherwise parse and retain
+	// its own copy of an identical slice. The entries share the result: the
+	// remap below is the only thing that ever writes to it, and it runs on
+	// the parse that fills the cache.
+	chunkCache := make(map[uint64][]builder.Chunk)
 
 	for len(queue) > 0 {
 		cur := queue[0]
@@ -382,9 +391,17 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				}
 
 				if indexed {
-					chunks, err := fsys.parseChunks(at(chunkAddr), chunkFmt, size, blkBits, img.deviceIDMask)
-					if err != nil {
-						return fmt.Errorf("chunk index for nid %d: %w", cur.nid, err)
+					chunks, cached := chunkCache[cur.nid]
+					if !cached {
+						var err error
+						chunks, err = fsys.parseChunks(at(chunkAddr), chunkFmt, size, blkBits, img.deviceIDMask)
+						if err != nil {
+							return fmt.Errorf("chunk index for nid %d: %w", cur.nid, err)
+						}
+						if err := fsys.remapChunkDevices(cur.path, chunks); err != nil {
+							return err
+						}
+						chunkCache[cur.nid] = chunks
 					}
 					fe.chunks = chunks
 					// Only a single non-hole extent is contiguous. Claiming
@@ -398,13 +415,6 @@ func (fsys *Writer) copyFromImage(img *image) error {
 
 		case disk.StatTypeChrdev, disk.StatTypeBlkdev:
 			fe.rdev = disk.RdevFromMode(mode, idata)
-		}
-
-		// Remap chunk DeviceIDs for metadata-only sources.
-		if fsys.copyMetadataOnly {
-			if err := fsys.remapChunkDevices(cur.path, fe.chunks); err != nil {
-				return err
-			}
 		}
 
 		// Register in the tree.
@@ -553,7 +563,12 @@ func (fsys *Writer) parseChunks(data []byte, chunkFmt uint16, fileSize uint64, b
 			len(data), needed, ErrInvalid)
 	}
 
-	chunks := make([]builder.Chunk, 0, nchunks)
+	// Grown from what survives, not from what the inode declares. Most images
+	// coalesce heavily — a contiguous file collapses to a single entry — so
+	// reserving nchunks up front sizes the slice from the source's say-so and
+	// then retains it: a valid image with 20000 hardlinks to one 480-chunk
+	// file reserved 9.6 M slots to hold 20001.
+	var chunks []builder.Chunk
 	for i := range nchunks {
 		off := i * disk.SizeChunkIndex
 		startBlkLo := binary.LittleEndian.Uint32(data[off+4 : off+8])
@@ -600,7 +615,9 @@ func (fsys *Writer) parseChunks(data []byte, chunkFmt uint16, fileSize uint64, b
 		})
 	}
 
-	return chunks, nil
+	// The slice outlives this call on every entry that shares the inode, so
+	// hand back one sized to its contents rather than to append's last step.
+	return slices.Clip(chunks), nil
 }
 
 // parseXattrsFromBuf parses xattr entries from an in-memory buffer.

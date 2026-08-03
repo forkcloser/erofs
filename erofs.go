@@ -335,6 +335,26 @@ func (img *image) checkNid(nid uint64) error {
 	return nil
 }
 
+// chunkIndexFits reports whether a chunk-index map of needed bytes at off can
+// actually be present in the image.
+//
+// The map's size is derived from the inode's declared file size, and the
+// declared size is untrusted, so allocating a buffer for it before reading is
+// allocating on an attacker's say-so: an 8 KiB image can name a file whose
+// index map is maxChunkIndexBytes, and every Stat or DataRange call on it pays
+// that again. Checking the extent first turns the bound into something the
+// image has to back with real bytes.
+func (img *image) chunkIndexFits(off, needed int64) bool {
+	if needed < 0 || needed > maxChunkIndexBytes {
+		return false
+	}
+	if off < 0 || off > math.MaxInt64-needed {
+		return false
+	}
+
+	return img.size <= 0 || off+needed <= img.size
+}
+
 // chunkAddr converts a chunk-index physical block address into a byte offset.
 //
 // phys is assembled from two on-disk fields with no upper bound of their own,
@@ -456,7 +476,7 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 			baseOffset = (baseOffset + 7) & ^int64(7)
 		}
 		needed := int64(nchunks) * int64(disk.SizeChunkIndex)
-		if needed > maxChunkIndexBytes {
+		if !img.chunkIndexFits(baseOffset, needed) {
 			return nil
 		}
 		idxBuf := make([]byte, needed)
@@ -1407,7 +1427,7 @@ func (b *file) buildChunkDataRanges(ino *inode) []DataRange {
 		baseOffset = (baseOffset + 7) & ^int64(7)
 	}
 	needed := int64(nchunks) * int64(disk.SizeChunkIndex)
-	if needed > maxChunkIndexBytes {
+	if !b.img.chunkIndexFits(baseOffset, needed) {
 		return nil
 	}
 	idxBuf := make([]byte, needed)

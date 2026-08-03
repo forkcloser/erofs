@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/forkcloser/erofs/internal/builder"
 	"github.com/forkcloser/erofs/internal/disk"
 )
 
@@ -932,4 +936,136 @@ func TestUntrustedChunkAddrStaysInBounds(t *testing.T) {
 	binary.LittleEndian.PutUint32(buf[base+4:], 0xFFFFFFFE)
 
 	exerciseUntrusted(t, buf)
+}
+
+// TestUntrustedChunkIndexAllocIsBacked covers a chunk-based inode whose
+// declared size implies a chunk-index map just under maxChunkIndexBytes.
+// openDirect and buildChunkDataRanges sized their buffer from that declared
+// size and allocated it before the read that would have shown the map is not
+// there, so an 8 KiB image drove a 64 MiB allocation on every Stat or
+// DataRange call.
+func TestUntrustedChunkIndexAllocIsBacked(t *testing.T) {
+	buf, nid := buildTamperableImage(t)
+
+	img0, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inodeOff := img0.(*image).metaStartPos() + int64(nid)*disk.SizeInodeCompact
+
+	// Enough chunks for an index map just under the cap.
+	const size = (maxChunkIndexBytes / disk.SizeChunkIndex) * 4096
+	binary.LittleEndian.PutUint16(buf[inodeOff:], uint16(disk.LayoutChunkBased)<<1|1)
+	binary.LittleEndian.PutUint64(buf[inodeOff+8:], uint64(size))
+	binary.LittleEndian.PutUint32(buf[inodeOff+16:], disk.LayoutChunkFormatIndexes)
+
+	img, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("tampered image failed to open: %v", err)
+	}
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	const calls = 4
+	for range calls {
+		fi, err := fs.Stat(img, "f")
+		if err != nil {
+			continue
+		}
+		if dr, ok := fi.(interface{ DataRange() []DataRange }); ok {
+			_ = dr.DataRange()
+		}
+	}
+
+	runtime.ReadMemStats(&after)
+	grew := after.TotalAlloc - before.TotalAlloc
+
+	// Nothing proportional to the declared size should have been allocated;
+	// before the bound this was 64 MiB per call.
+	if grew > 1<<20 {
+		t.Errorf("%d Stat+DataRange calls on a %d byte image allocated %d bytes",
+			calls, len(buf), grew)
+	}
+	t.Logf("%d calls allocated %d bytes from a %d byte image", calls, grew, len(buf))
+}
+
+// TestCopyFromImageSharesChunkMaps covers the memory a metadata-only copy
+// retains for chunk maps. Nothing here is tampered: many hardlinks to one
+// chunk-based file is an ordinary layer shape.
+//
+// parseChunks reserved capacity for the inode's *declared* chunk count, and a
+// contiguous file coalesces to a single entry, so almost all of it was slack.
+// copyFromImage then parsed the map again for every name, since a file nid is
+// deliberately not de-duped. 20000 links to one 480-chunk file reserved 9.6 M
+// chunk slots to hold 20001, retaining 162 MiB from a 384 KiB image.
+func TestCopyFromImageSharesChunkMaps(t *testing.T) {
+	const (
+		links  = 2000
+		blocks = 480
+	)
+
+	df, err := os.Create(filepath.Join(t.TempDir(), "data.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = df.Close() }()
+
+	out := &seekBuf{}
+	w := Create(out, WithBuildTime(1000, 0), WithDataFile(df))
+	f, err := w.Create("/f0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(bytes.Repeat([]byte{0xAB}, blocks*4096)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Mkdir("/d", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := range links {
+		if err := w.Link("/f0", fmt.Sprintf("/d/l%06d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	img, err := Open(bytes.NewReader(out.buf), WithExtraDevices(df))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dst := Create(&seekBuf{})
+	if err := dst.CopyFrom(img, MetadataOnly()); err != nil {
+		t.Fatal(err)
+	}
+
+	var first *builder.Chunk
+	entries := 0
+	for _, e := range dst.byPath {
+		if len(e.chunks) == 0 {
+			continue
+		}
+		entries++
+		if cap(e.chunks) != len(e.chunks) {
+			t.Errorf("%s: chunk slice holds %d entries with capacity for %d",
+				e.path, len(e.chunks), cap(e.chunks))
+		}
+		// Every name of one inode describes the same extents, so they must
+		// all be looking at the same slice rather than a copy each.
+		if first == nil {
+			first = &e.chunks[0]
+		} else if &e.chunks[0] != first {
+			t.Errorf("%s: chunk map was parsed again instead of shared", e.path)
+		}
+	}
+	if entries != links+1 {
+		t.Fatalf("%d entries carry chunks, want %d", entries, links+1)
+	}
+	t.Logf("%d names share one %d-entry chunk map", entries, len(dst.byPath["/f0"].chunks))
 }
