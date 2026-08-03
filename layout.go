@@ -1,10 +1,31 @@
 package erofs
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 
 	"github.com/forkcloser/erofs/internal/disk"
 )
+
+// inodeFileSize returns the value an entry writes to i_size.
+//
+// For a directory that is the serialized dirent data, and for a symlink the
+// target length — neither is e.size, which for those types is whatever the
+// source reported (~4096 for a directory, typically). Compact-inode
+// eligibility has to be judged against this and not against e.size: i_size is
+// 32 bits wide in a compact inode, so testing the wrong quantity can pick a
+// compact inode for an entry whose real size does not fit, and the value is
+// then silently truncated into an unreadable inode.
+func (w *erofsWriter) inodeFileSize(e *erofsEntry) uint64 {
+	switch e.mode & disk.StatTypeMask {
+	case disk.StatTypeDir:
+		return uint64(w.direntDataSize(e))
+	case disk.StatTypeSymlink:
+		return uint64(len(e.symTarget))
+	}
+
+	return e.size
+}
 
 // planLayout assigns NIDs and determines trailing data sizes for all entries.
 func (w *erofsWriter) planLayout(root *erofsEntry) {
@@ -27,8 +48,8 @@ func (w *erofsWriter) planLayout(root *erofsEntry) {
 		}
 		w.entries = append(w.entries, e)
 		if e.mode&disk.StatTypeMask == disk.StatTypeDir {
-			sort.Slice(e.children, func(i, j int) bool {
-				return e.children[i].name < e.children[j].name
+			slices.SortFunc(e.children, func(a, b *erofsEntry) int {
+				return cmp.Compare(a.name, b.name)
 			})
 			for _, c := range e.children {
 				walk(c)
@@ -51,10 +72,13 @@ func (w *erofsWriter) planLayout(root *erofsEntry) {
 		e.nid = uint64(currentOff / 32)
 		e.xattrSize = calcXattrSize(e)
 
-		// Decide compact (32B) vs extended (64B) inode.
+		// Decide compact (32B) vs extended (64B) inode. A compact inode
+		// stores no timestamp: the reader reconstructs it as the superblock's
+		// (BuildTime, BuildTimeNs), so the entry's mtime has to match both
+		// fields, not just the seconds.
 		e.compact = e.uid <= 0xFFFF && e.gid <= 0xFFFF &&
-			e.nlink <= 0xFFFF && e.size <= 0xFFFFFFFF &&
-			e.mtime == w.buildTime && e.mtimeNs == 0
+			e.nlink <= 0xFFFF && w.inodeFileSize(e) <= 0xFFFFFFFF &&
+			e.mtime == w.buildTime && e.mtimeNs == w.buildTimeNs
 
 		inodeSize := disk.SizeInodeExtended
 		if e.compact {
@@ -77,8 +101,10 @@ func (w *erofsWriter) planLayout(root *erofsEntry) {
 					e.chunkBits = w.minChunkBits(e.size)
 				}
 			default:
-				// Full-image mode: decide inline vs plain
-				if int(e.size) <= w.blockSize-headerSize {
+				// Full-image mode: decide inline vs plain. Compare in uint64:
+				// converting e.size to int first would make an oversized value
+				// look small (or negative) and reserve the wrong trailing size.
+				if avail := w.blockSize - headerSize; avail >= 0 && e.size <= uint64(avail) {
 					inBlockOff := (currentOff + headerSize) % w.blockSize
 					if inBlockOff+int(e.size) <= w.blockSize {
 						e.layout = disk.LayoutFlatInline
@@ -211,13 +237,29 @@ func direntNames(e *erofsEntry) []string {
 	for _, c := range e.children {
 		names = append(names, c.name)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	return names
 }
 
-// direntDataSize calculates the serialized EROFS dirent data size for a directory.
-// For multi-block directories, this includes inter-block padding.
+// direntDataSize returns the serialized dirent data size for a directory,
+// computing it at most once per entry.
+//
+// Layout, trailing-size and inode serialization each need this value, and
+// several of them ask more than once. Recomputing means allocating and
+// sorting every name in the directory again, which is the single largest
+// cost of writing a wide tree. A directory always holds at least "." and
+// "..", so a zero cached value means "not computed yet".
 func (w *erofsWriter) direntDataSize(e *erofsEntry) int {
+	if e.direntSize == 0 {
+		e.direntSize = w.calcDirentDataSize(e)
+	}
+
+	return e.direntSize
+}
+
+// calcDirentDataSize calculates the serialized EROFS dirent data size for a
+// directory. For multi-block directories, this includes inter-block padding.
+func (w *erofsWriter) calcDirentDataSize(e *erofsEntry) int {
 	names := direntNames(e)
 	nEntries := len(names)
 	if len(e.children) == 0 {

@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"path"
 	"slices"
 	"sync"
@@ -155,6 +156,22 @@ func WithExtraDevices(devices ...io.ReaderAt) OpenOpt {
 // The ReaderAt must be a valid EROFS block file.
 // No additional memory mapping is done and must be handled by
 // the caller.
+//
+// Paths passed to the returned FS follow the [io/fs.FS] convention: unrooted
+// and slash-separated, with no ".", ".." or empty elements, using "." for the
+// root. Anything else yields a [io/fs.PathError] wrapping [io/fs.ErrInvalid].
+// One deliberate relaxation of [io/fs.ValidPath]: names need not be valid
+// UTF-8, because EROFS stores names as byte strings and an image may contain
+// entries that would otherwise be unreachable.
+//
+// Individual operations bound their own work, but the directory structure of
+// an image is not validated to be a tree. A corrupt or hostile image may
+// contain a directory that is reachable from itself, and a caller that walks
+// the whole tree — [io/fs.WalkDir], for instance, which has no cycle
+// detection for any [io/fs.FS] — will descend through such a cycle
+// indefinitely. Callers walking an image from an untrusted source should
+// impose their own depth or visit limit. [Writer.CopyFrom] does this
+// internally and rejects cyclic images.
 func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 	o := options{}
 	for _, opt := range opts {
@@ -173,6 +190,9 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 	i := image{
 		meta: r,
 	}
+	// Zero when neither the reader nor the superblock can say, in which case
+	// only representability is checked. See checkNid/chunkAddr/mapDev.
+	i.size, _ = imageSize(r)
 	if err = decodeSuperBlock(superBlock, &i.sb); err != nil {
 		return nil, err
 	}
@@ -209,9 +229,7 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 				return nil, fmt.Errorf("failed to read device slot %d at offset %d: %w", idx, offset, err)
 			}
 			var slot disk.DeviceSlot
-			if _, err := binary.Decode(slotBuf[:], binary.LittleEndian, &slot); err != nil {
-				return nil, fmt.Errorf("failed to decode device slot %d: %w", idx, err)
-			}
+			slot.Unmarshal(slotBuf[:])
 			i.devices[idx] = deviceInfo{
 				device:        o.extraDevices[idx],
 				mappedBlkAddr: slot.MappedBlkAddr,
@@ -225,6 +243,43 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 		i.sb.ComprAlgs != 0 {
 		return nil, fmt.Errorf("unsupported compressed filesystem (FeatureIncompat=0x%x, ComprAlgs=0x%x): %w",
 			i.sb.FeatureIncompat, i.sb.ComprAlgs, ErrNotImplemented)
+	}
+
+	// The superblock's geometry is untrusted, and every offset the reader
+	// computes derives from it. Bound it here, once, rather than leaving each
+	// read path to cope with a block address that points nowhere.
+	declared := int64(i.sb.Blocks) << i.sb.BlkSizeBits
+	if i.size > 0 {
+		if declared > i.size {
+			return nil, fmt.Errorf("superblock declares %d blocks (%d bytes) but the image is %d bytes: %w",
+				i.sb.Blocks, declared, i.size, ErrInvalidSuperblock)
+		}
+	} else {
+		// Fall back to the extent the image declares for itself. Untrusted
+		// too, but it is a ceiling — the kernel refuses blocks past it as
+		// well — and it is the only one available for a reader that cannot
+		// report its own length.
+		i.size = declared
+	}
+	if i.size > 0 {
+		if off := i.metaStartPos(); off < 0 || off >= i.size {
+			return nil, fmt.Errorf("metadata starts at %d, outside the %d byte image: %w",
+				off, i.size, ErrInvalidSuperblock)
+		}
+		if off := int64(i.sb.XattrBlkAddr) << i.sb.BlkSizeBits; off < 0 || off >= i.size {
+			return nil, fmt.Errorf("shared xattrs start at %d, outside the %d byte image: %w",
+				off, i.size, ErrInvalidSuperblock)
+		}
+	}
+	if err := i.checkNid(uint64(i.sb.RootNid)); err != nil {
+		return nil, fmt.Errorf("root %w", err)
+	}
+	// Zero means "same as the filesystem block size", which is what this
+	// writer emits. Any other disagreeing value would have dirents read at
+	// one granularity and written at another.
+	if i.sb.DirBlkBits != 0 && i.sb.DirBlkBits != i.sb.BlkSizeBits {
+		return nil, fmt.Errorf("directory block bits %d do not match block size bits %d: %w",
+			i.sb.DirBlkBits, i.sb.BlkSizeBits, ErrInvalidSuperblock)
 	}
 
 	i.blkPool.New = func() any {
@@ -263,6 +318,7 @@ type deviceInfo struct {
 type image struct {
 	sb disk.SuperBlock
 
+	size         int64 // readable image length, or 0 when unknown
 	meta         io.ReaderAt
 	devices      []deviceInfo // parsed device table entries
 	deviceIDMask uint16
@@ -275,6 +331,70 @@ type image struct {
 // start physical offset of the separate metadata zone
 func (img *image) metaStartPos() int64 {
 	return int64(img.sb.MetaBlkAddr) << int64(img.sb.BlkSizeBits)
+}
+
+// checkNid rejects a nid whose inode cannot lie inside the image.
+//
+// A nid is a byte offset from the metadata zone divided by 32, taken straight
+// from a dirent or the superblock. Every read path turns it back into an
+// absolute offset with metaStartPos + nid*32, which for a large nid wraps to a
+// negative int64 and is then handed to the caller's io.ReaderAt. *bytes.Reader
+// and *os.File report an error for that, but a slice-backed io.ReaderAt — a
+// shape callers commonly write — indexes with it and panics, and the value is
+// also exposed publicly as DataRange.Offset for MetadataOnly consumers to
+// pread against an external device.
+//
+// Validating here, where a nid enters from untrusted bytes, is what lets the
+// arithmetic downstream stay plain.
+func (img *image) checkNid(nid uint64) error {
+	// An extended inode is 64 bytes, so its last byte is at nid*32+63.
+	if nid > uint64(math.MaxInt64-disk.SizeInodeExtended)/disk.SizeInodeCompact {
+		return fmt.Errorf("nid %d is out of range: %w", nid, ErrInvalid)
+	}
+	off := img.metaStartPos() + int64(nid)*disk.SizeInodeCompact
+	if off < 0 || off > math.MaxInt64-disk.SizeInodeExtended {
+		return fmt.Errorf("nid %d is out of range: %w", nid, ErrInvalid)
+	}
+	if img.size > 0 && off+disk.SizeInodeCompact > img.size {
+		return fmt.Errorf("nid %d lies past the end of the %d byte image: %w", nid, img.size, ErrInvalid)
+	}
+
+	return nil
+}
+
+// chunkIndexFits reports whether a chunk-index map of needed bytes at off can
+// actually be present in the image.
+//
+// The map's size is derived from the inode's declared file size, and the
+// declared size is untrusted, so allocating a buffer for it before reading is
+// allocating on an attacker's say-so: an 8 KiB image can name a file whose
+// index map is maxChunkIndexBytes, and every Stat or DataRange call on it pays
+// that again. Checking the extent first turns the bound into something the
+// image has to back with real bytes.
+func (img *image) chunkIndexFits(off, needed int64) bool {
+	if needed < 0 || needed > maxChunkIndexBytes {
+		return false
+	}
+	if off < 0 || off > math.MaxInt64-needed {
+		return false
+	}
+
+	return img.size <= 0 || off+needed <= img.size
+}
+
+// chunkAddr converts a chunk-index physical block address into a byte offset.
+//
+// phys is assembled from two on-disk fields with no upper bound of their own,
+// and the shift is by up to BlkSizeBits (16), so the product overflows int64
+// and lands negative. Same exposure as checkNid: the value reaches the
+// caller's reader, and buildChunkDataRanges and openDirect — unlike readInfo —
+// have no recover() between it and the caller.
+func (img *image) chunkAddr(phys uint64) (int64, error) {
+	if phys > uint64(math.MaxInt64)>>img.sb.BlkSizeBits {
+		return 0, fmt.Errorf("chunk block address %d is out of range: %w", phys, ErrInvalid)
+	}
+
+	return int64(phys) << img.sb.BlkSizeBits, nil
 }
 
 // maxReadFileSize is the maximum file size that ReadFile will allocate.
@@ -309,6 +429,16 @@ func (img *image) mapDev(deviceID uint16, pa int64) (io.ReaderAt, int64, error) 
 		}
 	}
 
+	// Reads that land on the image itself can be bounded, and must be: a
+	// physical address comes straight off disk, and a wildly out-of-range one
+	// reaches the caller's io.ReaderAt untouched. *bytes.Reader and *os.File
+	// answer with an error, but a slice-backed reader indexes with it and
+	// panics — and unlike readInfo, neither loadBlock nor openDirect has a
+	// recover() in between. A device's extent is not knowable here.
+	if pa < 0 || (img.size > 0 && pa >= img.size) {
+		return nil, 0, fmt.Errorf("physical address %d is outside the image: %w", pa, ErrInvalid)
+	}
+
 	return img.meta, pa, nil
 }
 
@@ -332,11 +462,11 @@ func (img *image) deviceBlocks() []uint64 {
 	return blocks
 }
 
-// openDirect returns an io.Reader for a file's data that reads directly
-// from the underlying metadata reader, bypassing the block-at-a-time
-// Read path. Returns nil if direct reading is not possible (e.g.
-// chunk-based or compressed files).
-func (img *image) openDirect(ino *inode) io.Reader {
+// openDirect returns a reader covering a file's entire data range, so it can
+// be read in one go instead of a block at a time. Returns nil when the layout
+// cannot be expressed as one contiguous physical range: a sparse or fragmented
+// chunk file, a multi-block inline file, or a compressed one.
+func (img *image) openDirect(ino *inode) *io.SectionReader {
 	if ino.size <= 0 {
 		return nil
 	}
@@ -354,6 +484,13 @@ func (img *image) openDirect(ino *inode) io.Reader {
 		}
 		inodeAddr := img.metaStartPos() + int64(ino.nid)*disk.SizeInodeCompact
 		trailingAddr := inodeAddr + ino.flatDataOffset()
+		// Inline data lives in the inode's own block and cannot run past it —
+		// loadBlock rejects that outright. flatDataOffset folds in xsize,
+		// which i_xattr_icount drives up to 262148, so without the same check
+		// here a file's contents alias whatever follows its block.
+		if trailingAddr&(blockSize-1)+ino.size > blockSize {
+			return nil
+		}
 		return io.NewSectionReader(img.meta, trailingAddr, ino.size)
 	case disk.LayoutChunkBased:
 		// Chunk-based files store data at the physical block addresses
@@ -361,6 +498,11 @@ func (img *image) openDirect(ino *inode) io.Reader {
 		// the data is laid out consecutively and can be read directly.
 		chunkFmt := uint16(ino.inodeData)
 		if chunkFmt&disk.LayoutChunkFormatIndexes == 0 {
+			return nil
+		}
+		// Same format rules loadBlock applies. A fast path that accepts what
+		// the slow path rejects is how the two disagree about a file.
+		if chunkFmt&^(disk.LayoutChunkFormatBits|disk.LayoutChunkFormatIndexes) != 0 {
 			return nil
 		}
 		chunkBits := img.sb.BlkSizeBits + uint8(chunkFmt&disk.LayoutChunkFormatBits)
@@ -373,7 +515,7 @@ func (img *image) openDirect(ino *inode) io.Reader {
 			baseOffset = (baseOffset + 7) & ^int64(7)
 		}
 		needed := int64(nchunks) * int64(disk.SizeChunkIndex)
-		if needed > maxChunkIndexBytes {
+		if !img.chunkIndexFits(baseOffset, needed) {
 			return nil
 		}
 		idxBuf := make([]byte, needed)
@@ -390,9 +532,13 @@ func (img *image) openDirect(ino *inode) io.Reader {
 			if ^blkLo == 0 {
 				return nil // hole
 			}
-			blkHi := binary.LittleEndian.Uint16(idxBuf[off : off+2])
+			// The high half is the kernel's "advise" field unless the
+			// 48-bit format is declared, which is rejected above and
+			// unimplemented anyway. loadBlock has always read the address
+			// as 32-bit; folding these bits in here made the two paths
+			// return different bytes for the same chunk file.
 			did := binary.LittleEndian.Uint16(idxBuf[off+2:off+4]) & img.deviceIDMask
-			phys := (uint64(blkHi) << 32) | uint64(blkLo)
+			phys := uint64(blkLo)
 
 			blocksPerChunk := uint64(1 << (chunkBits - img.sb.BlkSizeBits))
 			if i == 0 {
@@ -406,12 +552,18 @@ func (img *image) openDirect(ino *inode) io.Reader {
 			}
 		}
 
-		// All chunks contiguous — resolve through the device.
-		dataOffset := int64(startBlock) << img.sb.BlkSizeBits
-		if deviceID > 0 && int(deviceID) <= len(img.devices) {
-			return io.NewSectionReader(img.devices[deviceID-1].device, dataOffset, ino.size)
+		// All chunks contiguous — resolve through the device, using the same
+		// mapping loadBlock applies so both paths agree on where data lives.
+		dataOffset, err := img.chunkAddr(startBlock)
+		if err != nil {
+			return nil
 		}
-		return io.NewSectionReader(img.meta, dataOffset, ino.size)
+		reader, mapped, err := img.mapDev(deviceID, dataOffset)
+		if err != nil {
+			return nil
+		}
+
+		return io.NewSectionReader(reader, mapped, ino.size)
 	default:
 		return nil
 	}
@@ -533,20 +685,35 @@ func (img *image) getLongPrefix(index uint8) (string, error) {
 	return img.longPrefixes[index], nil
 }
 
+// loadAt reads up to size bytes at addr, capped at one filesystem block.
+//
+// A short read at the end of the image is not an error. Callers ask for a
+// whole block even when the structure they want is smaller, so a structure
+// living in the final block would otherwise be unreadable purely because the
+// block-aligned read runs past the end of the file. That is the normal shape
+// of a shared xattr area, which mkfs.erofs places in the last block of small
+// images. Every caller bounds its parsing by the returned length.
 func (img *image) loadAt(addr, size int64) (*block, error) {
 	blkSize := int64(1 << img.sb.BlkSizeBits)
 	if size > blkSize {
 		size = blkSize
 	}
+	if size <= 0 {
+		return nil, fmt.Errorf("failed to read %d bytes at %d: %w", size, addr, ErrInvalid)
+	}
 
 	b := img.getBlock()
-	if n, err := img.meta.ReadAt(b.buf[:size], addr); err != nil {
+	n, err := img.meta.ReadAt(b.buf[:size], addr)
+	if err != nil && !errors.Is(err, io.EOF) {
 		img.putBlock(b)
 		return nil, fmt.Errorf("failed to read %d bytes at %d: %w", size, addr, err)
-	} else {
-		b.offset = 0
-		b.end = int32(n)
 	}
+	if n <= 0 {
+		img.putBlock(b)
+		return nil, fmt.Errorf("failed to read %d bytes at %d: %w", size, addr, io.EOF)
+	}
+	b.offset = 0
+	b.end = int32(n)
 
 	return b, nil
 }
@@ -638,13 +805,16 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 
 		var addr int64
 		var deviceID uint16
+		var err error
 
 		if unit == 8 {
 			startBlkLo := binary.LittleEndian.Uint32(entryBuf[4:8])
 			if ^startBlkLo == 0 {
 				addr = -1
 			} else {
-				addr = int64(startBlkLo) << img.sb.BlkSizeBits
+				if addr, err = img.chunkAddr(uint64(startBlkLo)); err != nil {
+					return nil, err
+				}
 				deviceID = binary.LittleEndian.Uint16(entryBuf[2:4]) & img.deviceIDMask
 			}
 		} else {
@@ -652,7 +822,9 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 			if ^rawAddr == 0 {
 				addr = -1
 			} else {
-				addr = int64(rawAddr) << img.sb.BlkSizeBits
+				if addr, err = img.chunkAddr(uint64(rawAddr)); err != nil {
+					return nil, err
+				}
 			}
 		}
 
@@ -661,13 +833,21 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 		}
 		blockOffset = int(pos % int64(blockSize))
 
+		// Ahead of the hole branch: those bounds are plain arithmetic over
+		// untrusted sizes too, and a hole used to hand them back unchecked as
+		// the block's offset and end.
+		if blockOffset < 0 || blockEnd > blockSize || blockOffset >= blockEnd {
+			return nil, fmt.Errorf("invalid chunk block bounds [%d:%d] for nid %d: %w", blockOffset, blockEnd, fi.nid, ErrInvalid)
+		}
+
 		if addr == -1 {
-			// Null address, return new zero filled block
-			return &block{
-				buf:    make([]byte, 1<<img.sb.BlkSizeBits),
-				offset: int32(blockOffset),
-				end:    int32(blockEnd),
-			}, nil
+			// Null address: a hole, which reads as zeros.
+			b := img.getBlock()
+			clear(b.buf[blockOffset:blockEnd])
+			b.offset = int32(blockOffset)
+			b.end = int32(blockEnd)
+
+			return b, nil
 		}
 
 		// Add block offset within chunk
@@ -681,10 +861,6 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 			return nil, fmt.Errorf("failed to map device for nid %d: %w", fi.nid, err)
 		}
 		addr = mappedAddr
-
-		if blockOffset < 0 || blockEnd > blockSize || blockOffset >= blockEnd {
-			return nil, fmt.Errorf("invalid chunk block bounds [%d:%d] for nid %d: %w", blockOffset, blockEnd, fi.nid, ErrInvalid)
-		}
 		b := img.getBlock()
 		if n, err := reader.ReadAt(b.buf[blockOffset:blockEnd], addr+int64(blockOffset)); err != nil {
 			img.putBlock(b)
@@ -734,6 +910,22 @@ const maxSymlinks = 255
 // Linux PATH_MAX is 4096; we use the same limit.
 const maxSymlinkSize = 4096
 
+// maxResolveComponents bounds the total number of path components a single
+// resolve may walk, summed across every symlink hop.
+//
+// maxSymlinks bounds the number of hops but not the work done per hop: each
+// hop restarts the walk from the root over curPath + "/" + target, where
+// curPath is the entire prefix already walked. A directory that is reachable
+// from itself lets the path grow by the target's length on every hop, so the
+// total work is quadratic in the accumulated length — an 8 KiB image drove
+// 13 million reads and 16 seconds of CPU through a single Open.
+//
+// A path holds at most maxSymlinkSize/2 components (PATH_MAX bytes, and no
+// component occupies fewer than two bytes with its separator), and a
+// legitimate resolution walks no more than one whole path per hop. The budget
+// is that product, so nothing a real filesystem can express is refused.
+const maxResolveComponents = maxSymlinks * (maxSymlinkSize / 2)
+
 // readLink reads the symlink target for the given nid.
 func (i *image) readLink(nid uint64, name string) (string, error) {
 	f := &file{img: i, name: name, nid: nid, ftype: fs.ModeSymlink}
@@ -741,28 +933,104 @@ func (i *image) readLink(nid uint64, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// An empty target is not a valid symlink: POSIX rejects symlink(""), so
+	// the kernel never produces one. It cannot be resolved either — resolve
+	// folds it away with path.Clean and restarts the walk at the root, so a
+	// path *through* such a link would silently drop everything to its left
+	// and serve an unrelated file.
+	if fi.size == 0 {
+		return "", fmt.Errorf("empty symlink target: %w", ErrInvalid)
+	}
 	if fi.size < 0 || fi.size > maxSymlinkSize {
 		return "", fmt.Errorf("symlink target size %d out of range: %w", fi.size, ErrInvalid)
 	}
 	buf := make([]byte, fi.size)
-	if fi.size > 0 {
-		if _, err = f.Read(buf); err != nil && err != io.EOF {
-			return "", err
-		}
+	if err := readAll(f, buf); err != nil {
+		return "", err
 	}
 	return string(buf), nil
 }
 
-// resolve cleans the path and walks directory entries to find the target inode.
+// validPath reports whether name is acceptable as a path for this FS.
+//
+// It applies [io/fs.ValidPath]'s structural rules — unrooted, slash-separated,
+// with no empty, "." or ".." elements — but not its requirement that the name
+// be valid UTF-8. EROFS stores names as byte strings, exactly as Linux does,
+// so an image can legitimately hold names that are not UTF-8; refusing to open
+// those would hide entries that really are in the image, and this package can
+// write them. Everything fs.FS relies on for containment is structural, so
+// omitting the UTF-8 rule gives nothing away.
+func validPath(name string) bool {
+	if name == "." {
+		return true
+	}
+	for {
+		i := 0
+		for i < len(name) && name[i] != '/' {
+			i++
+		}
+		elem := name[:i]
+		if elem == "" || elem == "." || elem == ".." {
+			return false
+		}
+		if i == len(name) {
+			return true
+		}
+		name = name[i+1:]
+	}
+}
+
+// checkDirentName rejects a dirent name that cannot serve as a path element.
+//
+// EROFS stores names as raw bytes and the on-disk format constrains only their
+// length, so an image is free to name an entry "../../etc/passwd" or to embed
+// a NUL. [io/fs.DirEntry.Name] is contractually a base name, and the standard
+// way to extract a tree — [io/fs.WalkDir] plus filepath.Join — writes outside
+// the destination directory the moment a name carries separators.
+//
+// "." and "..", the directory's own self and parent entries, are legitimate
+// on disk; callers filter them by name rather than treating them as errors.
+func checkDirentName(name []byte) error {
+	if bytes.ContainsRune(name, '/') {
+		return fmt.Errorf("dirent name %q contains a path separator: %w", name, ErrInvalid)
+	}
+	if bytes.ContainsRune(name, 0) {
+		return fmt.Errorf("dirent name %q contains a NUL: %w", name, ErrInvalid)
+	}
+
+	return nil
+}
+
+// resolve walks directory entries to find the target inode.
 // When follow is true, symlinks are followed (including the final component).
 // When follow is false, the final component is not followed (for Lstat/ReadLink).
 // Intermediate symlinks are always followed.
+//
+// name must satisfy [validPath]. Rejecting up front is what the [io/fs.FS]
+// contract requires, and it is what keeps ".." from walking out of a subtree.
+//
+// That applies to the path a caller writes, not to where a symlink leads. A
+// symlink target is resolved from the image root, so a link inside a subtree
+// can name anything in the image and [io/fs.Sub] is not a containment
+// boundary: fs.ReadFile(sub, "escape") serves whatever "escape" points at,
+// even though fs.ReadFile(sub, "../outside") is refused. io/fs does not
+// promise otherwise, and neither does a kernel mount. A caller that needs
+// containment has to walk with Lstat and refuse symlinks itself.
 func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.FileMode, basename string, err error) {
 	original := name
-	if path.IsAbs(name) {
-		name = name[1:]
+	if !validPath(name) {
+		return 0, 0, "", &fs.PathError{Op: op, Path: name, Err: fs.ErrInvalid}
 	}
-	name = path.Clean(name)
+	// PATH_MAX, as Linux applies it. A longer name cannot match anything this
+	// writer or mkfs.erofs is able to put in an image, and accepting one is
+	// the other half of the work bound: curPath is rebuilt by concatenation
+	// per component, so the walk costs O(len(name)^2) in copying alone. A
+	// caller walking a cyclic image generates exactly these names — fs.WalkDir
+	// joins dirent names without any depth limit of its own.
+	if len(name) > maxPathLen {
+		return 0, 0, "", &fs.PathError{Op: op, Path: name, Err: fmt.Errorf(
+			"path is %d bytes, over the %d byte limit: %w", len(name), maxPathLen, ErrInvalid)}
+	}
 	if name == "." {
 		name = ""
 	}
@@ -773,9 +1041,18 @@ func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.File
 	// curPath tracks the full resolved path of the current directory
 	// so that relative symlink targets can be resolved correctly.
 	linksFollowed := 0
+	components := 0
 	curPath := ""
 	basename = name
 	for name != "" {
+		// Bound the total walk, not just the number of hops: see
+		// maxResolveComponents. Exhausting it means the image is cyclic,
+		// which is what ErrLoop reports.
+		components++
+		if components > maxResolveComponents {
+			return 0, 0, "", &fs.PathError{Op: op, Path: original, Err: ErrLoop}
+		}
+
 		var sep int
 		for sep < len(name) && name[sep] != '/' {
 			sep++
@@ -817,7 +1094,7 @@ func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.File
 			}
 			target, err := i.readLink(nid, basename)
 			if err != nil {
-				return 0, 0, "", err
+				return 0, 0, "", &fs.PathError{Op: op, Path: original, Err: err}
 			}
 			// Prepend the symlink target to the remaining path
 			if rest != "" {
@@ -829,8 +1106,27 @@ func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.File
 			}
 			// Clean and re-resolve from root
 			target = path.Clean(target)
+			// Checked after Clean, so a "../" target walking back out of a
+			// deep prefix is judged on what it actually resolves to. Linux
+			// reports ENAMETOOLONG for a composed path over PATH_MAX; here it
+			// is also what stops the path growing without bound each hop.
+			if len(target) > maxPathLen {
+				return 0, 0, "", &fs.PathError{Op: op, Path: original, Err: fmt.Errorf(
+					"resolved path is %d bytes, over the %d byte limit: %w",
+					len(target), maxPathLen, ErrInvalid)}
+			}
 			if len(target) > 0 && target[0] == '/' {
 				target = target[1:]
+			}
+			// validPath was applied to the caller's name, not to this. A
+			// target that walks above the root leaves residual ".." that
+			// path.Clean cannot fold away, and the walk would then look for
+			// literal ".." dirents — which an image is free to provide. Note
+			// this restores the structural rule, not containment within a
+			// subtree: see the fs.Sub caveat on Open.
+			if target != "" && !validPath(target) {
+				return 0, 0, "", &fs.PathError{Op: op, Path: original, Err: fmt.Errorf(
+					"symlink resolves to %q, which is not a valid path: %w", target, ErrInvalid)}
 			}
 			nid = uint64(i.sb.RootNid)
 			ftype = fs.ModeDir
@@ -898,12 +1194,33 @@ func (i *image) ReadFile(name string) ([]byte, error) {
 		return nil, fmt.Errorf("file size %d exceeds ReadFile limit %d; use Open and io.Copy for large files: %w", fi.size, int64(maxReadFileSize), ErrInvalid)
 	}
 	buf := make([]byte, fi.size)
-	if fi.size > 0 {
-		if _, err = f.Read(buf); err != nil && err != io.EOF {
-			return nil, err
-		}
+	if err := readAll(f, buf); err != nil {
+		return nil, &fs.PathError{Op: "read", Path: name, Err: err}
 	}
 	return buf, nil
+}
+
+// readAll fills buf, treating a short read as corruption rather than as a
+// hole to pad with zeros.
+//
+// file.Read only clears io.EOF when it filled the buffer, so a file whose data
+// range runs past the end of the image returns (partial, io.EOF). Callers that
+// waved io.EOF through therefore handed back a zero-padded buffer and a nil
+// error, which is the worst possible answer: a consumer validating a config or
+// a manifest sees attacker-chosen zeros where it should see a failure.
+func readAll(f *file, buf []byte) error {
+	if len(buf) == 0 {
+		return nil
+	}
+	if _, err := io.ReadFull(f, buf); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("data ends before the declared size of %d bytes: %w", len(buf), ErrInvalid)
+		}
+
+		return err
+	}
+
+	return nil
 }
 
 func (i *image) ReadDir(name string) ([]fs.DirEntry, error) {
@@ -919,9 +1236,14 @@ func (i *image) ReadDir(name string) ([]fs.DirEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	slices.SortFunc(entries, func(a, b fs.DirEntry) int {
-		return cmp.Compare(a.Name(), b.Name())
-	})
+	// EROFS keeps dirents sorted within a block — dir.lookup's binary search
+	// depends on it — so for a well-formed image this only has to confirm the
+	// order, not establish it. A hostile image may not be sorted, and
+	// fs.ReadDir's contract says sorted, so the sort still has to be here.
+	byName := func(a, b fs.DirEntry) int { return cmp.Compare(a.Name(), b.Name()) }
+	if !slices.IsSortedFunc(entries, byName) {
+		slices.SortFunc(entries, byName)
+	}
 	return entries, nil
 }
 
@@ -954,11 +1276,35 @@ type file struct {
 	// Mutable fields, open file should not be accessed concurrently
 	offset int64  // current offset for read operations
 	info   *inode // cached inode
+
+	// direct serves reads straight from the backing device when the file's
+	// data is one contiguous range. Resolved once and memoized, including
+	// the nil answer: for chunk-based files openDirect reads the chunk index
+	// to prove contiguity, which must not happen on every Read.
+	direct        *io.SectionReader
+	directChecked bool
+}
+
+// directReader returns a whole-file reader when the layout allows one.
+func (b *file) directReader(ino *inode) *io.SectionReader {
+	if !b.directChecked {
+		b.directChecked = true
+		b.direct = b.img.openDirect(ino)
+	}
+
+	return b.direct
 }
 
 func (b *file) readInfo() (ino *inode, err error) {
 	if b.info != nil {
 		return b.info, nil
+	}
+
+	// Every read path — loadBlock, openDirect, buildChunkDataRanges, the xattr
+	// area — derives its offsets from an *inode this returns, so bounding the
+	// nid here is what keeps all of that arithmetic in range.
+	if err := b.img.checkNid(b.nid); err != nil {
+		return nil, err
 	}
 
 	addr := b.img.metaStartPos() + int64(b.nid*disk.SizeInodeCompact)
@@ -973,34 +1319,37 @@ func (b *file) readInfo() (ino *inode, err error) {
 		blk.end = disk.SizeInodeExtended
 	}
 
+	// The block is scratch space for decoding: nothing in the returned inode
+	// points into it, so it always goes straight back to the pool. Deferring
+	// the put before the recover keeps it to exactly one, panic or not.
+	defer b.img.putBlock(blk)
 	defer func() {
-		v := recover()
-		if v != nil {
+		if v := recover(); v != nil {
 			err = fmt.Errorf("file format error: %v", v)
 		}
-		if err != nil {
-			b.img.putBlock(blk)
-		}
-
 	}()
 
 	buf := blk.bytes()
-	_, err = b.img.meta.ReadAt(buf, addr)
-	if err != nil {
+	// A compact inode needs only 32 bytes; the buffer is sized for an extended
+	// inode (64) because the layout is unknown until the format word is read. An
+	// inode living in the final bytes of the image therefore yields a short read
+	// that must not be fatal, exactly as loadAt tolerates for other structures.
+	n, err := b.img.meta.ReadAt(buf, addr)
+	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
+	buf = buf[:n]
 
-	var format, xcnt uint16
-	if _, err = binary.Decode(buf[:2], binary.LittleEndian, &format); err != nil {
-		return nil, err
+	if len(buf) < disk.SizeInodeCompact {
+		return nil, fmt.Errorf("inode %d truncated: %w", b.nid, ErrInvalid)
 	}
+	var xcnt uint16
+	format := binary.LittleEndian.Uint16(buf[:2])
 
 	layout := uint8((format & 0x0E) >> 1)
 	if format&0x01 == 0 {
 		var di disk.InodeCompact
-		if _, err := binary.Decode(buf[:disk.SizeInodeCompact], binary.LittleEndian, &di); err != nil {
-			return nil, err
-		}
+		di.Unmarshal(buf)
 		b.info = &inode{
 			name:        b.name,
 			nid:         b.nid,
@@ -1008,7 +1357,7 @@ func (b *file) readInfo() (ino *inode, err error) {
 			inodeLayout: layout,
 			inodeData:   di.InodeData,
 			size:        int64(di.Size),
-			mode:        (disk.EroFSModeToGoFileMode(di.Mode) & ^fs.ModeType) | b.ftype,
+			mode:        disk.EroFSModeToGoFileMode(di.Mode),
 			rawMode:     di.Mode,
 			uid:         uint32(di.UID),
 			gid:         uint32(di.GID),
@@ -1018,10 +1367,11 @@ func (b *file) readInfo() (ino *inode, err error) {
 		}
 		xcnt = di.XattrCount
 	} else {
-		var di disk.InodeExtended
-		if _, err = binary.Decode(buf[:disk.SizeInodeExtended], binary.LittleEndian, &di); err != nil {
-			return nil, err
+		if len(buf) < disk.SizeInodeExtended {
+			return nil, fmt.Errorf("extended inode %d truncated: %w", b.nid, ErrInvalid)
 		}
+		var di disk.InodeExtended
+		di.Unmarshal(buf)
 		b.info = &inode{
 			name:        b.name,
 			nid:         b.nid,
@@ -1029,7 +1379,7 @@ func (b *file) readInfo() (ino *inode, err error) {
 			inodeLayout: layout,
 			inodeData:   di.InodeData,
 			size:        int64(di.Size),
-			mode:        (disk.EroFSModeToGoFileMode(di.Mode) & ^fs.ModeType) | b.ftype,
+			mode:        disk.EroFSModeToGoFileMode(di.Mode),
 			rawMode:     di.Mode,
 			uid:         di.UID,
 			gid:         di.GID,
@@ -1040,23 +1390,40 @@ func (b *file) readInfo() (ino *inode, err error) {
 		xcnt = di.XattrCount
 	}
 
+	// The dirent's file type and the inode's i_mode are two independent
+	// on-disk fields, and the mode above used to take its type bits from the
+	// dirent while Stat took them from the inode — so a consumer testing
+	// fi.Mode()&fs.ModeSymlink and one testing Sys().(*Stat).Mode could reach
+	// opposite conclusions about the same file. Both now come from the inode,
+	// and a dirent that disagrees is an error rather than a silent override.
+	// i_size is unsigned on disk and int64 here. Internal callers guard for a
+	// negative value, but fs.FileInfo.Size is public and a consumer sizing a
+	// buffer from it would panic. It is deliberately not bounded by the image
+	// length: a metadata-only image is far smaller than the files it
+	// describes, whose data lives on an external device.
+	if b.info.size < 0 {
+		size := b.info.size
+		b.info = nil
+
+		return nil, fmt.Errorf("inode %d declares a size of %d bytes: %w", b.nid, size, ErrInvalid)
+	}
+
+	if inoType := b.info.mode.Type(); b.ftype != inoType {
+		b.info = nil
+
+		return nil, fmt.Errorf("inode %d has type %v but its dirent says %v: %w",
+			b.nid, inoType, b.ftype, ErrInvalid)
+	}
+
 	if xcnt > 0 {
 		b.info.xsize = int(xcnt-1)*disk.SizeXattrEntry + disk.SizeXattrBodyHeader
 	}
 
-	switch {
-	case b.info.inodeLayout == disk.LayoutFlatPlain || b.info.size == 0 || blk.end != blkSize:
-		b.img.putBlock(blk)
-	default:
-		// If the inode has trailing data used later, cache it
-		b.info.cached = blk
-	}
 	return b.info, nil
 }
 
 // statInfo reads the inode and builds a fileInfo with full stat data
-// including extended attributes. The cached block is released since
-// stat callers do not need inline data.
+// including extended attributes.
 func (b *file) statInfo() (*fileInfo, error) {
 	ino, err := b.readInfo()
 	if err != nil {
@@ -1068,7 +1435,7 @@ func (b *file) statInfo() (*fileInfo, error) {
 		mode:    ino.mode,
 		mtime:   ino.mtime,
 		mtimeNs: ino.mtimeNs,
-		stat: &Stat{
+		stat: Stat{
 			Mode:        disk.EroFSModeToGoFileMode(ino.rawMode),
 			Size:        ino.size,
 			InodeLayout: ino.inodeLayout,
@@ -1082,7 +1449,7 @@ func (b *file) statInfo() (*fileInfo, error) {
 		},
 	}
 	if ino.xsize > 0 {
-		if err := loadXattrs(b, fi.stat); err != nil {
+		if err := loadXattrs(b, &fi.stat); err != nil {
 			return nil, err
 		}
 	}
@@ -1092,52 +1459,45 @@ func (b *file) statInfo() (*fileInfo, error) {
 	if ino.mode.IsRegular() && ino.size > 0 {
 		if ino.inodeLayout == disk.LayoutChunkBased {
 			// Capture a snapshot of the fields buildChunkDataRanges needs.
-			// We must not capture ino by pointer: the caller may reuse it,
-			// and cached block is released below.
+			// We must not capture ino by pointer: the caller may reuse it.
 			inoCopy := *ino
-			inoCopy.cached = nil
 			img := b.img
 			fi.rangesLoader = func() []DataRange {
 				f := &file{img: img}
 				return f.buildChunkDataRanges(&inoCopy)
 			}
 		} else {
-			fi.dataRanges = b.buildDataRanges(ino)
+			fi.dataRanges = b.buildDataRanges(ino, fi.rangeBuf[:0])
 		}
-	}
-	// Release cached block - stat callers don't need inline data
-	if ino.cached != nil {
-		b.img.putBlock(ino.cached)
-		ino.cached = nil
 	}
 	return fi, nil
 }
 
 // buildDataRanges computes the physical data ranges for a regular file.
-func (b *file) buildDataRanges(ino *inode) []DataRange {
+// buildDataRanges appends the file's ranges to dst, which lets a flat layout —
+// at most two ranges — be backed by the caller's own storage.
+func (b *file) buildDataRanges(ino *inode, dst []DataRange) []DataRange {
 	blockSize := int64(1 << b.img.sb.BlkSizeBits)
 	switch ino.inodeLayout {
 	case disk.LayoutFlatPlain:
 		dataOffset := int64(ino.inodeData) << b.img.sb.BlkSizeBits
-		return []DataRange{{Device: 0, Offset: dataOffset, Size: ino.size}}
+		return append(dst, DataRange{Device: 0, Offset: dataOffset, Size: ino.size})
 	case disk.LayoutFlatInline:
 		inodeAddr := b.img.metaStartPos() + int64(ino.nid)*disk.SizeInodeCompact
 		trailingAddr := inodeAddr + ino.flatDataOffset()
 		if ino.size <= blockSize {
-			return []DataRange{{Device: 0, Offset: trailingAddr, Size: ino.size}}
+			return append(dst, DataRange{Device: 0, Offset: trailingAddr, Size: ino.size})
 		}
 		// Multi-block inline: earlier full blocks at dataBlkAddr, last block inline.
 		// headSize is the number of complete blocks before the inline tail, in bytes.
 		// ino.inodeData is the starting block address, not a block count.
 		headSize := ((ino.size - 1) / blockSize) * blockSize
 		tailSize := ino.size - headSize
-		var ranges []DataRange
 		if headSize > 0 {
 			dataOffset := int64(ino.inodeData) << b.img.sb.BlkSizeBits
-			ranges = append(ranges, DataRange{Device: 0, Offset: dataOffset, Size: headSize})
+			dst = append(dst, DataRange{Device: 0, Offset: dataOffset, Size: headSize})
 		}
-		ranges = append(ranges, DataRange{Device: 0, Offset: trailingAddr, Size: tailSize})
-		return ranges
+		return append(dst, DataRange{Device: 0, Offset: trailingAddr, Size: tailSize})
 	case disk.LayoutChunkBased:
 		return b.buildChunkDataRanges(ino)
 	}
@@ -1181,7 +1541,7 @@ func (b *file) buildChunkDataRanges(ino *inode) []DataRange {
 		baseOffset = (baseOffset + 7) & ^int64(7)
 	}
 	needed := int64(nchunks) * int64(disk.SizeChunkIndex)
-	if needed > maxChunkIndexBytes {
+	if !b.img.chunkIndexFits(baseOffset, needed) {
 		return nil
 	}
 	idxBuf := make([]byte, needed)
@@ -1209,10 +1569,16 @@ func (b *file) buildChunkDataRanges(ino *inode) []DataRange {
 			continue
 		}
 
-		blkHi := binary.LittleEndian.Uint16(idxBuf[off : off+2])
+		// 32-bit addressing only; see openDirect.
 		deviceID := binary.LittleEndian.Uint16(idxBuf[off+2:off+4]) & b.img.deviceIDMask
-		phys := (uint64(blkHi) << 32) | uint64(blkLo)
-		byteOffset := int64(phys) << b.img.sb.BlkSizeBits
+		phys := uint64(blkLo)
+		// DataRange.Offset is public: a MetadataOnly consumer preads it
+		// against an external device, so an unrepresentable address must not
+		// reach it. Unlike readInfo, nothing here has a recover().
+		byteOffset, err := b.img.chunkAddr(phys)
+		if err != nil {
+			return nil
+		}
 
 		// Merge with the previous entry if it is a data range that is
 		// physically contiguous on the same device.
@@ -1238,6 +1604,27 @@ func (b *file) Read(p []byte) (int, error) {
 		return 0, err
 	}
 
+	// Whole-file fast path. The block loop below issues one ReadAt per
+	// filesystem block no matter how much the caller asked for, which for a
+	// large file means thousands of round trips to serve a single Read.
+	if sr := b.directReader(fi); sr != nil {
+		if b.offset >= fi.size {
+			return 0, io.EOF
+		}
+		if remaining := fi.size - b.offset; int64(len(p)) > remaining {
+			p = p[:remaining]
+		}
+		// ReadAt fills p completely or reports why not, which preserves the
+		// block loop's guarantee that a single Read fills the buffer.
+		n, err := sr.ReadAt(p, b.offset)
+		b.offset += int64(n)
+		if errors.Is(err, io.EOF) && n == len(p) {
+			err = nil
+		}
+
+		return n, err
+	}
+
 	var n int
 	for len(p) > 0 {
 		if b.offset >= fi.size {
@@ -1246,8 +1633,8 @@ func (b *file) Read(p []byte) (int, error) {
 		blk, err := b.img.loadBlock(fi, b.offset)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
+				// b.offset already advanced by each block copied above.
 				err = io.EOF
-				b.offset += int64(n)
 			}
 			return n, err
 		}
@@ -1262,11 +1649,51 @@ func (b *file) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func (b *file) Close() error {
-	if b.info != nil && b.info.cached != nil {
-		b.img.putBlock(b.info.cached)
-		b.info.cached = nil
+// WriteTo streams the rest of the file to w.
+//
+// Implementing io.WriterTo lets io.Copy hand the whole range to the
+// destination at once instead of shuttling it through a fixed-size
+// intermediate buffer, which is what makes extracting a file cost a handful
+// of reads rather than one per buffer's worth.
+func (b *file) WriteTo(w io.Writer) (int64, error) {
+	fi, err := b.readInfo()
+	if err != nil {
+		return 0, err
 	}
+	if b.offset >= fi.size {
+		return 0, nil
+	}
+
+	if sr := b.directReader(fi); sr != nil {
+		n, err := io.Copy(w, io.NewSectionReader(sr, b.offset, fi.size-b.offset))
+		b.offset += n
+
+		return n, err
+	}
+
+	var total int64
+	for b.offset < fi.size {
+		blk, err := b.img.loadBlock(fi, b.offset)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return total, nil
+			}
+
+			return total, err
+		}
+		nw, werr := w.Write(blk.bytes())
+		b.img.putBlock(blk)
+		total += int64(nw)
+		b.offset += int64(nw)
+		if werr != nil {
+			return total, werr
+		}
+	}
+
+	return total, nil
+}
+
+func (b *file) Close() error {
 	return nil
 }
 
@@ -1324,15 +1751,7 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 
 		var dirents [2]disk.Dirent
 
-		readN, err := binary.Decode(buf[:12], binary.LittleEndian, &dirents[0])
-		if err != nil {
-			d.img.putBlock(b)
-			return nil, fmt.Errorf("decode failed: %w", err)
-		}
-		if readN != 12 {
-			d.img.putBlock(b)
-			return nil, errors.New("invalid dirent: not fully decoded")
-		}
+		dirents[0].Unmarshal(buf)
 
 		entryN := dirents[0].NameOff / disk.SizeDirent
 		bufLen := len(buf)
@@ -1343,51 +1762,83 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 			return ents, fmt.Errorf("invalid dirent name offset %d (buf size %d): %w", dirents[0].NameOff, bufLen, ErrInvalid)
 		}
 
-		for i := uint16(0); i < entryN; i++ {
-			var name string
-			if i < entryN-1 {
+		// The names occupy one contiguous region running from the first
+		// entry's name offset to the end of the block. Converting it once and
+		// sub-slicing per entry costs one allocation for the block rather than
+		// one per entry: a Go substring shares its parent's backing array.
+		nameBase := int(dirents[0].NameOff)
+		names := string(buf[nameBase:])
+
+		// Likewise one slab for the block's entries. It has to be sized up
+		// front and indexed: appending would move earlier elements and
+		// invalidate the pointers already handed out. Sized to what this call
+		// can still return — entries before d.consumed were handed out by an
+		// earlier call, and n bounds the rest — so a caller paginating with a
+		// small n does not pay for the whole block on every call.
+		want := int(entryN) - int(d.consumed)
+		if want < 0 {
+			want = 0
+		}
+		if n > 0 && n < want {
+			want = n
+		}
+		batch := make([]direntry, want)
+		used := 0
+
+		for i := range entryN {
+			// Name bounds within buf, so the check runs on the block's own
+			// bytes and only the surviving name is materialized.
+			lo, hi := int(dirents[0].NameOff), bufLen
+			switch {
+			case i < entryN-1:
 				start := int(disk.SizeDirent) * (int(i) + 1)
 				if start+int(disk.SizeDirent) > bufLen {
 					d.img.putBlock(b)
 					return ents, fmt.Errorf("dirent entry %d exceeds block: %w", i+1, ErrInvalid)
 				}
-				readN, err := binary.Decode(buf[start:start+int(disk.SizeDirent)], binary.LittleEndian, &dirents[1])
-				if err != nil {
-					d.img.putBlock(b)
-					return nil, fmt.Errorf("decode failed: %w", err)
-				}
-				if readN != 12 {
-					d.img.putBlock(b)
-					return nil, errors.New("invalid dirent: not fully decoded")
-				}
+				dirents[1].Unmarshal(buf[start:])
 				if int(dirents[0].NameOff) > bufLen || int(dirents[1].NameOff) > bufLen || dirents[1].NameOff < dirents[0].NameOff {
 					d.img.putBlock(b)
 					return ents, fmt.Errorf("invalid dirent name offset range [%d:%d] (buf size %d): %w",
 						dirents[0].NameOff, dirents[1].NameOff, bufLen, ErrInvalid)
 				}
-				name = string(buf[dirents[0].NameOff:dirents[1].NameOff])
-			} else {
-				if int(dirents[0].NameOff) > bufLen {
-					d.img.putBlock(b)
-					return ents, fmt.Errorf("invalid dirent name offset %d (buf size %d): %w", dirents[0].NameOff, bufLen, ErrInvalid)
+				hi = int(dirents[1].NameOff)
+			case lo > bufLen:
+				d.img.putBlock(b)
+				return ents, fmt.Errorf("invalid dirent name offset %d (buf size %d): %w", dirents[0].NameOff, bufLen, ErrInvalid)
+			default:
+				// The last entry's name runs to the end of the block, with
+				// any NUL padding trimmed.
+				if j := bytes.IndexByte(buf[lo:], 0); j >= 0 {
+					hi = lo + j
 				}
-				// The last entry name extends to end of block;
-				// trim any NUL padding.
-				raw := buf[dirents[0].NameOff:]
-				if j := bytes.IndexByte(raw, 0); j >= 0 {
-					raw = raw[:j]
-				}
-				name = string(raw)
+			}
+			// Offsets ascend from the first, so this cannot go negative for a
+			// block that passed the checks above — but it is one subtraction
+			// away from indexing outside names if that ever changes.
+			if lo < nameBase {
+				d.img.putBlock(b)
+				return ents, fmt.Errorf("dirent %d name offset %d precedes the name region at %d: %w",
+					i, lo, nameBase, ErrInvalid)
 			}
 
+			if err := checkDirentName(buf[lo:hi]); err != nil {
+				d.img.putBlock(b)
+
+				return ents, err
+			}
+			name := names[lo-nameBase : hi-nameBase]
+
 			if i >= d.consumed && name != "." && name != ".." {
-				f := file{
+				e := &batch[used]
+				used++
+				e.file = file{
 					img:   d.img,
 					name:  name,
 					nid:   dirents[0].Nid,
 					ftype: disk.EroFSFtypeToFileMode(dirents[0].FileType),
 				}
-				ents = append(ents, &direntry{f})
+				ents = append(ents, e)
 				d.consumed = i + 1
 
 				if n > 0 && len(ents) == n {
@@ -1497,64 +1948,68 @@ func blockFirstName(buf []byte) ([]byte, error) {
 		return nil, fmt.Errorf("directory block too small: %w", ErrInvalid)
 	}
 	var first disk.Dirent
-	if _, err := binary.Decode(buf[:disk.SizeDirent], binary.LittleEndian, &first); err != nil {
-		return nil, fmt.Errorf("decode failed: %w", err)
+	first.Unmarshal(buf)
+	nameOff := int(first.NameOff)
+	entryN := nameOff / disk.SizeDirent
+	if entryN == 0 || nameOff > len(buf) {
+		return nil, fmt.Errorf("invalid name offset %d: %w", nameOff, ErrInvalid)
 	}
-	entryN := first.NameOff / disk.SizeDirent
-	if entryN == 0 || int(first.NameOff) > len(buf) {
-		return nil, fmt.Errorf("invalid name offset %d: %w", first.NameOff, ErrInvalid)
-	}
-	var nameEnd uint16
+	// int, not uint16: at the maximum supported block size a full block is
+	// 65536 bytes, which truncates to 0.
+	nameEnd := len(buf)
 	if entryN > 1 {
-		nextOff := int(disk.SizeDirent) + 8
+		nextOff := disk.SizeDirent + 8
 		if nextOff+2 > len(buf) {
 			return nil, fmt.Errorf("next dirent name offset out of range: %w", ErrInvalid)
 		}
-		nameEnd = binary.LittleEndian.Uint16(buf[nextOff:])
-	} else {
-		nameEnd = uint16(len(buf))
+		nameEnd = int(binary.LittleEndian.Uint16(buf[nextOff:]))
 	}
-	if first.NameOff > nameEnd || int(nameEnd) > len(buf) {
-		return nil, fmt.Errorf("name range [%d:%d] out of bounds: %w", first.NameOff, nameEnd, ErrInvalid)
+	if nameOff > nameEnd || nameEnd > len(buf) {
+		return nil, fmt.Errorf("name range [%d:%d] out of bounds: %w", nameOff, nameEnd, ErrInvalid)
 	}
-	name := buf[first.NameOff:nameEnd]
+	name := buf[nameOff:nameEnd]
 	// Trim NUL terminator if present
 	if i := bytes.IndexByte(name, 0); i >= 0 {
 		name = name[:i]
+	}
+	if err := checkDirentName(name); err != nil {
+		return nil, err
 	}
 	return name, nil
 }
 
 // blockDirent decodes the dirent at index i from buf and returns the
 // name bytes for that entry. entryN is the total number of entries.
-func blockDirent(buf []byte, i, entryN uint16) (disk.Dirent, []byte, error) {
+func blockDirent(buf []byte, i, entryN int) (disk.Dirent, []byte, error) {
 	var de disk.Dirent
-	off := int(disk.SizeDirent * i)
+	off := disk.SizeDirent * i
 	if off+disk.SizeDirent > len(buf) {
 		return de, nil, fmt.Errorf("dirent %d offset %d out of range: %w", i, off, ErrInvalid)
 	}
-	if _, err := binary.Decode(buf[off:off+disk.SizeDirent], binary.LittleEndian, &de); err != nil {
-		return de, nil, fmt.Errorf("decode dirent %d failed: %w", i, err)
-	}
-	var nameEnd uint16
+	de.Unmarshal(buf[off:])
+	nameOff := int(de.NameOff)
+	// int, not uint16: at the maximum supported block size a full block is
+	// 65536 bytes, which truncates to 0.
+	nameEnd := len(buf)
 	if i < entryN-1 {
-		nextOff := int(disk.SizeDirent*(i+1)) + 8
+		nextOff := disk.SizeDirent*(i+1) + 8
 		if nextOff+2 > len(buf) {
 			return de, nil, fmt.Errorf("dirent %d next name offset out of range: %w", i, ErrInvalid)
 		}
-		nameEnd = binary.LittleEndian.Uint16(buf[nextOff:])
-	} else {
-		nameEnd = uint16(len(buf))
+		nameEnd = int(binary.LittleEndian.Uint16(buf[nextOff:]))
 	}
-	if de.NameOff > nameEnd || int(nameEnd) > len(buf) {
-		return de, nil, fmt.Errorf("dirent %d name range [%d:%d] out of bounds: %w", i, de.NameOff, nameEnd, ErrInvalid)
+	if nameOff > nameEnd || nameEnd > len(buf) {
+		return de, nil, fmt.Errorf("dirent %d name range [%d:%d] out of bounds: %w", i, nameOff, nameEnd, ErrInvalid)
 	}
-	name := buf[de.NameOff:nameEnd]
+	name := buf[nameOff:nameEnd]
 	// The last entry name may be NUL-terminated before the end of the block.
 	if i == entryN-1 {
 		if j := bytes.IndexByte(name, 0); j >= 0 {
 			name = name[:j]
 		}
+	}
+	if err := checkDirentName(name); err != nil {
+		return de, nil, err
 	}
 	return de, name, nil
 }
@@ -1566,18 +2021,16 @@ func lookupBlock(buf, target []byte) (uint64, fs.FileMode, error) {
 		return 0, 0, fmt.Errorf("directory block too small: %w", ErrInvalid)
 	}
 	var first disk.Dirent
-	if _, err := binary.Decode(buf[:disk.SizeDirent], binary.LittleEndian, &first); err != nil {
-		return 0, 0, fmt.Errorf("decode failed: %w", err)
-	}
+	first.Unmarshal(buf)
 	if first.NameOff%disk.SizeDirent != 0 {
 		return 0, 0, fmt.Errorf("invalid name offset %d not aligned to dirent size: %w", first.NameOff, ErrInvalid)
 	}
-	entryN := first.NameOff / disk.SizeDirent
+	entryN := int(first.NameOff) / disk.SizeDirent
 	if int(first.NameOff) > len(buf) {
 		return 0, 0, fmt.Errorf("name offset %d exceeds block size %d: %w", first.NameOff, len(buf), ErrInvalid)
 	}
 
-	lo, hi := uint16(0), entryN
+	lo, hi := 0, entryN
 	for lo < hi {
 		mid := lo + (hi-lo)/2
 		de, name, err := blockDirent(buf, mid, entryN)
@@ -1613,7 +2066,6 @@ type inode struct {
 	nlink       int
 	mtime       uint64
 	mtimeNs     uint32
-	cached      *block
 }
 
 func (ino *inode) flatDataOffset() int64 {
@@ -1627,13 +2079,18 @@ func (ino *inode) flatDataOffset() int64 {
 //
 //	if u, ok := fi.(interface{ UID() uint32 }); ok { uid = u.UID() }
 type fileInfo struct {
-	name       string
-	size       int64
-	mode       fs.FileMode
-	mtime      uint64
-	mtimeNs    uint32
-	stat       *Stat
+	name    string
+	size    int64
+	mode    fs.FileMode
+	mtime   uint64
+	mtimeNs uint32
+	// Held by value, with Sys returning its address: one allocation for the
+	// fileInfo instead of two, and Stat is never shared with anything else.
+	stat       Stat
 	dataRanges []DataRange
+	// A flat layout produces at most two ranges, so they are backed here
+	// rather than by a separate heap slice.
+	rangeBuf [2]DataRange
 
 	// rangesOnce and rangesLoader support lazy computation of data ranges
 	// for chunk-based files (LayoutChunkBased). The loader performs a ReadAt
@@ -1648,7 +2105,7 @@ func (fi *fileInfo) Name() string       { return fi.name }
 func (fi *fileInfo) Size() int64        { return fi.size }
 func (fi *fileInfo) Mode() fs.FileMode  { return fi.mode }
 func (fi *fileInfo) IsDir() bool        { return fi.mode.IsDir() }
-func (fi *fileInfo) Sys() any           { return fi.stat }
+func (fi *fileInfo) Sys() any           { return &fi.stat }
 func (fi *fileInfo) ModTime() time.Time { return time.Unix(int64(fi.mtime), int64(fi.mtimeNs)) }
 func (fi *fileInfo) UID() uint32        { return fi.stat.UID }
 func (fi *fileInfo) GID() uint32        { return fi.stat.GID }
@@ -1677,13 +2134,7 @@ func (fi *fileInfo) GetXattr(name string) (string, bool) {
 	return v, ok
 }
 func decodeSuperBlock(b [disk.SizeSuperBlock]byte, sb *disk.SuperBlock) error {
-	n, err := binary.Decode(b[:], binary.LittleEndian, sb)
-	if err != nil {
-		return err
-	}
-	if n != disk.SizeSuperBlock {
-		return fmt.Errorf("invalid super block: decoded %d bytes", n)
-	}
+	sb.Unmarshal(b[:])
 	if sb.MagicNumber != disk.MagicNumber {
 		return fmt.Errorf("invalid super block: invalid magic number %x", sb.MagicNumber)
 	}

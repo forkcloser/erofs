@@ -37,6 +37,38 @@ func (idx xattrIndex) String() string {
 	}
 }
 
+// prefix returns the name prefix an index stands for.
+//
+// Index 0 means the name is stored whole, with no prefix. Everything from 7 up
+// is undefined by the format, and mapping it to the empty prefix the way
+// String does is what let a hostile image spell out "security.capability" in
+// full under an unknown index and collide with the properly prefixed entry.
+func (idx xattrIndex) prefix() (string, error) {
+	if idx == 0 {
+		return "", nil
+	}
+	if p := idx.String(); p != "" {
+		return p, nil
+	}
+
+	return "", fmt.Errorf("unknown xattr name index %d: %w", uint8(idx), ErrInvalid)
+}
+
+// setXattr records one attribute, rejecting a name already present.
+//
+// EROFS has no rule against an image listing the same key twice, and assigning
+// into the map takes the last one silently. Anything consulting an attribute
+// for a policy decision — security.capability, security.selinux — would then
+// act on whichever copy the parser happened to write second.
+func setXattr(stat *Stat, nid uint64, name, value string) error {
+	if _, dup := stat.Xattrs[name]; dup {
+		return fmt.Errorf("duplicate xattr %q for nid %d: %w", name, nid, ErrInvalid)
+	}
+	stat.Xattrs[name] = value
+
+	return nil
+}
+
 // loadXattrs reads the extended attributes for the file's inode and
 // populates the given Stat's Xattrs map.
 func loadXattrs(b *file, stat *Stat) (err error) {
@@ -61,9 +93,7 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 		return fmt.Errorf("xattr body too small for nid %d: %w", b.nid, ErrInvalid)
 	}
 	var xh disk.XattrHeader
-	if _, err := binary.Decode(xb[:disk.SizeXattrBodyHeader], binary.LittleEndian, &xh); err != nil {
-		return err
-	}
+	xh.Unmarshal(xb)
 	xb = xb[disk.SizeXattrBodyHeader:]
 
 	for i := 0; i < int(xh.SharedCount); i++ {
@@ -79,13 +109,13 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 				return fmt.Errorf("xattr shared block too small for nid %d: %w", b.nid, ErrInvalid)
 			}
 		}
-		var xattrAddr uint32
-		if _, err := binary.Decode(xb[:4], binary.LittleEndian, &xattrAddr); err != nil {
-			return err
-		}
+		xattrAddr := binary.LittleEndian.Uint32(xb[:4])
 
 		// TODO: Cache shared xattr blocks
-		sblk, err := b.img.loadAt(int64(b.img.sb.XattrBlkAddr)<<b.img.sb.BlkSizeBits+int64(xattrAddr*4), int64(1<<b.img.sb.BlkSizeBits))
+		// xattrAddr counts 4-byte units from the shared xattr area, and is
+		// widened before scaling: the multiply would otherwise wrap in uint32.
+		sharedAddr := int64(b.img.sb.XattrBlkAddr)<<b.img.sb.BlkSizeBits + int64(xattrAddr)*4
+		sblk, err := b.img.loadAt(sharedAddr, int64(1<<b.img.sb.BlkSizeBits))
 		if err != nil {
 			return fmt.Errorf("failed to read shared xattr body for nid %d: %w", b.nid, err)
 		}
@@ -95,10 +125,7 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 			return fmt.Errorf("shared xattr block too small for nid %d: %w", b.nid, ErrInvalid)
 		}
 		var xattrEntry disk.XattrEntry
-		if _, err := binary.Decode(sb[:disk.SizeXattrEntry], binary.LittleEndian, &xattrEntry); err != nil {
-			b.img.putBlock(sblk)
-			return err
-		}
+		xattrEntry.Unmarshal(sb)
 		sb = sb[disk.SizeXattrEntry:]
 		var prefix string
 		if xattrEntry.NameIndex&0x80 == 0x80 {
@@ -109,8 +136,9 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 				b.img.putBlock(sblk)
 				return fmt.Errorf("failed to get long prefix for shared xattr nid %d: %w", b.nid, err)
 			}
-		} else if xattrEntry.NameIndex != 0 {
-			prefix = xattrIndex(xattrEntry.NameIndex).String()
+		} else if prefix, err = xattrIndex(xattrEntry.NameIndex).prefix(); err != nil {
+			b.img.putBlock(sblk)
+			return fmt.Errorf("shared xattr for nid %d: %w", b.nid, err)
 		}
 
 		if len(sb) < int(xattrEntry.NameLen)+int(xattrEntry.ValueLen) {
@@ -119,7 +147,10 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 		}
 		name := prefix + string(sb[:xattrEntry.NameLen])
 		sb = sb[xattrEntry.NameLen:]
-		stat.Xattrs[name] = string(sb[:xattrEntry.ValueLen])
+		if err := setXattr(stat, b.nid, name, string(sb[:xattrEntry.ValueLen])); err != nil {
+			b.img.putBlock(sblk)
+			return err
+		}
 		b.img.putBlock(sblk)
 
 		xb = xb[4:]
@@ -146,9 +177,7 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 		}
 
 		var xattrEntry disk.XattrEntry
-		if _, err := binary.Decode(xb[:disk.SizeXattrEntry], binary.LittleEndian, &xattrEntry); err != nil {
-			return err
-		}
+		xattrEntry.Unmarshal(xb)
 		pos += disk.SizeXattrEntry
 		xb = xb[disk.SizeXattrEntry:]
 		var prefix string
@@ -160,8 +189,11 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 			if err != nil {
 				return fmt.Errorf("failed to get long prefix for inline xattr nid %d: %w", b.nid, err)
 			}
-		} else if xattrEntry.NameIndex != 0 {
-			prefix = xattrIndex(xattrEntry.NameIndex).String()
+		} else {
+			var err error
+			if prefix, err = xattrIndex(xattrEntry.NameIndex).prefix(); err != nil {
+				return fmt.Errorf("inline xattr for nid %d: %w", b.nid, err)
+			}
 		}
 
 		if len(xb) < int(xattrEntry.NameLen) {
@@ -205,7 +237,9 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 			pos += int(xattrEntry.ValueLen)
 			xb = xb[xattrEntry.ValueLen:]
 		}
-		stat.Xattrs[name] = value
+		if err := setXattr(stat, b.nid, name, value); err != nil {
+			return err
+		}
 
 		// Round up to next 4 byte boundary
 		if rem := pos % 4; rem != 0 {

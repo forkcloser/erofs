@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"path"
+	"slices"
 
 	"github.com/forkcloser/erofs/internal/builder"
 	"github.com/forkcloser/erofs/internal/disk"
@@ -113,18 +114,21 @@ func (fsys *Writer) copyFromImage(img *image) error {
 	// and must never size an allocation on their own: a handful of tampered
 	// bytes would otherwise request a terabyte-scale buffer, which fails as
 	// an unrecoverable runtime OOM rather than a returned error.
-	if actual, ok := imageSize(img.meta); ok {
-		if totalBytes > actual {
-			return fmt.Errorf("superblock declares %d bytes but image is %d bytes: %w",
-				totalBytes, actual, ErrInvalid)
-		}
-	} else if totalBytes-metaStart > maxEagerMetaBytes {
-		return fmt.Errorf("metadata region of %d bytes exceeds the %d byte limit for a source of unknown size: %w",
-			totalBytes-metaStart, int64(maxEagerMetaBytes), ErrInvalid)
+	if actual, ok := imageSize(img.meta); ok && totalBytes > actual {
+		return fmt.Errorf("superblock declares %d bytes but image is %d bytes: %w",
+			totalBytes, actual, ErrInvalid)
 	}
 	if metaStart < 0 || metaStart >= totalBytes {
 		return fmt.Errorf("metadata start %d outside image of %d bytes: %w",
 			metaStart, totalBytes, ErrInvalid)
+	}
+	// The cap applies whether or not the source can report its size. A file
+	// that can is not thereby trustworthy: a sparse one is as large as it
+	// cares to claim for free, so "declared <= actual" passes for a 256 TiB
+	// metadata region that costs the attacker nothing to produce.
+	if totalBytes-metaStart > maxEagerMetaBytes {
+		return fmt.Errorf("metadata region of %d bytes exceeds the %d byte limit: %w",
+			totalBytes-metaStart, int64(maxEagerMetaBytes), ErrInvalid)
 	}
 
 	blkBits := img.sb.BlkSizeBits
@@ -161,6 +165,23 @@ func (fsys *Writer) copyFromImage(img *image) error {
 	queue := make([]imgQEntry, 0, inodeCount)
 	queue = append(queue, imgQEntry{nid: uint64(img.sb.RootNid), path: "/"})
 
+	// Directory nids are expanded at most once. EROFS, like POSIX, has no
+	// directory hardlinks, so a directory reachable by two paths means the
+	// dirent graph is not a tree. Following it would revisit the same
+	// subtree forever, growing both the queue and the path strings without
+	// bound. Non-directory nids are deliberately not tracked: a file nid
+	// legitimately appears under several names when the source has
+	// hardlinks, and each name needs its own entry here.
+	expanded := make(map[int64]struct{})
+
+	// A chunk map is parsed once per inode, not once per name. Non-directory
+	// nids are deliberately not de-duped above, so a file with hardlinks is
+	// visited once per name, and each visit would otherwise parse and retain
+	// its own copy of an identical slice. The entries share the result: the
+	// remap below is the only thing that ever writes to it, and it runs on
+	// the parse that fills the cache.
+	chunkCache := make(map[uint64][]builder.Chunk)
+
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
@@ -182,6 +203,14 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			}
 		}
 
+		// Bound the nid before multiplying. nid*32 wraps, so nid and
+		// nid + k*2^59 name the same inode: the cycle guard below keyed on
+		// the nid would see 32 distinct directories where the image has one,
+		// and expand the same subtree under each.
+		if cur.nid > uint64(totalBytes-metaStart)/disk.SizeInodeCompact {
+			return fmt.Errorf("nid %d lies past the end of the %d byte image: %w",
+				cur.nid, totalBytes, ErrInvalid)
+		}
 		inodeAddr := metaStart + int64(cur.nid*disk.SizeInodeCompact)
 		buf := at(inodeAddr)
 		if len(buf) < disk.SizeInodeCompact {
@@ -214,9 +243,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 
 		if compact {
 			var ino disk.InodeCompact
-			if _, err := binary.Decode(buf[:disk.SizeInodeCompact], binary.LittleEndian, &ino); err != nil {
-				return fmt.Errorf("decode compact inode %d: %w", cur.nid, err)
-			}
+			ino.Unmarshal(buf)
 			mode = ino.Mode
 			uid = uint32(ino.UID)
 			gid = uint32(ino.GID)
@@ -229,9 +256,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			icSize = disk.SizeInodeCompact
 		} else {
 			var ino disk.InodeExtended
-			if _, err := binary.Decode(buf[:disk.SizeInodeExtended], binary.LittleEndian, &ino); err != nil {
-				return fmt.Errorf("decode extended inode %d: %w", cur.nid, err)
-			}
+			ino.Unmarshal(buf)
 			mode = ino.Mode
 			uid = ino.UID
 			gid = ino.GID
@@ -281,8 +306,30 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			fe.metadataOnly = true
 		}
 
+		// Sizes come straight off disk. For the types whose content this
+		// function materializes, the declared size must fit inside the image
+		// before it is used as an allocation length — or converted to int,
+		// where a value past 2^63 overflows to a negative length.
+		switch typ {
+		case disk.StatTypeDir, disk.StatTypeSymlink:
+			if size > uint64(totalBytes) {
+				return fmt.Errorf("nid %d declares %d bytes, larger than the %d byte image: %w",
+					cur.nid, size, totalBytes, ErrInvalid)
+			}
+		}
+
 		switch typ {
 		case disk.StatTypeDir:
+			// A directory reachable twice means the dirent graph is not a
+			// tree; expanding it again would loop forever. Keyed on the
+			// address rather than the nid, since two nids differing only in
+			// the bits nid*32 discards address the same inode.
+			if _, seen := expanded[inodeAddr]; seen {
+				return fmt.Errorf("directory nid %d is reachable more than once (at %s): %w",
+					cur.nid, cur.path, ErrInvalid)
+			}
+			expanded[inodeAddr] = struct{}{}
+
 			dirSize := int(size)
 			if dirSize > 0 {
 				var dirData []byte
@@ -305,7 +352,9 @@ func (fsys *Writer) copyFromImage(img *image) error {
 					}
 				}
 				if dirData != nil {
-					fsys.parseDirBlock(dirData, dirSize, blockSize, cur.path, &queue)
+					if err := fsys.parseDirBlock(dirData, dirSize, blockSize, cur.path, &queue); err != nil {
+						return fmt.Errorf("dir nid %d: %w", cur.nid, err)
+					}
 				}
 			}
 
@@ -355,25 +404,30 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				}
 
 				if indexed {
-					chunks, err := fsys.parseChunks(at(chunkAddr), chunkFmt, size, blkBits, img.deviceIDMask)
-					if err != nil {
-						return fmt.Errorf("chunk index for nid %d: %w", cur.nid, err)
+					chunks, cached := chunkCache[cur.nid]
+					if !cached {
+						var err error
+						chunks, err = fsys.parseChunks(at(chunkAddr), chunkFmt, size, blkBits, img.deviceIDMask)
+						if err != nil {
+							return fmt.Errorf("chunk index for nid %d: %w", cur.nid, err)
+						}
+						if err := fsys.remapChunkDevices(cur.path, chunks); err != nil {
+							return err
+						}
+						chunkCache[cur.nid] = chunks
 					}
 					fe.chunks = chunks
-					fe.contiguous = true
+					// Only a single non-hole extent is contiguous. Claiming
+					// it for a fragmented or sparse file makes planLayout
+					// pick a chunk size spanning the whole file, collapsing
+					// every extent into one mapping.
+					fe.contiguous = len(chunks) == 1 &&
+						chunks[0].PhysicalBlock != builder.NullPhysicalBlock
 				}
 			}
 
 		case disk.StatTypeChrdev, disk.StatTypeBlkdev:
 			fe.rdev = disk.RdevFromMode(mode, idata)
-		}
-
-		// Remap chunk DeviceIDs for metadata-only sources.
-		if fsys.copyMetadataOnly && fsys.copyDeviceID > 0 {
-			offset := fsys.copyDeviceID - 1
-			for i := range fe.chunks {
-				fe.chunks[i].DeviceID += offset
-			}
 		}
 
 		// Register in the tree.
@@ -403,13 +457,10 @@ func (fsys *Writer) copyFromImage(img *image) error {
 
 // parseDirBlock extracts directory entries from dirent data and enqueues
 // child inodes for BFS traversal.
-func (fsys *Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPath string, queue *[]imgQEntry) {
+func (fsys *Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPath string, queue *[]imgQEntry) error {
 	pos := 0
 	for pos < dirSize {
-		blockEnd := pos + blockSize
-		if blockEnd > dirSize {
-			blockEnd = dirSize
-		}
+		blockEnd := min(pos+blockSize, dirSize)
 		blk := data[pos:blockEnd]
 		if len(blk) < disk.SizeDirent {
 			break
@@ -421,7 +472,7 @@ func (fsys *Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPat
 			break
 		}
 
-		for i := 0; i < nEntries; i++ {
+		for i := range nEntries {
 			off := i * disk.SizeDirent
 			nid := binary.LittleEndian.Uint64(blk[off : off+8])
 			nameOff := int(binary.LittleEndian.Uint16(blk[off+8 : off+10]))
@@ -445,16 +496,32 @@ func (fsys *Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPat
 			if name == "." || name == ".." || name == "" {
 				continue
 			}
+			// A name is one path element. Without this a nested dirent named
+			// "y/../../../.wh..wh..opq" builds a childPath that path.Dir
+			// collapses to "/", so the merge-mode whiteout handler wipes every
+			// entry from every prior layer; "x/../../.wh.secret" deletes an
+			// arbitrary path, and a plain "etc/passwd" overwrites a file in a
+			// directory the source never named.
+			if err := checkDirentName(nameBytes); err != nil {
+				return fmt.Errorf("in %s: %w", parentPath, err)
+			}
 
 			childPath := parentPath + "/" + name
 			if parentPath == "/" {
 				childPath = "/" + name
+			}
+			// The reader's own resolve refuses to walk a path this long, and
+			// add applies the same bound on the full-image route.
+			if err := checkPathLen(childPath); err != nil {
+				return err
 			}
 			*queue = append(*queue, imgQEntry{nid: nid, path: childPath})
 		}
 
 		pos = blockEnd
 	}
+
+	return nil
 }
 
 // chunkMapBytes returns the on-disk size of the chunk-index map an inode of
@@ -488,6 +555,12 @@ func chunkMapBytes(chunkFmt uint16, fileSize uint64, blkBits uint8, unit int64) 
 // cannot be trusted, and carrying it forward would let a corrupt source drive
 // the writer's own allocations — the entry's trailing size is derived from it.
 func (fsys *Writer) parseChunks(data []byte, chunkFmt uint16, fileSize uint64, blkBits uint8, deviceIDMask uint16) ([]builder.Chunk, error) {
+	// The same format rules the reader's loadBlock applies. 48-bit chunk
+	// addressing is unimplemented end to end, so a source declaring it must
+	// not be silently reinterpreted as 32-bit.
+	if chunkFmt&^(disk.LayoutChunkFormatBits|disk.LayoutChunkFormatIndexes) != 0 {
+		return nil, fmt.Errorf("unsupported chunk format %#x: %w", chunkFmt, ErrNotImplemented)
+	}
 	chunkBits := blkBits + uint8(chunkFmt&disk.LayoutChunkFormatBits)
 	nchunks := int((fileSize-1)>>chunkBits) + 1
 	blocksPerChunk := 1 << (chunkBits - blkBits)
@@ -509,20 +582,49 @@ func (fsys *Writer) parseChunks(data []byte, chunkFmt uint16, fileSize uint64, b
 			len(data), needed, ErrInvalid)
 	}
 
-	chunks := make([]builder.Chunk, 0, nchunks)
+	// Grown from what survives, not from what the inode declares. Most images
+	// coalesce heavily — a contiguous file collapses to a single entry — so
+	// reserving nchunks up front sizes the slice from the source's say-so and
+	// then retains it: a valid image with 20000 hardlinks to one 480-chunk
+	// file reserved 9.6 M slots to hold 20001.
+	var chunks []builder.Chunk
 	for i := range nchunks {
 		off := i * disk.SizeChunkIndex
 		startBlkLo := binary.LittleEndian.Uint32(data[off+4 : off+8])
 		if ^startBlkLo == 0 {
-			continue // null/hole
+			// A hole. Its logical span has to be carried over: chunks
+			// describe the file's layout positionally, so dropping a hole
+			// slides every later extent down into the wrong logical offset
+			// and the file reads back unrelated device bytes where it should
+			// read zeros.
+			if len(chunks) > 0 {
+				prev := &chunks[len(chunks)-1]
+				if prev.PhysicalBlock == builder.NullPhysicalBlock &&
+					int(prev.Count)+blocksPerChunk <= 65535 {
+					prev.Count += uint16(blocksPerChunk)
+
+					continue
+				}
+			}
+			chunks = append(chunks, builder.Chunk{
+				PhysicalBlock: builder.NullPhysicalBlock,
+				Count:         uint16(blocksPerChunk),
+			})
+
+			continue
 		}
-		startBlkHi := binary.LittleEndian.Uint16(data[off : off+2])
+		// 32-bit addressing: the high half is the kernel's "advise" field
+		// unless the 48-bit format is declared, and that format is rejected
+		// above. The reader has always resolved chunks this way, so folding
+		// these bits in produced an output whose chunks named blocks the
+		// reader would never look at.
 		deviceID := binary.LittleEndian.Uint16(data[off+2:off+4]) & deviceIDMask
-		physBlock := (uint64(startBlkHi) << 32) | uint64(startBlkLo)
+		physBlock := uint64(startBlkLo)
 
 		if len(chunks) > 0 {
 			prev := &chunks[len(chunks)-1]
-			if prev.DeviceID == deviceID &&
+			if prev.PhysicalBlock != builder.NullPhysicalBlock &&
+				prev.DeviceID == deviceID &&
 				prev.PhysicalBlock+uint64(prev.Count) == physBlock &&
 				int(prev.Count)+blocksPerChunk <= 65535 {
 				prev.Count += uint16(blocksPerChunk)
@@ -536,7 +638,9 @@ func (fsys *Writer) parseChunks(data []byte, chunkFmt uint16, fileSize uint64, b
 		})
 	}
 
-	return chunks, nil
+	// The slice outlives this call on every entry that shares the inode, so
+	// hand back one sized to its contents rather than to append's last step.
+	return slices.Clip(chunks), nil
 }
 
 // parseXattrsFromBuf parses xattr entries from an in-memory buffer.
@@ -548,9 +652,7 @@ func parseXattrsFromBuf(buf []byte, at func(int64) []byte, sharedOff int64, long
 	}
 
 	var xh disk.XattrHeader
-	if _, err := binary.Decode(buf[:disk.SizeXattrBodyHeader], binary.LittleEndian, &xh); err != nil {
-		return nil
-	}
+	xh.Unmarshal(buf)
 	pos := disk.SizeXattrBodyHeader
 
 	xattrs := make(map[string]string)
@@ -568,9 +670,7 @@ func parseXattrsFromBuf(buf []byte, at func(int64) []byte, sharedOff int64, long
 			continue
 		}
 		var xe disk.XattrEntry
-		if _, err := binary.Decode(sharedBlock[:disk.SizeXattrEntry], binary.LittleEndian, &xe); err != nil {
-			continue
-		}
+		xe.Unmarshal(sharedBlock)
 		entryLen := int(xe.NameLen) + int(xe.ValueLen)
 		if disk.SizeXattrEntry+entryLen > len(sharedBlock) {
 			continue
@@ -584,9 +684,7 @@ func parseXattrsFromBuf(buf []byte, at func(int64) []byte, sharedOff int64, long
 	// Parse inline xattr entries.
 	for pos+disk.SizeXattrEntry <= len(buf) {
 		var xe disk.XattrEntry
-		if _, err := binary.Decode(buf[pos:pos+disk.SizeXattrEntry], binary.LittleEndian, &xe); err != nil {
-			break
-		}
+		xe.Unmarshal(buf[pos:])
 		pos += disk.SizeXattrEntry
 
 		entryLen := int(xe.NameLen) + int(xe.ValueLen)

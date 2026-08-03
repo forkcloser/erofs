@@ -33,7 +33,7 @@ func linkStat(t testing.TB, fsys fs.FS, name string) *erofs.Stat {
 	return st
 }
 
-// TestWriterLink verifies that hardlinked names share one inode on disk:
+// TestWriterLink verifies that hard-linked names share one inode on disk:
 // same ino, shared data, a correct link count, and shared metadata.
 func TestWriterLink(t *testing.T) {
 	var buf testBuffer

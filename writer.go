@@ -2,12 +2,13 @@ package erofs
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"math"
 	"os"
-	"sort"
+	"slices"
 
 	"github.com/forkcloser/erofs/internal/builder"
 	"github.com/forkcloser/erofs/internal/disk"
@@ -41,6 +42,7 @@ type erofsWriter struct {
 	chunkBits   uint8                        // log2(chunkSize / blockSize); chunkSize = blockSize << chunkBits
 	copyBuf     []byte                       // reusable buffer for io.CopyBuffer
 	zeroBuf     []byte                       // blockSize-length zero buffer for padding
+	dirBuf      []byte                       // reusable scratch for one dirent block
 	inodeBuf    [disk.SizeInodeExtended]byte // scratch buffer for writeInode
 }
 
@@ -83,7 +85,7 @@ const maxChunkIndexEntries = 1 << 27
 // untrusted inode, where the obvious int conversion either overflows to a
 // negative count or yields a count whose index map is far larger than any
 // real filesystem. The clamped value is over the limit by one, so
-// checkChunkLimits rejects the entry before anything is written.
+// checkLimits rejects the entry before anything is written.
 func (w *erofsWriter) chunkCount(e *erofsEntry) int {
 	cs := uint64(w.entryChunkSize(e))
 	if cs == 0 {
@@ -100,17 +102,49 @@ func (w *erofsWriter) chunkCount(e *erofsEntry) int {
 	return int(n)
 }
 
-// checkChunkLimits rejects entries whose chunk-index map exceeds what the
-// reader will parse back. Called before any serialization so an implausible
-// size never reaches the metadata buffer.
-func (w *erofsWriter) checkChunkLimits() error {
+// checkLimits rejects entries the on-disk format cannot represent. It runs
+// before any serialization, so an entry that would be silently truncated into
+// a narrower field never reaches the metadata buffer.
+func (w *erofsWriter) checkLimits() error {
 	for _, e := range w.entries {
-		if e.layout != disk.LayoutChunkBased {
-			continue
+		// A zero-length target is not a resolvable symlink: readers fold it
+		// away and restart the walk at the root, so any path through the link
+		// silently loses its prefix. Symlink rejects it at the API boundary;
+		// this catches the CopyFrom paths, where the source picks the target.
+		if e.mode&disk.StatTypeMask == disk.StatTypeSymlink && len(e.symTarget) == 0 {
+			return fmt.Errorf("mkfs: %s: empty symlink target: %w", e.path, ErrInvalid)
 		}
-		if w.chunkCount(e) > maxChunkIndexEntries {
+		if e.layout == disk.LayoutChunkBased && w.chunkCount(e) > maxChunkIndexEntries {
 			return fmt.Errorf("mkfs: %s: chunk index for a %d byte file exceeds the %d entry limit: %w",
 				e.path, e.size, int64(maxChunkIndexEntries), ErrInvalid)
+		}
+		// A chunk index stores the block address in 32 bits; the 48-bit
+		// format that widens it is not implemented end to end. Nothing
+		// upstream bounds a chunk's start block, so reject what would
+		// otherwise be truncated into an image that reads back as
+		// phys mod 2^32.
+		for _, c := range e.chunks {
+			if c.PhysicalBlock == builder.NullPhysicalBlock {
+				continue
+			}
+			if end := c.PhysicalBlock + uint64(c.Count); end > math.MaxUint32 {
+				return fmt.Errorf("mkfs: %s: chunk covering blocks %d..%d needs 48-bit addressing: %w",
+					e.path, c.PhysicalBlock, end, ErrNotImplemented)
+			}
+		}
+		// Setxattr validates at the API boundary, but xattrs also arrive
+		// through CopyFrom, where the source picks the lengths. Iterated in
+		// map order: every key is checked either way, and sorting here cost a
+		// slice and a sort per entry to no purpose. writeXattrs still sorts,
+		// where the on-disk order actually matters.
+		for name, value := range e.xattrs {
+			if err := validateXattr(name, value); err != nil {
+				return fmt.Errorf("mkfs: %s: %w", e.path, err)
+			}
+		}
+		if e.xattrSize > 0 && xattrICount(e.xattrSize) > maxXattrICount {
+			return fmt.Errorf("mkfs: %s: xattr area of %d bytes needs more than the %d entries i_xattr_icount can hold: %w",
+				e.path, e.xattrSize, maxXattrICount, ErrInvalid)
 		}
 	}
 
@@ -128,7 +162,7 @@ func (w *erofsWriter) minChunkBits(size uint64) uint8 {
 }
 
 func (w *erofsWriter) write(out io.WriteSeeker) error {
-	if err := w.checkChunkLimits(); err != nil {
+	if err := w.checkLimits(); err != nil {
 		return err
 	}
 	w.copyBuf = make([]byte, 256*1024) // shared io.CopyBuffer buffer
@@ -169,6 +203,18 @@ func (w *erofsWriter) writeSeekable(out io.WriteSeeker) error {
 		return err
 	}
 	return w.writeBlock0(out)
+}
+
+// direntBuf returns a zeroed scratch buffer of n bytes for serializing one
+// dirent block. It is reused across blocks: a directory can hold thousands.
+func (w *erofsWriter) direntBuf(n int) []byte {
+	if cap(w.dirBuf) < n {
+		w.dirBuf = make([]byte, n)
+	}
+	w.dirBuf = w.dirBuf[:n]
+	clear(w.dirBuf)
+
+	return w.dirBuf
 }
 
 // newMetaBuffer returns a pre-sized bytes.Buffer for metadata serialization.
@@ -294,11 +340,15 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 	if len(w.devices) > 0 {
 		featureIncompat |= disk.FeatureIncompatDeviceTable
 		extraDevices = uint16(len(w.devices))
-		devtSlotOff = uint16(disk.SizeSuperBlock / 16)
+		devtSlotOff = uint16((disk.SuperBlockOffset + disk.SizeSuperBlock) / disk.SizeDeviceSlot)
 	}
+	// Keyed off the resolved layout, not off len(e.chunks): a metadata-only
+	// entry with no chunk mappings still gets LayoutChunkBased, and an image
+	// carrying chunk-based inodes has to declare the feature.
 	for _, e := range w.entries {
-		if len(e.chunks) > 0 {
+		if e.layout == disk.LayoutChunkBased {
 			featureIncompat |= disk.FeatureIncompatChunkedFile
+
 			break
 		}
 	}
@@ -317,11 +367,11 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 		DevtSlotOff:     devtSlotOff,
 	}
 
-	sbBuf := &bytes.Buffer{}
-	if err := binary.Write(sbBuf, binary.LittleEndian, &sb); err != nil {
-		return fmt.Errorf("write superblock: %w", err)
-	}
-	copy(sbArea[disk.SuperBlockOffset:], sbBuf.Bytes())
+	// Marshalled straight into sbArea. binary.Write reaches the same bytes
+	// through reflection, at roughly two orders of magnitude the cost, and
+	// wanted a fresh bytes.Buffer for the superblock and for every device
+	// slot besides.
+	sb.Marshal(sbArea[disk.SuperBlockOffset:])
 
 	// Write device slots right after superblock.
 	for i, blocks := range w.devices {
@@ -331,12 +381,8 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 		devSlot := disk.DeviceSlot{
 			Blocks: uint32(blocks),
 		}
-		devBuf := &bytes.Buffer{}
-		if err := binary.Write(devBuf, binary.LittleEndian, &devSlot); err != nil {
-			return fmt.Errorf("write device slot: %w", err)
-		}
 		off := disk.SuperBlockOffset + disk.SizeSuperBlock + i*disk.SizeDeviceSlot
-		copy(sbArea[off:], devBuf.Bytes())
+		devSlot.Marshal(sbArea[off:])
 	}
 
 	_, err := buf.Write(sbArea)
@@ -349,6 +395,14 @@ func (w *erofsWriter) writeMetadataInodes(buf io.Writer) error {
 	metaStart := 0
 	for _, e := range w.entries {
 		expectedOff := int(e.nid) * 32
+		// planLayout hands out nids as byte offsets, so the bytes written so
+		// far must never have run past this entry's slot: if they have, every
+		// following dirent nid points at misaligned garbage. Fail loudly
+		// rather than emit an image that opens but decodes to nonsense.
+		if expectedOff < metaStart {
+			return fmt.Errorf("write inode for %s: metadata overran nid slot %d by %d bytes",
+				e.path, e.nid, metaStart-expectedOff)
+		}
 		if expectedOff > metaStart {
 			if _, err := buf.Write(w.zeroBuf[:expectedOff-metaStart]); err != nil {
 				return err
@@ -395,6 +449,15 @@ func (w *erofsWriter) writeMetadataInodes(buf io.Writer) error {
 				}
 				if err != nil {
 					return fmt.Errorf("write inline data for %s: %w", e.path, err)
+				}
+				// The layout reserved e.size bytes here. A short source would
+				// otherwise be padded out with the zero fill that aligns the
+				// next inode, leaving the file silently truncated-with-NULs
+				// instead of reporting the problem. The flat-plain path in
+				// writeDataBlocks already rejects this.
+				if n != int64(e.size) {
+					return fmt.Errorf("write inline data for %s: short read: got %d bytes, expected %d",
+						e.path, n, e.size)
 				}
 				metaStart += int(n)
 			}
@@ -459,13 +522,7 @@ func (w *erofsWriter) writeInode(buf io.Writer, e *erofsEntry) error {
 		inodeData = e.rdev
 	}
 
-	fileSize := e.size
-	switch e.mode & disk.StatTypeMask {
-	case disk.StatTypeDir:
-		fileSize = uint64(w.direntDataSize(e))
-	case disk.StatTypeSymlink:
-		fileSize = uint64(len(e.symTarget))
-	}
+	fileSize := w.inodeFileSize(e)
 
 	b := &w.inodeBuf
 	clear(b[:])
@@ -554,7 +611,7 @@ func (w *erofsWriter) writeChunkIndexes(buf io.Writer, e *erofsEntry) error {
 		var scratch [disk.SizeChunkIndex]byte
 		ci := 0   // index into source chunks
 		coff := 0 // block offset within current source chunk
-		for n := 0; n < nchunks; n++ {
+		for range nchunks {
 			if ci >= len(e.chunks) {
 				if _, err := buf.Write(nullIdx[:]); err != nil {
 					return err
@@ -569,7 +626,12 @@ func (w *erofsWriter) writeChunkIndexes(buf io.Writer, e *erofsEntry) error {
 				}
 			} else {
 				phys := c.PhysicalBlock + uint64(coff)
-				binary.LittleEndian.PutUint16(scratch[0:2], uint16(phys>>32))
+				// The first two bytes are the kernel's "advise" field, which
+				// is defined to be zero unless the inode declares the 48-bit
+				// chunk format. Nothing here sets that bit, so writing the
+				// address's high half there produced an image the kernel and
+				// this reader both resolve as phys mod 2^32. checkLimits
+				// rejects anything that would need those bits.
 				binary.LittleEndian.PutUint16(scratch[2:4], c.DeviceID)
 				binary.LittleEndian.PutUint32(scratch[4:8], uint32(phys))
 				if _, err := buf.Write(scratch[:]); err != nil {
@@ -583,7 +645,7 @@ func (w *erofsWriter) writeChunkIndexes(buf io.Writer, e *erofsEntry) error {
 			}
 		}
 	} else {
-		for n := 0; n < nchunks; n++ {
+		for range nchunks {
 			if _, err := buf.Write(nullIdx[:]); err != nil {
 				return err
 			}
@@ -614,8 +676,8 @@ func (w *erofsWriter) writeDirents(buf io.Writer, e *erofsEntry) (int, error) {
 			fileType: c.erofsFileType,
 		})
 	}
-	sort.Slice(allEnts, func(i, j int) bool {
-		return allEnts[i].name < allEnts[j].name
+	slices.SortFunc(allEnts, func(a, b direntInfo) int {
+		return cmp.Compare(a.name, b.name)
 	})
 
 	totalWritten := 0
@@ -644,30 +706,24 @@ func (w *erofsWriter) writeDirents(buf io.Writer, e *erofsEntry) (int, error) {
 		blockEnts := allEnts[start:i]
 		blockHeaderSize := len(blockEnts) * disk.SizeDirent
 
-		// Write dirent headers
-		var scratch [disk.SizeDirent]byte
-		nameOff := uint16(blockHeaderSize)
+		// Serialized into a block-sized scratch buffer and written once.
+		// Writing each 12-byte header and each name separately is a syscall
+		// apiece when out is an *os.File — invisible to an in-memory
+		// benchmark, and the dominant cost when writing to disk.
+		blk := w.direntBuf(blockUsed)
+		nameOff := blockHeaderSize
 		for j, de := range blockEnts {
-			if j > 0 {
-				nameOff += uint16(len(blockEnts[j-1].name))
-			}
-			binary.LittleEndian.PutUint64(scratch[0:8], de.nid)
-			binary.LittleEndian.PutUint16(scratch[8:10], nameOff)
-			scratch[10] = de.fileType
-			scratch[11] = 0
-			if _, err := buf.Write(scratch[:]); err != nil {
-				return totalWritten, err
-			}
-			totalWritten += disk.SizeDirent
+			off := j * disk.SizeDirent
+			binary.LittleEndian.PutUint64(blk[off:off+8], de.nid)
+			binary.LittleEndian.PutUint16(blk[off+8:off+10], uint16(nameOff))
+			blk[off+10] = de.fileType
+			blk[off+11] = 0
+			nameOff += copy(blk[nameOff:], de.name)
 		}
-
-		// Write names
-		for _, de := range blockEnts {
-			n, err := io.WriteString(buf, de.name)
-			if err != nil {
-				return totalWritten, err
-			}
-			totalWritten += n
+		n, err := buf.Write(blk)
+		totalWritten += n
+		if err != nil {
+			return totalWritten, err
 		}
 
 		// Pad to block boundary if there are more entries

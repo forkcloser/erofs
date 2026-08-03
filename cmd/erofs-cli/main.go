@@ -37,7 +37,7 @@ func run(path string) error {
 
 	fmt.Printf("Found valid image...\n")
 
-	err = fs.WalkDir(img, "/", func(path string, entry fs.DirEntry, err error) error {
+	err = fs.WalkDir(img, ".", func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return fmt.Errorf("error visiting %s: %w", path, err)
 		}
@@ -61,9 +61,6 @@ func run(path string) error {
 			for k, v := range st.Xattrs {
 				fmt.Printf("\t\t%s: %q\n", k, v)
 			}
-		}
-		if entry.Name() == "." || entry.Name() == ".." {
-			return fs.SkipDir
 		}
 		return nil
 	})

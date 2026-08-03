@@ -21,8 +21,11 @@ func entryFromSys(info fs.FileInfo) *builder.Entry {
 			GID:     sys.Gid,
 			Mtime:   uint64(sys.Mtim.Sec),
 			MtimeNs: uint32(sys.Mtim.Nsec),
-			Nlink:   uint32(sys.Nlink),
-			Rdev:    uint32(sys.Rdev),
+			// Nlink is uint64 on linux/amd64 and uint32 on arm64 and 386, so
+			// this looks redundant to a linter running on one of the latter
+			// and is a compile error without it on the former.
+			Nlink: uint32(sys.Nlink), //nolint:unconvert
+			Rdev:  uint32(sys.Rdev),
 		}
 	default:
 		return nil

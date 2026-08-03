@@ -1,13 +1,14 @@
 package erofs
 
 import (
+	"cmp"
 	"fmt"
 	"io"
 	"io/fs"
 	"math/bits"
 	"os"
 	"path"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -37,6 +38,11 @@ type Writer struct {
 	copyMetadataOnly bool   // metadata-only for current CopyFrom
 	copyMerge        bool   // merge mode: apply whiteouts
 	copyDeviceID     uint16 // device ID assigned to current MetadataOnly CopyFrom
+
+	// openFile is the file returned by the most recent Create that has not
+	// been closed. Data is appended to one shared stream, so at most one
+	// writer may be open at a time.
+	openFile *File
 
 	dataFile *os.File // external data file (nil = spool mode)
 	dataOff  int64    // current byte offset in data file
@@ -100,9 +106,13 @@ func Create(out io.WriteSeeker, opts ...CreateOpt) *Writer {
 		// The reserved slot is filled in with the actual block count at Close.
 		fsys.devices = append(fsys.devices, 0)
 		off, err := o.dataFile.Seek(0, io.SeekEnd)
-		if err == nil {
-			fsys.dataOff = off
+		if err != nil {
+			// Leaving dataOff at 0 would make the first file's chunk indexes
+			// point at block 0 while its bytes land wherever the file
+			// position actually is.
+			fsys.wErr = fmt.Errorf("mkfs: seek data file: %w", err)
 		}
+		fsys.dataOff = off
 	}
 
 	return fsys
@@ -175,10 +185,18 @@ func WithTempDir(dir string) CreateOpt {
 // --- Writer entry methods ---
 
 // Create creates a regular file with default mode 0644. The caller must
-// Close the returned File.
+// Close the returned File before creating another one, or before calling
+// [Writer.CopyFrom] or [Writer.Close].
+//
+// Only one file may be open for writing at a time. File data is appended to a
+// single stream, so a second writer would interleave its bytes with the
+// first's; Create returns an error rather than let that happen silently.
 func (fsys *Writer) Create(name string) (*File, error) {
 	if fsys.wErr != nil {
 		return nil, fsys.wErr
+	}
+	if err := fsys.checkNoOpenFile("create another file"); err != nil {
+		return nil, err
 	}
 	name = cleanPath(name)
 	if name == "/" {
@@ -188,7 +206,9 @@ func (fsys *Writer) Create(name string) (*File, error) {
 		return nil, err
 	}
 
-	fsys.ensureParent(name)
+	if err := fsys.ensureParent(name); err != nil {
+		return nil, err
+	}
 
 	e := &fsEntry{
 		path: name,
@@ -202,6 +222,9 @@ func (fsys *Writer) Create(name string) (*File, error) {
 	}
 
 	if fsys.dataFile != nil {
+		if err := fsys.alignDataOff(); err != nil {
+			return nil, err
+		}
 		f.dataStartOff = fsys.dataOff
 		e.dataStartOff = fsys.dataOff
 	} else {
@@ -213,7 +236,20 @@ func (fsys *Writer) Create(name string) (*File, error) {
 		e.dataStartOff = fsys.spoolOff
 	}
 
+	fsys.openFile = f
+
 	return f, nil
+}
+
+// checkNoOpenFile reports an error when a file from Create is still open.
+// action names what the caller was attempting, for the message.
+func (fsys *Writer) checkNoOpenFile(action string) error {
+	if fsys.openFile == nil {
+		return nil
+	}
+
+	return fmt.Errorf("mkfs: %q is still open for writing; close it before you %s",
+		fsys.openFile.entry.path, action)
 }
 
 // Mkdir creates a directory. Only permission bits from perm are used,
@@ -233,7 +269,9 @@ func (fsys *Writer) Mkdir(name string, perm fs.FileMode) error {
 		return err
 	}
 
-	fsys.ensureParent(name)
+	if err := fsys.ensureParent(name); err != nil {
+		return err
+	}
 
 	e := &fsEntry{
 		path: name,
@@ -253,11 +291,16 @@ func (fsys *Writer) Symlink(oldname, newname string) error {
 	if newname == "/" {
 		return fmt.Errorf("mkfs: cannot create symlink at root")
 	}
+	if oldname == "" {
+		return fmt.Errorf("mkfs: %s: empty symlink target: %w", newname, ErrInvalid)
+	}
 	if err := fsys.checkPath(newname); err != nil {
 		return err
 	}
 
-	fsys.ensureParent(newname)
+	if err := fsys.ensureParent(newname); err != nil {
+		return err
+	}
 
 	e := &fsEntry{
 		path:       newname,
@@ -300,7 +343,9 @@ func (fsys *Writer) Link(oldname, newname string) error {
 		return err
 	}
 
-	fsys.ensureParent(newname)
+	if err := fsys.ensureParent(newname); err != nil {
+		return err
+	}
 
 	e := &fsEntry{
 		path:   newname,
@@ -327,7 +372,9 @@ func (fsys *Writer) Mknod(name string, mode uint16, rdev uint32) error {
 		return err
 	}
 
-	fsys.ensureParent(name)
+	if err := fsys.ensureParent(name); err != nil {
+		return err
+	}
 
 	e := &fsEntry{
 		path: name,
@@ -387,9 +434,16 @@ func (fsys *Writer) Chtimes(name string, atime time.Time, mtime time.Time) error
 }
 
 // Setxattr sets an extended attribute on the named path.
+//
+// The name (after any standard prefix) must be at most 255 bytes and the
+// value at most 65535, matching both the on-disk field widths and the limits
+// Linux itself applies.
 func (fsys *Writer) Setxattr(name, attr, value string) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
+	}
+	if err := validateXattr(attr, value); err != nil {
+		return err
 	}
 	e, err := fsys.lookup(name)
 	if err != nil {
@@ -426,6 +480,11 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
 	}
+	// CopyFrom appends file data to the same stream as Create, so an open
+	// writer would have the copied bytes interleaved into its region.
+	if err := fsys.checkNoOpenFile("call CopyFrom"); err != nil {
+		return err
+	}
 	// Reset per-CopyFrom state.
 	fsys.copyMetadataOnly = false
 	fsys.copyMerge = false
@@ -448,6 +507,12 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 		}
 		if fsys.copyMetadataOnly {
 			devBlocks := srcImg.deviceBlocks()
+			// A device id is 16 bits on disk, so a table that would not fit
+			// has to be refused rather than wrapped into an id naming some
+			// other device — or, at 65536, the primary image itself.
+			if err := fsys.checkDeviceCount(len(devBlocks)); err != nil {
+				return err
+			}
 			fsys.devices = append(fsys.devices, devBlocks...)
 			fsys.copyDeviceID = uint16(len(fsys.devices) - len(devBlocks) + 1)
 			return fsys.copyFromImage(srcImg)
@@ -460,6 +525,9 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 	}
 	if fsys.copyMetadataOnly {
 		if db, ok := src.(deviceBlocker); ok {
+			if err := fsys.checkDeviceCount(1); err != nil {
+				return err
+			}
 			fsys.devices = append(fsys.devices, db.DeviceBlocks())
 			fsys.copyDeviceID = uint16(len(fsys.devices))
 		}
@@ -629,6 +697,11 @@ func (fsys *Writer) Close() error {
 	if fsys.closed {
 		return fmt.Errorf("mkfs: FS already closed")
 	}
+	// A file's size is recorded by File.Close. Serializing now would emit it
+	// as empty and drop whatever was already written to it.
+	if err := fsys.checkNoOpenFile("close the image"); err != nil {
+		return err
+	}
 	fsys.closed = true
 
 	if fsys.spool != nil {
@@ -654,18 +727,21 @@ func (fsys *Writer) Close() error {
 		return fsys.wErr // e.g. a hardlink whose target was removed
 	}
 
-	var chunkBits uint8
-	for cs := fsys.blockSize; cs < 4096; cs <<= 1 {
-		chunkBits++
-	}
-
 	ew := &erofsWriter{
 		buildTime:   buildTime,
 		buildTimeNs: fsys.buildTimeNs,
 		devices:     fsys.devices,
 		blockSize:   fsys.blockSize,
-		chunkBits:   chunkBits,
-		zeroBuf:     make([]byte, fsys.blockSize),
+		// chunkBits 0 makes the chunk size equal the block size, which is the
+		// only granularity at which an arbitrary extent list can be mapped
+		// exactly: chunk indexes carry one mapping per chunk, while chunks
+		// and DataRange describe extents per block. A larger chunk size
+		// silently swallows any extent or hole boundary that falls inside a
+		// chunk. Contiguous files still get a larger chunk size per entry via
+		// minChunkBits, where a single extent covers the whole file and there
+		// are no interior boundaries to lose.
+		chunkBits: 0,
+		zeroBuf:   make([]byte, fsys.blockSize),
 	}
 
 	ew.planLayout(root)
@@ -777,6 +853,9 @@ func (f *File) Close() error {
 	f.closed = true
 	f.entry.fileClosed = true
 	f.entry.size = uint64(f.written)
+	if f.fs.openFile == f {
+		f.fs.openFile = nil
+	}
 
 	if f.fs.dataFile != nil {
 		return f.closeDataFile()
@@ -933,6 +1012,7 @@ type erofsEntry struct {
 	xattrSize     int  // bytes of xattr area (0 if no xattrs)
 	chunkPad      int  // 8-byte alignment pad between xattr area and chunk-index map
 	trailingSize  int
+	direntSize    int // memoized dirent data size; 0 = not yet computed
 
 	// Data block address for flat-plain files (full-image mode)
 	dataBlkAddr uint32
@@ -1081,8 +1161,8 @@ func (d *readDir) collectChildren() []fs.DirEntry {
 		}
 		children = append(children, &dirEntry{entry: e})
 	}
-	sort.Slice(children, func(i, j int) bool {
-		return children[i].Name() < children[j].Name()
+	slices.SortFunc(children, func(a, b fs.DirEntry) int {
+		return cmp.Compare(a.Name(), b.Name())
 	})
 	return children
 }
@@ -1102,7 +1182,16 @@ func (de *dirEntry) Info() (fs.FileInfo, error) { return &writerFileInfo{entry: 
 // platform-specific stat types as a fallback for plain fs.FS sources.
 func (fsys *Writer) add(p string, info fs.FileInfo) error {
 	p = cleanPath(p)
+	if err := checkPathLen(p); err != nil {
+		return err
+	}
 	mode := goModeToUnixMode(info.Mode())
+	// A source fs.FS is not trusted to report a sane size: a negative one
+	// converts to a near-2^64 e.size that the layout planner then sees as a
+	// small negative int, producing a plausible-looking but misaligned image.
+	if info.Size() < 0 {
+		return fmt.Errorf("mkfs: %s: negative size %d", p, info.Size())
+	}
 	size := uint64(info.Size())
 	typ := mode & disk.StatTypeMask
 
@@ -1126,7 +1215,9 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 		return nil
 	}
 
-	fsys.ensureParent(p)
+	if err := fsys.ensureParent(p); err != nil {
+		return err
+	}
 
 	fe := &fsEntry{
 		path:       p,
@@ -1162,16 +1253,8 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 
 	if fsys.copyMetadataOnly {
 		fe.metadataOnly = true
-		// Remap chunk DeviceIDs from source-relative to absolute.
-		// For single-device sources, all chunks use DeviceID=1
-		// and get mapped to copyDeviceID.
-		// For multi-device sources (e.g. EROFS images), chunks have
-		// DeviceIDs 1..N that get offset by copyDeviceID-1.
-		if fsys.copyDeviceID > 0 {
-			offset := fsys.copyDeviceID - 1
-			for i := range fe.chunks {
-				fe.chunks[i].DeviceID += offset
-			}
+		if err := fsys.remapChunkDevices(p, fe.chunks); err != nil {
+			return err
 		}
 	}
 
@@ -1185,6 +1268,9 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 		fe.contiguous = false
 		if fsys.dataFile != nil {
 			// Data file mode: copy through File for block-aligned padding and chunk recording.
+			if err := fsys.alignDataOff(); err != nil {
+				return err
+			}
 			f := &File{fs: fsys, entry: fe}
 			f.dataStartOff = fsys.dataOff
 			fe.dataStartOff = fsys.dataOff
@@ -1211,35 +1297,68 @@ func (fsys *Writer) checkPath(name string) error {
 	if fsys.closed {
 		return fmt.Errorf("mkfs: FS is closed")
 	}
+	if err := checkPathLen(name); err != nil {
+		return err
+	}
 	if _, ok := fsys.byPath[name]; ok {
 		return fmt.Errorf("mkfs: duplicate path %q", name)
 	}
 	return nil
 }
 
+// checkPathLen rejects paths longer than any system can use.
+//
+// Besides being meaningless, an unbounded path is how a non-terminating walk
+// shows up here: a source whose directory graph is not a tree — an EROFS
+// image with a directory reachable from itself, say — yields ever-deeper
+// paths, and CopyFrom walks it through fs.WalkDir, which has no cycle
+// detection for any fs.FS. Refusing the path stops the walk with an error
+// instead of letting it run until memory is gone.
+func checkPathLen(name string) error {
+	if len(name) > maxPathLen {
+		return fmt.Errorf("mkfs: path is %d bytes, over the %d byte limit (a source whose directories form a cycle looks like this): %w",
+			len(name), maxPathLen, ErrInvalid)
+	}
+
+	return nil
+}
+
 // ensureParent creates implicit parent directories for name.
-func (fsys *Writer) ensureParent(name string) {
+//
+// An existing ancestor that is not a directory is an error. Attaching a child
+// to one would succeed here and then vanish during serialization, because
+// planLayout only descends into directories — the entry would be reachable
+// through the Writer but absent from the image.
+func (fsys *Writer) ensureParent(name string) error {
 	dir := path.Dir(name)
 	if dir == "/" {
-		return
+		return nil
 	}
 	// Walk up to find existing ancestors.
 	var missing []string
 	for d := dir; d != "/"; d = path.Dir(d) {
-		if _, ok := fsys.byPath[d]; ok {
+		if e, ok := fsys.byPath[d]; ok {
+			if e.linkTo != nil {
+				e = e.linkTo
+			}
+			if e.mode&disk.StatTypeMask != disk.StatTypeDir {
+				return &fs.PathError{Op: "mkdir", Path: d, Err: ErrNotDirectory}
+			}
+
 			break
 		}
 		missing = append(missing, d)
 	}
 	// Create in top-down order.
-	for i := len(missing) - 1; i >= 0; i-- {
-		d := missing[i]
+	for _, d := range slices.Backward(missing) {
 		e := &fsEntry{
 			path: d,
 			mode: disk.StatTypeDir | 0o755,
 		}
 		fsys.addChild(e)
 	}
+
+	return nil
 }
 
 // addChild registers an entry in the tree and byPath map.
@@ -1307,7 +1426,23 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 		er *erofsEntry
 	}
 
-	rootEr := fsys.fsToErofs(fsys.root)
+	// erofsEntry values are carved from one slab rather than allocated one at
+	// a time: there is exactly one per registered path, so the capacity is
+	// known up front and append never reallocates — which is what keeps the
+	// pointers handed out valid. The fallback covers the count being wrong.
+	arena := make([]erofsEntry, 0, len(fsys.byPath))
+	alloc := func(e *fsEntry) *erofsEntry {
+		if len(arena) == cap(arena) {
+			er := fsys.fsToErofs(e)
+
+			return &er
+		}
+		arena = append(arena, fsys.fsToErofs(e))
+
+		return &arena[len(arena)-1]
+	}
+
+	rootEr := alloc(fsys.root)
 	queue := []pair{{fsys.root, rootEr}}
 
 	// Hardlink wiring happens after the walk: an alias may sit in a
@@ -1358,7 +1493,7 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 				aliases = append(aliases, aliasFixup{target: c.linkTo, er: ent})
 				continue
 			}
-			ent := fsys.fsToErofs(c)
+			ent := alloc(c)
 			cur.er.children = append(cur.er.children, ent)
 			if c.extraLinks > 0 {
 				if converted == nil {
@@ -1372,8 +1507,8 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 		}
 
 		// Sort children for deterministic output.
-		sort.Slice(cur.er.children, func(i, j int) bool {
-			return cur.er.children[i].name < cur.er.children[j].name
+		slices.SortFunc(cur.er.children, func(a, b *erofsEntry) int {
+			return cmp.Compare(a.name, b.name)
 		})
 	}
 
@@ -1393,7 +1528,7 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 }
 
 // fsToErofs converts a single fsEntry to an erofsEntry, resolving data readers.
-func (fsys *Writer) fsToErofs(e *fsEntry) *erofsEntry {
+func (fsys *Writer) fsToErofs(e *fsEntry) erofsEntry {
 	var nlink uint32
 	switch {
 	case e.nlinkSet:
@@ -1414,7 +1549,7 @@ func (fsys *Writer) fsToErofs(e *fsEntry) *erofsEntry {
 		}
 	}
 
-	return &erofsEntry{
+	return erofsEntry{
 		mode:          e.mode,
 		uid:           e.uid,
 		gid:           e.gid,
@@ -1478,6 +1613,62 @@ func (fsys *Writer) zeroPad() []byte {
 	return fsys.padBuf
 }
 
+// checkDeviceCount rejects a device table that cannot be addressed.
+//
+// Chunk device ids are 16 bits, and id 0 names the primary image, so the table
+// holds at most 65535 devices. Appending past that wrapped the id arithmetic
+// and produced chunks pointing at an unrelated device.
+func (fsys *Writer) checkDeviceCount(adding int) error {
+	if total := len(fsys.devices) + adding; total > 65535 {
+		return fmt.Errorf("mkfs: %d devices exceeds the %d a 16-bit device id can name: %w",
+			total, 65535, ErrInvalid)
+	}
+
+	return nil
+}
+
+// remapChunkDevices rewrites a metadata-only entry's chunk DeviceIDs from
+// source-relative to destination-absolute. For single-device sources every
+// chunk uses DeviceID 1 and maps to copyDeviceID; for multi-device sources
+// (e.g. EROFS images) DeviceIDs 1..N are offset by copyDeviceID-1.
+//
+// DeviceID 0 names the source's *own* primary device — the source image file
+// itself. CopyFrom registers only the source's extra devices in the
+// destination, so that device has no representable target here. Offsetting it
+// like the rest silently aliases it onto copyDeviceID-1: the destination image
+// or whichever device precedes the source's, so the file reads back another
+// layer's bytes. chunksFromRanges rejects exactly this confusion for
+// non-EROFS sources; the image fast path must too.
+//
+// Hole chunks carry no device (they serialize to a null index entry), so they
+// are left alone.
+func (fsys *Writer) remapChunkDevices(p string, chunks []builder.Chunk) error {
+	if fsys.copyDeviceID == 0 {
+		return nil
+	}
+	offset := uint64(fsys.copyDeviceID - 1)
+	for i := range chunks {
+		if chunks[i].PhysicalBlock == builder.NullPhysicalBlock {
+			continue
+		}
+		if chunks[i].DeviceID == 0 {
+			return fmt.Errorf(
+				"mkfs: %s: chunk references the source's own device (DeviceID 0), which is not registered in the destination: %w",
+				p, ErrInvalid)
+		}
+		// Device IDs are 1-based indexes into the device table, so the
+		// remapped value must still name a device the destination declares.
+		id := uint64(chunks[i].DeviceID) + offset
+		if id > uint64(len(fsys.devices)) {
+			return fmt.Errorf("mkfs: %s: chunk device %d maps to device %d, past the %d declared devices: %w",
+				p, chunks[i].DeviceID, id, len(fsys.devices), ErrInvalid)
+		}
+		chunks[i].DeviceID = uint16(id)
+	}
+
+	return nil
+}
+
 // chunksFromRanges converts DataRange entries into internal chunk entries.
 // fileSize is the logical size of the file; the sum of all range Sizes must
 // equal fileSize exactly, or an error is returned.
@@ -1523,10 +1714,7 @@ func (fsys *Writer) chunksFromRanges(ranges []DataRange, fileSize int64) ([]buil
 			// Hole: emit NullPhysicalBlock chunks covering the hole span.
 			totalBlocks := (uint64(r.Size) + blockSize - 1) / blockSize
 			for totalBlocks > 0 {
-				count := totalBlocks
-				if count > 65535 {
-					count = 65535
-				}
+				count := min(totalBlocks, 65535)
 				chunks = append(chunks, builder.Chunk{
 					PhysicalBlock: builder.NullPhysicalBlock,
 					Count:         uint16(count),
@@ -1551,10 +1739,7 @@ func (fsys *Writer) chunksFromRanges(ranges []DataRange, fileSize int64) ([]buil
 		startBlock := uint64(r.Offset) / blockSize
 		totalBlocks := (uint64(r.Size) + blockSize - 1) / blockSize
 		for totalBlocks > 0 {
-			count := totalBlocks
-			if count > 65535 {
-				count = 65535
-			}
+			count := min(totalBlocks, 65535)
 			chunks = append(chunks, builder.Chunk{
 				PhysicalBlock: startBlock,
 				Count:         uint16(count),
@@ -1595,6 +1780,32 @@ func (fsys *Writer) lookup(name string) (*fsEntry, error) {
 	return e, nil
 }
 
+// alignDataOff pads the data file up to a block boundary.
+//
+// A chunk records where a file's bytes start as a block number, so the start
+// offset has to divide exactly. closeDataFile pads after every file it writes,
+// which makes every offset after the first one aligned — but the first
+// inherits dataOff from a Seek to the end of a pre-existing data file, and
+// that need not be aligned at all. The division then truncated and the chunk
+// pointed at an earlier block, so the file read back somebody else's bytes.
+func (fsys *Writer) alignDataOff() error {
+	if fsys.dataFile == nil {
+		return nil
+	}
+	bs := int64(fsys.resolveBlockSize())
+	rem := fsys.dataOff % bs
+	if rem == 0 {
+		return nil
+	}
+	n, err := fsys.dataFile.Write(fsys.zeroPad()[:bs-rem])
+	fsys.dataOff += int64(n)
+	if err != nil {
+		return fmt.Errorf("mkfs: pad data file: %w", err)
+	}
+
+	return nil
+}
+
 // closeDataFile pads the data file to a block boundary and records chunks.
 func (f *File) closeDataFile() error {
 	if f.written == 0 {
@@ -1618,10 +1829,7 @@ func (f *File) closeDataFile() error {
 	totalBlocks := (uint64(f.written) + uint64(f.fs.resolveBlockSize()) - 1) / uint64(f.fs.resolveBlockSize())
 
 	for totalBlocks > 0 {
-		count := totalBlocks
-		if count > 65535 {
-			count = 65535
-		}
+		count := min(totalBlocks, 65535)
 		f.entry.chunks = append(f.entry.chunks, builder.Chunk{
 			PhysicalBlock: startBlock,
 			Count:         uint16(count),
@@ -1639,7 +1847,11 @@ func (f *File) closeDataFile() error {
 const (
 	minBlockSize     = 512
 	defaultBlockSize = 4096
-	nullAddr         = 0xFFFFFFFF // marks a hole/sparse chunk
+
+	// maxPathLen matches Linux PATH_MAX. Nothing deeper is usable, and the
+	// bound is what makes a walk over a cyclic source terminate.
+	maxPathLen = 4096
+	nullAddr   = 0xFFFFFFFF // marks a hole/sparse chunk
 
 	// Overlay whiteout markers (AUFS convention used by OCI layers).
 	whiteoutPrefix = ".wh."
