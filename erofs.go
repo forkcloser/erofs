@@ -840,6 +840,27 @@ func validPath(name string) bool {
 	}
 }
 
+// checkDirentName rejects a dirent name that cannot serve as a path element.
+//
+// EROFS stores names as raw bytes and the on-disk format constrains only their
+// length, so an image is free to name an entry "../../etc/passwd" or to embed
+// a NUL. [io/fs.DirEntry.Name] is contractually a base name, and the standard
+// way to extract a tree — [io/fs.WalkDir] plus filepath.Join — writes outside
+// the destination directory the moment a name carries separators.
+//
+// "." and "..", the directory's own self and parent entries, are legitimate
+// on disk; callers filter them by name rather than treating them as errors.
+func checkDirentName(name []byte) error {
+	if bytes.ContainsRune(name, '/') {
+		return fmt.Errorf("dirent name %q contains a path separator: %w", name, ErrInvalid)
+	}
+	if bytes.ContainsRune(name, 0) {
+		return fmt.Errorf("dirent name %q contains a NUL: %w", name, ErrInvalid)
+	}
+
+	return nil
+}
+
 // resolve walks directory entries to find the target inode.
 // When follow is true, symlinks are followed (including the final component).
 // When follow is false, the final component is not followed (for Lstat/ReadLink).
@@ -1548,6 +1569,12 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 				name = string(raw)
 			}
 
+			if err := checkDirentName([]byte(name)); err != nil {
+				d.img.putBlock(b)
+
+				return ents, err
+			}
+
 			if i >= d.consumed && name != "." && name != ".." {
 				f := file{
 					img:   d.img,
@@ -1689,6 +1716,9 @@ func blockFirstName(buf []byte) ([]byte, error) {
 	if i := bytes.IndexByte(name, 0); i >= 0 {
 		name = name[:i]
 	}
+	if err := checkDirentName(name); err != nil {
+		return nil, err
+	}
 	return name, nil
 }
 
@@ -1721,6 +1751,9 @@ func blockDirent(buf []byte, i, entryN int) (disk.Dirent, []byte, error) {
 		if j := bytes.IndexByte(name, 0); j >= 0 {
 			name = name[:j]
 		}
+	}
+	if err := checkDirentName(name); err != nil {
+		return de, nil, err
 	}
 	return de, name, nil
 }

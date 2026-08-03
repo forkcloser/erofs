@@ -330,7 +330,9 @@ func (fsys *Writer) copyFromImage(img *image) error {
 					}
 				}
 				if dirData != nil {
-					fsys.parseDirBlock(dirData, dirSize, blockSize, cur.path, &queue)
+					if err := fsys.parseDirBlock(dirData, dirSize, blockSize, cur.path, &queue); err != nil {
+						return fmt.Errorf("dir nid %d: %w", cur.nid, err)
+					}
 				}
 			}
 
@@ -432,7 +434,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 
 // parseDirBlock extracts directory entries from dirent data and enqueues
 // child inodes for BFS traversal.
-func (fsys *Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPath string, queue *[]imgQEntry) {
+func (fsys *Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPath string, queue *[]imgQEntry) error {
 	pos := 0
 	for pos < dirSize {
 		blockEnd := min(pos+blockSize, dirSize)
@@ -471,16 +473,32 @@ func (fsys *Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPat
 			if name == "." || name == ".." || name == "" {
 				continue
 			}
+			// A name is one path element. Without this a nested dirent named
+			// "y/../../../.wh..wh..opq" builds a childPath that path.Dir
+			// collapses to "/", so the merge-mode whiteout handler wipes every
+			// entry from every prior layer; "x/../../.wh.secret" deletes an
+			// arbitrary path, and a plain "etc/passwd" overwrites a file in a
+			// directory the source never named.
+			if err := checkDirentName(nameBytes); err != nil {
+				return fmt.Errorf("in %s: %w", parentPath, err)
+			}
 
 			childPath := parentPath + "/" + name
 			if parentPath == "/" {
 				childPath = "/" + name
+			}
+			// The reader's own resolve refuses to walk a path this long, and
+			// add applies the same bound on the full-image route.
+			if err := checkPathLen(childPath); err != nil {
+				return err
 			}
 			*queue = append(*queue, imgQEntry{nid: nid, path: childPath})
 		}
 
 		pos = blockEnd
 	}
+
+	return nil
 }
 
 // chunkMapBytes returns the on-disk size of the chunk-index map an inode of

@@ -666,3 +666,123 @@ func TestResolveRejectsOverlongPath(t *testing.T) {
 		t.Errorf("rejecting an over-long path took %d ReadAt calls, want it rejected before any walk", n)
 	}
 }
+
+// patchDirentName replaces a marker name in an image with a same-length name
+// the writer would never produce, so a test can express a hostile dirent
+// without hand-assembling a directory block.
+func patchDirentName(t *testing.T, buf []byte, from, to string) {
+	t.Helper()
+
+	if len(from) != len(to) {
+		t.Fatalf("replacement %q is %d bytes, marker %q is %d", to, len(to), from, len(from))
+	}
+	i := bytes.Index(buf, []byte(from))
+	if i < 0 {
+		t.Fatalf("marker %q not found in the image", from)
+	}
+	copy(buf[i:], to)
+}
+
+// TestDirentNameIsABaseName covers a dirent whose name carries a path
+// separator. fs.DirEntry.Name is contractually a base name, and the standard
+// extraction pattern — fs.WalkDir plus filepath.Join — writes outside the
+// destination directory the moment it is not: classic zip-slip, driven by the
+// image rather than by the caller.
+func TestDirentNameIsABaseName(t *testing.T) {
+	out := &seekBuf{}
+	w := Create(out)
+	f, err := w.Create("/AAAAAAAAAA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("pwned")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	patchDirentName(t, out.buf, "AAAAAAAAAA", "../../evil")
+
+	img, err := Open(bytes.NewReader(out.buf))
+	if err != nil {
+		t.Fatalf("tampered image failed to open: %v", err)
+	}
+
+	if ents, err := fs.ReadDir(img, "."); err == nil {
+		for _, e := range ents {
+			t.Errorf("ReadDir returned name %q, want an error", e.Name())
+		}
+	} else if !errors.Is(err, ErrInvalid) {
+		t.Errorf("ReadDir err = %v, want it to wrap ErrInvalid", err)
+	}
+
+	err = fs.WalkDir(img, ".", func(p string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if p != "." {
+			t.Errorf("WalkDir yielded path %q, want an error", p)
+		}
+
+		return nil
+	})
+	if err == nil {
+		t.Error("WalkDir walked an image with a separator in a dirent name")
+	}
+}
+
+// TestMergeWhiteoutCannotEscapeItsDirectory covers a dirent name carrying a
+// path traversal in merge mode. copyFromImage built childPath by plain
+// concatenation, so a nested entry named "y/../../../.wh..wh..opq" produced a
+// path whose path.Dir collapses to "/" — and the opaque-whiteout branch then
+// removed every entry contributed by every prior layer.
+func TestMergeWhiteoutCannotEscapeItsDirectory(t *testing.T) {
+	out := &seekBuf{}
+	w := Create(out)
+	if err := w.Mkdir("/d", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Mkdir("/d/BBBBBBBBBBBBBBBBBBBBBBB", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	patchDirentName(t, out.buf, "BBBBBBBBBBBBBBBBBBBBBBB", "y/../../../.wh..wh..opq")
+
+	hostile, err := Open(bytes.NewReader(out.buf))
+	if err != nil {
+		t.Fatalf("tampered image failed to open: %v", err)
+	}
+
+	dst := Create(&seekBuf{})
+	keep, err := dst.Create("/keep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := keep.Write([]byte("PRIOR LAYER DATA")); err != nil {
+		t.Fatal(err)
+	}
+	if err := keep.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := dst.Mkdir("/etc", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err = dst.CopyFrom(hostile, MetadataOnly(), Merge())
+	if err == nil {
+		t.Fatal("merge accepted a dirent name containing a path separator")
+	}
+	if !errors.Is(err, ErrInvalid) {
+		t.Errorf("err = %v, want it to wrap ErrInvalid", err)
+	}
+	for _, p := range []string{"/keep", "/etc"} {
+		if _, ok := dst.byPath[p]; !ok {
+			t.Errorf("%s from the prior layer was removed", p)
+		}
+	}
+}
