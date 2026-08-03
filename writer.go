@@ -83,7 +83,7 @@ const maxChunkIndexEntries = 1 << 27
 // untrusted inode, where the obvious int conversion either overflows to a
 // negative count or yields a count whose index map is far larger than any
 // real filesystem. The clamped value is over the limit by one, so
-// checkChunkLimits rejects the entry before anything is written.
+// checkLimits rejects the entry before anything is written.
 func (w *erofsWriter) chunkCount(e *erofsEntry) int {
 	cs := uint64(w.entryChunkSize(e))
 	if cs == 0 {
@@ -100,17 +100,25 @@ func (w *erofsWriter) chunkCount(e *erofsEntry) int {
 	return int(n)
 }
 
-// checkChunkLimits rejects entries whose chunk-index map exceeds what the
-// reader will parse back. Called before any serialization so an implausible
-// size never reaches the metadata buffer.
-func (w *erofsWriter) checkChunkLimits() error {
+// checkLimits rejects entries the on-disk format cannot represent. It runs
+// before any serialization, so an entry that would be silently truncated into
+// a narrower field never reaches the metadata buffer.
+func (w *erofsWriter) checkLimits() error {
 	for _, e := range w.entries {
-		if e.layout != disk.LayoutChunkBased {
-			continue
-		}
-		if w.chunkCount(e) > maxChunkIndexEntries {
+		if e.layout == disk.LayoutChunkBased && w.chunkCount(e) > maxChunkIndexEntries {
 			return fmt.Errorf("mkfs: %s: chunk index for a %d byte file exceeds the %d entry limit: %w",
 				e.path, e.size, int64(maxChunkIndexEntries), ErrInvalid)
+		}
+		// Setxattr validates at the API boundary, but xattrs also arrive
+		// through CopyFrom, where the source picks the lengths.
+		for _, name := range sortedXattrKeys(e.xattrs) {
+			if err := validateXattr(name, e.xattrs[name]); err != nil {
+				return fmt.Errorf("mkfs: %s: %w", e.path, err)
+			}
+		}
+		if e.xattrSize > 0 && xattrICount(e.xattrSize) > maxXattrICount {
+			return fmt.Errorf("mkfs: %s: xattr area of %d bytes needs more than the %d entries i_xattr_icount can hold: %w",
+				e.path, e.xattrSize, maxXattrICount, ErrInvalid)
 		}
 	}
 
@@ -128,7 +136,7 @@ func (w *erofsWriter) minChunkBits(size uint64) uint8 {
 }
 
 func (w *erofsWriter) write(out io.WriteSeeker) error {
-	if err := w.checkChunkLimits(); err != nil {
+	if err := w.checkLimits(); err != nil {
 		return err
 	}
 	w.copyBuf = make([]byte, 256*1024) // shared io.CopyBuffer buffer
@@ -296,9 +304,13 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 		extraDevices = uint16(len(w.devices))
 		devtSlotOff = uint16(disk.SizeSuperBlock / 16)
 	}
+	// Keyed off the resolved layout, not off len(e.chunks): a metadata-only
+	// entry with no chunk mappings still gets LayoutChunkBased, and an image
+	// carrying chunk-based inodes has to declare the feature.
 	for _, e := range w.entries {
-		if len(e.chunks) > 0 {
+		if e.layout == disk.LayoutChunkBased {
 			featureIncompat |= disk.FeatureIncompatChunkedFile
+
 			break
 		}
 	}
@@ -395,6 +407,15 @@ func (w *erofsWriter) writeMetadataInodes(buf io.Writer) error {
 				}
 				if err != nil {
 					return fmt.Errorf("write inline data for %s: %w", e.path, err)
+				}
+				// The layout reserved e.size bytes here. A short source would
+				// otherwise be padded out with the zero fill that aligns the
+				// next inode, leaving the file silently truncated-with-NULs
+				// instead of reporting the problem. The flat-plain path in
+				// writeDataBlocks already rejects this.
+				if n != int64(e.size) {
+					return fmt.Errorf("write inline data for %s: short read: got %d bytes, expected %d",
+						e.path, n, e.size)
 				}
 				metaStart += int(n)
 			}

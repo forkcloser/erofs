@@ -17,6 +17,10 @@ type sparseFS struct {
 	blocks    uint64
 	size      int64
 	ranges    []DataRange
+	// noRanges makes DataRange report nothing, the shape a metadata-only
+	// source takes when it cannot describe where its data lives. The entry
+	// still becomes chunk-based, just with no mappings.
+	noRanges bool
 }
 
 func (s *sparseFS) BlockSize() uint32    { return s.blockSize }
@@ -90,7 +94,7 @@ func (i *sparseInfo) IsDir() bool        { return i.dir }
 func (i *sparseInfo) Sys() any           { return nil }
 
 func (i *sparseInfo) DataRange() []DataRange {
-	if i.dir {
+	if i.dir || i.s.noRanges {
 		return nil
 	}
 

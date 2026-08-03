@@ -105,9 +105,13 @@ func Create(out io.WriteSeeker, opts ...CreateOpt) *Writer {
 		// The reserved slot is filled in with the actual block count at Close.
 		fsys.devices = append(fsys.devices, 0)
 		off, err := o.dataFile.Seek(0, io.SeekEnd)
-		if err == nil {
-			fsys.dataOff = off
+		if err != nil {
+			// Leaving dataOff at 0 would make the first file's chunk indexes
+			// point at block 0 while its bytes land wherever the file
+			// position actually is.
+			fsys.wErr = fmt.Errorf("mkfs: seek data file: %w", err)
 		}
+		fsys.dataOff = off
 	}
 
 	return fsys
@@ -201,7 +205,9 @@ func (fsys *Writer) Create(name string) (*File, error) {
 		return nil, err
 	}
 
-	fsys.ensureParent(name)
+	if err := fsys.ensureParent(name); err != nil {
+		return nil, err
+	}
 
 	e := &fsEntry{
 		path: name,
@@ -259,7 +265,9 @@ func (fsys *Writer) Mkdir(name string, perm fs.FileMode) error {
 		return err
 	}
 
-	fsys.ensureParent(name)
+	if err := fsys.ensureParent(name); err != nil {
+		return err
+	}
 
 	e := &fsEntry{
 		path: name,
@@ -283,7 +291,9 @@ func (fsys *Writer) Symlink(oldname, newname string) error {
 		return err
 	}
 
-	fsys.ensureParent(newname)
+	if err := fsys.ensureParent(newname); err != nil {
+		return err
+	}
 
 	e := &fsEntry{
 		path:       newname,
@@ -326,7 +336,9 @@ func (fsys *Writer) Link(oldname, newname string) error {
 		return err
 	}
 
-	fsys.ensureParent(newname)
+	if err := fsys.ensureParent(newname); err != nil {
+		return err
+	}
 
 	e := &fsEntry{
 		path:   newname,
@@ -353,7 +365,9 @@ func (fsys *Writer) Mknod(name string, mode uint16, rdev uint32) error {
 		return err
 	}
 
-	fsys.ensureParent(name)
+	if err := fsys.ensureParent(name); err != nil {
+		return err
+	}
 
 	e := &fsEntry{
 		path: name,
@@ -413,9 +427,16 @@ func (fsys *Writer) Chtimes(name string, atime time.Time, mtime time.Time) error
 }
 
 // Setxattr sets an extended attribute on the named path.
+//
+// The name (after any standard prefix) must be at most 255 bytes and the
+// value at most 65535, matching both the on-disk field widths and the limits
+// Linux itself applies.
 func (fsys *Writer) Setxattr(name, attr, value string) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
+	}
+	if err := validateXattr(attr, value); err != nil {
+		return err
 	}
 	e, err := fsys.lookup(name)
 	if err != nil {
@@ -1168,7 +1189,9 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 		return nil
 	}
 
-	fsys.ensureParent(p)
+	if err := fsys.ensureParent(p); err != nil {
+		return err
+	}
 
 	fe := &fsEntry{
 		path:       p,
@@ -1260,15 +1283,27 @@ func (fsys *Writer) checkPath(name string) error {
 }
 
 // ensureParent creates implicit parent directories for name.
-func (fsys *Writer) ensureParent(name string) {
+//
+// An existing ancestor that is not a directory is an error. Attaching a child
+// to one would succeed here and then vanish during serialization, because
+// planLayout only descends into directories — the entry would be reachable
+// through the Writer but absent from the image.
+func (fsys *Writer) ensureParent(name string) error {
 	dir := path.Dir(name)
 	if dir == "/" {
-		return
+		return nil
 	}
 	// Walk up to find existing ancestors.
 	var missing []string
 	for d := dir; d != "/"; d = path.Dir(d) {
-		if _, ok := fsys.byPath[d]; ok {
+		if e, ok := fsys.byPath[d]; ok {
+			if e.linkTo != nil {
+				e = e.linkTo
+			}
+			if e.mode&disk.StatTypeMask != disk.StatTypeDir {
+				return &fs.PathError{Op: "mkdir", Path: d, Err: ErrNotDirectory}
+			}
+
 			break
 		}
 		missing = append(missing, d)
@@ -1282,6 +1317,8 @@ func (fsys *Writer) ensureParent(name string) {
 		}
 		fsys.addChild(e)
 	}
+
+	return nil
 }
 
 // addChild registers an entry in the tree and byPath map.

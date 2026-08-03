@@ -1308,8 +1308,8 @@ func (b *file) Read(p []byte) (int, error) {
 		blk, err := b.img.loadBlock(fi, b.offset)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
+				// b.offset already advanced by each block copied above.
 				err = io.EOF
-				b.offset += int64(n)
 			}
 			return n, err
 		}

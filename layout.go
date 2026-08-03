@@ -51,10 +51,13 @@ func (w *erofsWriter) planLayout(root *erofsEntry) {
 		e.nid = uint64(currentOff / 32)
 		e.xattrSize = calcXattrSize(e)
 
-		// Decide compact (32B) vs extended (64B) inode.
+		// Decide compact (32B) vs extended (64B) inode. A compact inode
+		// stores no timestamp: the reader reconstructs it as the superblock's
+		// (BuildTime, BuildTimeNs), so the entry's mtime has to match both
+		// fields, not just the seconds.
 		e.compact = e.uid <= 0xFFFF && e.gid <= 0xFFFF &&
 			e.nlink <= 0xFFFF && e.size <= 0xFFFFFFFF &&
-			e.mtime == w.buildTime && e.mtimeNs == 0
+			e.mtime == w.buildTime && e.mtimeNs == w.buildTimeNs
 
 		inodeSize := disk.SizeInodeExtended
 		if e.compact {

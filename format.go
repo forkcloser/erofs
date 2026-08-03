@@ -1,6 +1,7 @@
 package erofs
 
 import (
+	"fmt"
 	"io/fs"
 	"sort"
 	"strings"
@@ -31,6 +32,36 @@ func xattrSplit(name string) (uint8, string) {
 	return 0, name
 }
 
+// On-disk xattr field limits. erofs_xattr_entry stores the name suffix
+// length in a uint8 and the value length in a uint16, and an inode's
+// i_xattr_icount is a uint16 counting 4-byte units past the header. Linux
+// applies the same bounds (XATTR_NAME_MAX 255, XATTR_SIZE_MAX 65536), so
+// rejecting beyond them costs no real capability.
+const (
+	maxXattrNameLen  = 255
+	maxXattrValueLen = 65535
+	maxXattrICount   = 65535
+)
+
+// validateXattr checks a single attribute against the on-disk field widths.
+// Without this the lengths are silently truncated into their fields while the
+// full bytes are still written, so the recorded and actual sizes disagree and
+// everything after that entry is misparsed — fsck.erofs reports "xattr entry
+// beyond xattr_isize".
+func validateXattr(name, value string) error {
+	_, suffix := xattrSplit(name)
+	if len(suffix) > maxXattrNameLen {
+		return fmt.Errorf("xattr name %q is %d bytes after its prefix, over the %d byte on-disk limit: %w",
+			name, len(suffix), maxXattrNameLen, ErrInvalid)
+	}
+	if len(value) > maxXattrValueLen {
+		return fmt.Errorf("xattr %q has a %d byte value, over the %d byte on-disk limit: %w",
+			name, len(value), maxXattrValueLen, ErrInvalid)
+	}
+
+	return nil
+}
+
 // xattrEntrySize returns the on-disk size of a single xattr entry, padded to 4 bytes.
 func xattrEntrySize(name, value string) int {
 	_, suffix := xattrSplit(name)
@@ -53,12 +84,21 @@ func calcXattrSize(e *erofsEntry) int {
 	return disk.SizeXattrBodyHeader + entriesSize
 }
 
-// xattrCount encodes the xattr area size into the inode XattrCount field.
-func xattrCount(xattrSize int) uint16 {
+// xattrICount is the value i_xattr_icount encodes for an xattr area of the
+// given size, computed in int so an area too large to represent can be
+// detected before it is narrowed into the uint16 field.
+func xattrICount(xattrSize int) int {
 	if xattrSize == 0 {
 		return 0
 	}
-	return uint16((xattrSize-disk.SizeXattrBodyHeader)/disk.SizeXattrEntry) + 1
+
+	return (xattrSize-disk.SizeXattrBodyHeader)/disk.SizeXattrEntry + 1
+}
+
+// xattrCount encodes the xattr area size into the inode XattrCount field.
+// checkLimits has already rejected areas too large for the field.
+func xattrCount(xattrSize int) uint16 {
+	return uint16(xattrICount(xattrSize))
 }
 
 // sortedXattrKeys returns xattr keys in deterministic order.
