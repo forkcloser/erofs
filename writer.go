@@ -302,7 +302,7 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 	if len(w.devices) > 0 {
 		featureIncompat |= disk.FeatureIncompatDeviceTable
 		extraDevices = uint16(len(w.devices))
-		devtSlotOff = uint16(disk.SizeSuperBlock / 16)
+		devtSlotOff = uint16((disk.SuperBlockOffset + disk.SizeSuperBlock) / disk.SizeDeviceSlot)
 	}
 	// Keyed off the resolved layout, not off len(e.chunks): a metadata-only
 	// entry with no chunk mappings still gets LayoutChunkBased, and an image

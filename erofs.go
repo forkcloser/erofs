@@ -1066,10 +1066,15 @@ func (b *file) readInfo() (ino *inode, err error) {
 	}()
 
 	buf := blk.bytes()
-	_, err = b.img.meta.ReadAt(buf, addr)
-	if err != nil {
+	// A compact inode needs only 32 bytes; the buffer is sized for an extended
+	// inode (64) because the layout is unknown until the format word is read. An
+	// inode living in the final bytes of the image therefore yields a short read
+	// that must not be fatal, exactly as loadAt tolerates for other structures.
+	n, err := b.img.meta.ReadAt(buf, addr)
+	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
+	buf = buf[:n]
 
 	if len(buf) < disk.SizeInodeCompact {
 		return nil, fmt.Errorf("inode %d truncated: %w", b.nid, ErrInvalid)
