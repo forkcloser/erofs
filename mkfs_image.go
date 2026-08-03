@@ -389,7 +389,12 @@ func (fsys *Writer) copyFromImage(img *image) error {
 						return fmt.Errorf("chunk index for nid %d: %w", cur.nid, err)
 					}
 					fe.chunks = chunks
-					fe.contiguous = true
+					// Only a single non-hole extent is contiguous. Claiming
+					// it for a fragmented or sparse file makes planLayout
+					// pick a chunk size spanning the whole file, collapsing
+					// every extent into one mapping.
+					fe.contiguous = len(chunks) == 1 &&
+						chunks[0].PhysicalBlock != builder.NullPhysicalBlock
 				}
 			}
 
@@ -543,7 +548,26 @@ func (fsys *Writer) parseChunks(data []byte, chunkFmt uint16, fileSize uint64, b
 		off := i * disk.SizeChunkIndex
 		startBlkLo := binary.LittleEndian.Uint32(data[off+4 : off+8])
 		if ^startBlkLo == 0 {
-			continue // null/hole
+			// A hole. Its logical span has to be carried over: chunks
+			// describe the file's layout positionally, so dropping a hole
+			// slides every later extent down into the wrong logical offset
+			// and the file reads back unrelated device bytes where it should
+			// read zeros.
+			if len(chunks) > 0 {
+				prev := &chunks[len(chunks)-1]
+				if prev.PhysicalBlock == builder.NullPhysicalBlock &&
+					int(prev.Count)+blocksPerChunk <= 65535 {
+					prev.Count += uint16(blocksPerChunk)
+
+					continue
+				}
+			}
+			chunks = append(chunks, builder.Chunk{
+				PhysicalBlock: builder.NullPhysicalBlock,
+				Count:         uint16(blocksPerChunk),
+			})
+
+			continue
 		}
 		startBlkHi := binary.LittleEndian.Uint16(data[off : off+2])
 		deviceID := binary.LittleEndian.Uint16(data[off+2:off+4]) & deviceIDMask
@@ -551,7 +575,8 @@ func (fsys *Writer) parseChunks(data []byte, chunkFmt uint16, fileSize uint64, b
 
 		if len(chunks) > 0 {
 			prev := &chunks[len(chunks)-1]
-			if prev.DeviceID == deviceID &&
+			if prev.PhysicalBlock != builder.NullPhysicalBlock &&
+				prev.DeviceID == deviceID &&
 				prev.PhysicalBlock+uint64(prev.Count) == physBlock &&
 				int(prev.Count)+blocksPerChunk <= 65535 {
 				prev.Count += uint16(blocksPerChunk)

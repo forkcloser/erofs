@@ -654,18 +654,21 @@ func (fsys *Writer) Close() error {
 		return fsys.wErr // e.g. a hardlink whose target was removed
 	}
 
-	var chunkBits uint8
-	for cs := fsys.blockSize; cs < 4096; cs <<= 1 {
-		chunkBits++
-	}
-
 	ew := &erofsWriter{
 		buildTime:   buildTime,
 		buildTimeNs: fsys.buildTimeNs,
 		devices:     fsys.devices,
 		blockSize:   fsys.blockSize,
-		chunkBits:   chunkBits,
-		zeroBuf:     make([]byte, fsys.blockSize),
+		// chunkBits 0 makes the chunk size equal the block size, which is the
+		// only granularity at which an arbitrary extent list can be mapped
+		// exactly: chunk indexes carry one mapping per chunk, while chunks
+		// and DataRange describe extents per block. A larger chunk size
+		// silently swallows any extent or hole boundary that falls inside a
+		// chunk. Contiguous files still get a larger chunk size per entry via
+		// minChunkBits, where a single extent covers the whole file and there
+		// are no interior boundaries to lose.
+		chunkBits: 0,
+		zeroBuf:   make([]byte, fsys.blockSize),
 	}
 
 	ew.planLayout(root)
