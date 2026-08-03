@@ -768,6 +768,22 @@ const maxSymlinks = 255
 // Linux PATH_MAX is 4096; we use the same limit.
 const maxSymlinkSize = 4096
 
+// maxResolveComponents bounds the total number of path components a single
+// resolve may walk, summed across every symlink hop.
+//
+// maxSymlinks bounds the number of hops but not the work done per hop: each
+// hop restarts the walk from the root over curPath + "/" + target, where
+// curPath is the entire prefix already walked. A directory that is reachable
+// from itself lets the path grow by the target's length on every hop, so the
+// total work is quadratic in the accumulated length — an 8 KiB image drove
+// 13 million reads and 16 seconds of CPU through a single Open.
+//
+// A path holds at most maxSymlinkSize/2 components (PATH_MAX bytes, and no
+// component occupies fewer than two bytes with its separator), and a
+// legitimate resolution walks no more than one whole path per hop. The budget
+// is that product, so nothing a real filesystem can express is refused.
+const maxResolveComponents = maxSymlinks * (maxSymlinkSize / 2)
+
 // readLink reads the symlink target for the given nid.
 func (i *image) readLink(nid uint64, name string) (string, error) {
 	f := &file{img: i, name: name, nid: nid, ftype: fs.ModeSymlink}
@@ -836,6 +852,16 @@ func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.File
 	if !validPath(name) {
 		return 0, 0, "", &fs.PathError{Op: op, Path: name, Err: fs.ErrInvalid}
 	}
+	// PATH_MAX, as Linux applies it. A longer name cannot match anything this
+	// writer or mkfs.erofs is able to put in an image, and accepting one is
+	// the other half of the work bound: curPath is rebuilt by concatenation
+	// per component, so the walk costs O(len(name)^2) in copying alone. A
+	// caller walking a cyclic image generates exactly these names — fs.WalkDir
+	// joins dirent names without any depth limit of its own.
+	if len(name) > maxPathLen {
+		return 0, 0, "", &fs.PathError{Op: op, Path: name, Err: fmt.Errorf(
+			"path is %d bytes, over the %d byte limit: %w", len(name), maxPathLen, ErrInvalid)}
+	}
 	if name == "." {
 		name = ""
 	}
@@ -846,9 +872,18 @@ func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.File
 	// curPath tracks the full resolved path of the current directory
 	// so that relative symlink targets can be resolved correctly.
 	linksFollowed := 0
+	components := 0
 	curPath := ""
 	basename = name
 	for name != "" {
+		// Bound the total walk, not just the number of hops: see
+		// maxResolveComponents. Exhausting it means the image is cyclic,
+		// which is what ErrLoop reports.
+		components++
+		if components > maxResolveComponents {
+			return 0, 0, "", &fs.PathError{Op: op, Path: original, Err: ErrLoop}
+		}
+
 		var sep int
 		for sep < len(name) && name[sep] != '/' {
 			sep++
@@ -902,6 +937,15 @@ func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.File
 			}
 			// Clean and re-resolve from root
 			target = path.Clean(target)
+			// Checked after Clean, so a "../" target walking back out of a
+			// deep prefix is judged on what it actually resolves to. Linux
+			// reports ENAMETOOLONG for a composed path over PATH_MAX; here it
+			// is also what stops the path growing without bound each hop.
+			if len(target) > maxPathLen {
+				return 0, 0, "", &fs.PathError{Op: op, Path: original, Err: fmt.Errorf(
+					"resolved path is %d bytes, over the %d byte limit: %w",
+					len(target), maxPathLen, ErrInvalid)}
+			}
 			if len(target) > 0 && target[0] == '/' {
 				target = target[1:]
 			}

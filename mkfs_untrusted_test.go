@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -558,5 +559,110 @@ func TestWriterRejectsEmptySymlinkTarget(t *testing.T) {
 		t.Error("Close accepted an entry with an empty symlink target")
 	} else if !errors.Is(err, ErrInvalid) {
 		t.Errorf("Close err = %v, want it to wrap ErrInvalid", err)
+	}
+}
+
+// buildSymlinkCycleImage returns an image whose root dirent "a" points back
+// at the root, so "a/a/a/..." resolves forever, plus a symlink "l" at the root
+// with the given target.
+func buildSymlinkCycleImage(t *testing.T, target string) []byte {
+	t.Helper()
+
+	out := &seekBuf{}
+	w := Create(out, WithBuildTime(1000, 0))
+	if err := w.Mkdir("/a", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Symlink(target, "/l"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	buf := out.buf
+
+	img, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := img.(*image)
+	aNid, _, _, err := i.resolve("x", "a", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if patchDirentNid(buf, aNid, uint64(i.sb.RootNid)) == 0 {
+		t.Fatal("could not construct a directory cycle")
+	}
+
+	return buf
+}
+
+// TestResolveWorkIsBounded covers the total work a single resolve can be made
+// to do. maxSymlinks bounds the number of hops but bounded nothing per hop:
+// each hop restarts the walk from the root over curPath + "/" + target, where
+// curPath is the whole prefix already walked, so a self-referential directory
+// grew the path every hop and the cost was quadratic in the accumulated
+// length. A 12 KiB image drove 33 million reads and 94 seconds of CPU through
+// one Open.
+func TestResolveWorkIsBounded(t *testing.T) {
+	// maxSymlinks hops over at most maxPathLen/2 components each, at a couple
+	// of reads per component. Clear of the real figure (~1M) and far below the
+	// tens of millions the unbounded walk reached.
+	const budget = 4 * maxSymlinks * (maxPathLen / 2)
+
+	for _, tc := range []struct {
+		name   string
+		target string
+	}{
+		// Relative: every hop prepends the prefix already walked, so the
+		// path grows and the work per hop grows with it.
+		{"relative", strings.Repeat("a/", 500) + "l"},
+		// Absolute: the prefix is not prepended, so the path keeps its
+		// length. Just under PATH_MAX is the most expensive shape that
+		// survives the per-hop cap — the steady state the budget must hold.
+		{"absolute", "/" + strings.Repeat("a/", (maxPathLen-4)/2) + "l"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := buildSymlinkCycleImage(t, tc.target)
+
+			cr := &countingReaderAt{ra: bytes.NewReader(buf)}
+			img, err := Open(cr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := img.Open("l"); err == nil {
+				t.Fatal("Open resolved a cyclic symlink chain")
+			}
+			if cr.calls > budget {
+				t.Errorf("Open made %d ReadAt calls, over the %d budget", cr.calls, budget)
+			}
+			t.Logf("bounded at %d ReadAt calls from a %d byte image", cr.calls, len(buf))
+		})
+	}
+}
+
+// TestResolveRejectsOverlongPath covers the caller-supplied half of the same
+// bound. curPath is rebuilt by concatenation per component, so walking an
+// arbitrarily long name costs O(len(name)^2) in copying even before any
+// symlink is involved — and fs.WalkDir over a cyclic image generates exactly
+// those names.
+func TestResolveRejectsOverlongPath(t *testing.T) {
+	buf := buildSymlinkCycleImage(t, "/a/l")
+
+	cr := &countingReaderAt{ra: bytes.NewReader(buf)}
+	img, err := Open(cr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := cr.calls
+	_, err = img.Open(strings.Repeat("a/", maxPathLen) + "l")
+	if err == nil {
+		t.Fatal("Open accepted a path over PATH_MAX")
+	}
+	if !errors.Is(err, ErrInvalid) {
+		t.Errorf("err = %v, want it to wrap ErrInvalid", err)
+	}
+	if n := cr.calls - before; n > 1 {
+		t.Errorf("rejecting an over-long path took %d ReadAt calls, want it rejected before any walk", n)
 	}
 }
