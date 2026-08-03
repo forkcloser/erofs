@@ -1171,6 +1171,12 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 		return err
 	}
 	mode := goModeToUnixMode(info.Mode())
+	// A source fs.FS is not trusted to report a sane size: a negative one
+	// converts to a near-2^64 e.size that the layout planner then sees as a
+	// small negative int, producing a plausible-looking but misaligned image.
+	if info.Size() < 0 {
+		return fmt.Errorf("mkfs: %s: negative size %d", p, info.Size())
+	}
 	size := uint64(info.Size())
 	typ := mode & disk.StatTypeMask
 

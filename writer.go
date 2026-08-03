@@ -361,6 +361,14 @@ func (w *erofsWriter) writeMetadataInodes(buf io.Writer) error {
 	metaStart := 0
 	for _, e := range w.entries {
 		expectedOff := int(e.nid) * 32
+		// planLayout hands out nids as byte offsets, so the bytes written so
+		// far must never have run past this entry's slot: if they have, every
+		// following dirent nid points at misaligned garbage. Fail loudly
+		// rather than emit an image that opens but decodes to nonsense.
+		if expectedOff < metaStart {
+			return fmt.Errorf("write inode for %s: metadata overran nid slot %d by %d bytes",
+				e.path, e.nid, metaStart-expectedOff)
+		}
 		if expectedOff > metaStart {
 			if _, err := buf.Write(w.zeroBuf[:expectedOff-metaStart]); err != nil {
 				return err

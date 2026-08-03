@@ -80,8 +80,10 @@ func (w *erofsWriter) planLayout(root *erofsEntry) {
 					e.chunkBits = w.minChunkBits(e.size)
 				}
 			default:
-				// Full-image mode: decide inline vs plain
-				if int(e.size) <= w.blockSize-headerSize {
+				// Full-image mode: decide inline vs plain. Compare in uint64:
+				// converting e.size to int first would make an oversized value
+				// look small (or negative) and reserve the wrong trailing size.
+				if avail := w.blockSize - headerSize; avail >= 0 && e.size <= uint64(avail) {
 					inBlockOff := (currentOff + headerSize) % w.blockSize
 					if inBlockOff+int(e.size) <= w.blockSize {
 						e.layout = disk.LayoutFlatInline

@@ -391,3 +391,82 @@ func TestReaderWalkOnCyclicImage(t *testing.T) {
 	}
 	t.Logf("fs.WalkDir terminated after %d visits: %v", visits, err)
 }
+
+// badSizeFS is a source fs.FS holding one regular file that lies about its
+// size. A hostile or simply buggy source is not obliged to report a sane
+// value, and the writer must not carry it into the layout.
+type badSizeFS struct{ size int64 }
+
+type badSizeInfo struct {
+	name string
+	size int64
+	dir  bool
+}
+
+func (i badSizeInfo) Name() string { return i.name }
+func (i badSizeInfo) Size() int64  { return i.size }
+func (i badSizeInfo) Mode() fs.FileMode {
+	if i.dir {
+		return fs.ModeDir | 0o755
+	}
+
+	return 0o644
+}
+func (i badSizeInfo) ModTime() time.Time { return time.Unix(0, 0) }
+func (i badSizeInfo) IsDir() bool        { return i.dir }
+func (i badSizeInfo) Sys() any           { return nil }
+
+type badSizeDirent struct{ info badSizeInfo }
+
+func (d badSizeDirent) Name() string               { return d.info.name }
+func (d badSizeDirent) IsDir() bool                { return d.info.dir }
+func (d badSizeDirent) Type() fs.FileMode          { return d.info.Mode().Type() }
+func (d badSizeDirent) Info() (fs.FileInfo, error) { return d.info, nil }
+
+type badSizeDir struct{ fsys badSizeFS }
+
+func (badSizeDir) Close() error             { return nil }
+func (badSizeDir) Read([]byte) (int, error) { return 0, fs.ErrInvalid }
+func (d badSizeDir) Stat() (fs.FileInfo, error) {
+	return badSizeInfo{name: ".", size: 4096, dir: true}, nil
+}
+func (d badSizeDir) ReadDir(int) ([]fs.DirEntry, error) {
+	return []fs.DirEntry{badSizeDirent{badSizeInfo{name: "bad", size: d.fsys.size}}}, nil
+}
+
+type badSizeFile struct {
+	io.Reader
+	info badSizeInfo
+}
+
+func (badSizeFile) Close() error                 { return nil }
+func (f badSizeFile) Stat() (fs.FileInfo, error) { return f.info, nil }
+
+func (fsys badSizeFS) Open(name string) (fs.File, error) {
+	switch name {
+	case ".":
+		return badSizeDir{fsys}, nil
+	case "bad":
+		return badSizeFile{bytes.NewReader(nil), badSizeInfo{name: "bad", size: fsys.size}}, nil
+	}
+
+	return nil, fs.ErrNotExist
+}
+
+// TestCopyFromNegativeSize checks that a source reporting a negative size is
+// rejected at ingestion. Left unchecked it became e.size = 2^64-1, which
+// planLayout read back as int(-1): small enough to look inline-able, so the
+// entry reserved -1 trailing bytes and every later inode landed one byte off
+// its nid slot — a fully corrupt image built without an error.
+func TestCopyFromNegativeSize(t *testing.T) {
+	out := &seekBuf{}
+	w := Create(out)
+	err := w.CopyFrom(badSizeFS{size: -1})
+	if err == nil {
+		err = w.Close()
+	}
+	if err == nil {
+		t.Fatal("CopyFrom/Close accepted a source with Size() == -1")
+	}
+	t.Logf("rejected: %v", err)
+}
