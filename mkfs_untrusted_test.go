@@ -786,3 +786,150 @@ func TestMergeWhiteoutCannotEscapeItsDirectory(t *testing.T) {
 		}
 	}
 }
+
+// strictReaderAt is the shape a caller writes when the image is already in
+// memory: index the backing slice directly. *bytes.Reader and *os.File answer
+// a negative or past-the-end offset with an error; this one would panic, so it
+// reports instead. It deliberately does not expose Size, which exercises the
+// bound taken from the superblock rather than from the reader.
+type strictReaderAt struct {
+	t   *testing.T
+	buf []byte
+}
+
+func (s *strictReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	s.t.Helper()
+
+	if off < 0 || off > int64(len(s.buf)) {
+		s.t.Errorf("ReadAt offset %d is outside the %d byte image", off, len(s.buf))
+
+		return 0, io.EOF
+	}
+	n := copy(p, s.buf[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+
+	return n, nil
+}
+
+// exerciseUntrusted drives every read path over an image, ignoring errors:
+// the point is what offsets reach the reader, not what the calls return.
+func exerciseUntrusted(t *testing.T, buf []byte) {
+	t.Helper()
+
+	img, err := Open(&strictReaderAt{t: t, buf: buf})
+	if err != nil {
+		return
+	}
+	_ = fs.WalkDir(img, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if fi, err := d.Info(); err == nil {
+			if dr, ok := fi.(interface{ DataRange() []DataRange }); ok {
+				_ = dr.DataRange()
+			}
+		}
+		if !d.IsDir() {
+			_, _ = fs.ReadFile(img, p)
+			if f, err := img.Open(p); err == nil {
+				if wt, ok := f.(io.WriterTo); ok {
+					_, _ = wt.WriteTo(io.Discard)
+				}
+				_ = f.Close()
+			}
+		}
+
+		return nil
+	})
+	_, _ = fs.Stat(img, "f")
+	_, _ = img.(*image).Lstat("f")
+	_, _ = img.(*image).ReadLink("f")
+}
+
+// TestUntrustedNidStaysInBounds covers a dirent nid large enough that
+// metaStartPos + nid*32 wraps to a negative int64. The offset was handed to
+// the caller's io.ReaderAt untouched: an error for *bytes.Reader and *os.File,
+// a panic for a slice-backed one. readInfo's recover() turned its own panic
+// into an error but did nothing about the offset already having escaped, and
+// loadBlock, openDirect and buildChunkDataRanges have no such net at all.
+func TestUntrustedNidStaysInBounds(t *testing.T) {
+	buf, _ := buildTamperableImage(t)
+
+	img0, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fNid, _, _, err := img0.(*image).resolve("x", "f", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if patchDirentNid(buf, fNid, 1<<58) == 0 {
+		t.Fatal("could not patch the dirent nid")
+	}
+
+	exerciseUntrusted(t, buf)
+}
+
+// TestUntrustedChunkAddrStaysInBounds covers a chunk index whose physical
+// block address, shifted by BlkSizeBits, overflows int64. The 16-bit high half
+// only reaches that at the maximum block size, which is why the default-sized
+// fuzz corpus never produced it.
+func TestUntrustedChunkAddrStaysInBounds(t *testing.T) {
+	out := &seekBuf{}
+	w := Create(out, WithBuildTime(1000, 0), WithBlockSize(65536))
+	f, err := w.Create("/f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Chtimes("/f", time.Unix(2000, 0), time.Unix(2000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	buf := out.buf
+
+	img0, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := fs.Stat(img0, "f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nid := uint64(fi.Sys().(*Stat).Ino)
+	inodeOff := img0.(*image).metaStartPos() + int64(nid)*disk.SizeInodeCompact
+
+	// Extended inode, chunk-based with an index map, one block-sized chunk.
+	binary.LittleEndian.PutUint16(buf[inodeOff:], uint16(disk.LayoutChunkBased)<<1|1)
+	binary.LittleEndian.PutUint64(buf[inodeOff+8:], 65536)
+	binary.LittleEndian.PutUint32(buf[inodeOff+16:], disk.LayoutChunkFormatIndexes)
+
+	img1, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ino, err := (&file{img: img1.(*image), nid: nid}).readInfo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := inodeOff + ino.flatDataOffset()
+	if base%disk.SizeChunkIndex != 0 {
+		base = (base + disk.SizeChunkIndex - 1) & ^int64(disk.SizeChunkIndex-1)
+	}
+	// The largest address the two fields can express, which is not the
+	// null-chunk sentinel: (2^48-2) << 16 wraps past MaxInt64.
+	binary.LittleEndian.PutUint16(buf[base:], 0xFFFF)
+	binary.LittleEndian.PutUint16(buf[base+2:], 0)
+	binary.LittleEndian.PutUint32(buf[base+4:], 0xFFFFFFFE)
+
+	exerciseUntrusted(t, buf)
+}

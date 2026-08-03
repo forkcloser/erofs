@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"path"
 	"slices"
 	"sync"
@@ -189,6 +190,9 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 	i := image{
 		meta: r,
 	}
+	// Zero when neither the reader nor the superblock can say, in which case
+	// only representability is checked. See checkNid/chunkAddr/mapDev.
+	i.size, _ = imageSize(r)
 	if err = decodeSuperBlock(superBlock, &i.sb); err != nil {
 		return nil, err
 	}
@@ -243,6 +247,14 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 			i.sb.FeatureIncompat, i.sb.ComprAlgs, ErrNotImplemented)
 	}
 
+	// Fall back to the extent the image declares for itself. It is untrusted
+	// too, but it is a ceiling — the kernel refuses blocks past it as well —
+	// and it is the only one available for a reader that cannot report its
+	// own length. A reader that can is authoritative and already used above.
+	if i.size <= 0 {
+		i.size = int64(i.sb.Blocks) << i.sb.BlkSizeBits
+	}
+
 	i.blkPool.New = func() any {
 		return &block{
 			buf: make([]byte, 1<<i.sb.BlkSizeBits),
@@ -279,6 +291,7 @@ type deviceInfo struct {
 type image struct {
 	sb disk.SuperBlock
 
+	size         int64 // readable image length, or 0 when unknown
 	meta         io.ReaderAt
 	devices      []deviceInfo // parsed device table entries
 	deviceIDMask uint16
@@ -291,6 +304,50 @@ type image struct {
 // start physical offset of the separate metadata zone
 func (img *image) metaStartPos() int64 {
 	return int64(img.sb.MetaBlkAddr) << int64(img.sb.BlkSizeBits)
+}
+
+// checkNid rejects a nid whose inode cannot lie inside the image.
+//
+// A nid is a byte offset from the metadata zone divided by 32, taken straight
+// from a dirent or the superblock. Every read path turns it back into an
+// absolute offset with metaStartPos + nid*32, which for a large nid wraps to a
+// negative int64 and is then handed to the caller's io.ReaderAt. *bytes.Reader
+// and *os.File report an error for that, but a slice-backed io.ReaderAt — a
+// shape callers commonly write — indexes with it and panics, and the value is
+// also exposed publicly as DataRange.Offset for MetadataOnly consumers to
+// pread against an external device.
+//
+// Validating here, where a nid enters from untrusted bytes, is what lets the
+// arithmetic downstream stay plain.
+func (img *image) checkNid(nid uint64) error {
+	// An extended inode is 64 bytes, so its last byte is at nid*32+63.
+	if nid > uint64(math.MaxInt64-disk.SizeInodeExtended)/disk.SizeInodeCompact {
+		return fmt.Errorf("nid %d is out of range: %w", nid, ErrInvalid)
+	}
+	off := img.metaStartPos() + int64(nid)*disk.SizeInodeCompact
+	if off < 0 || off > math.MaxInt64-disk.SizeInodeExtended {
+		return fmt.Errorf("nid %d is out of range: %w", nid, ErrInvalid)
+	}
+	if img.size > 0 && off+disk.SizeInodeCompact > img.size {
+		return fmt.Errorf("nid %d lies past the end of the %d byte image: %w", nid, img.size, ErrInvalid)
+	}
+
+	return nil
+}
+
+// chunkAddr converts a chunk-index physical block address into a byte offset.
+//
+// phys is assembled from two on-disk fields with no upper bound of their own,
+// and the shift is by up to BlkSizeBits (16), so the product overflows int64
+// and lands negative. Same exposure as checkNid: the value reaches the
+// caller's reader, and buildChunkDataRanges and openDirect — unlike readInfo —
+// have no recover() between it and the caller.
+func (img *image) chunkAddr(phys uint64) (int64, error) {
+	if phys > uint64(math.MaxInt64)>>img.sb.BlkSizeBits {
+		return 0, fmt.Errorf("chunk block address %d is out of range: %w", phys, ErrInvalid)
+	}
+
+	return int64(phys) << img.sb.BlkSizeBits, nil
 }
 
 // maxReadFileSize is the maximum file size that ReadFile will allocate.
@@ -323,6 +380,16 @@ func (img *image) mapDev(deviceID uint16, pa int64) (io.ReaderAt, int64, error) 
 				return dev.device, pa - startOff, nil
 			}
 		}
+	}
+
+	// Reads that land on the image itself can be bounded, and must be: a
+	// physical address comes straight off disk, and a wildly out-of-range one
+	// reaches the caller's io.ReaderAt untouched. *bytes.Reader and *os.File
+	// answer with an error, but a slice-backed reader indexes with it and
+	// panics — and unlike readInfo, neither loadBlock nor openDirect has a
+	// recover() in between. A device's extent is not knowable here.
+	if pa < 0 || (img.size > 0 && pa >= img.size) {
+		return nil, 0, fmt.Errorf("physical address %d is outside the image: %w", pa, ErrInvalid)
 	}
 
 	return img.meta, pa, nil
@@ -424,7 +491,10 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 
 		// All chunks contiguous — resolve through the device, using the same
 		// mapping loadBlock applies so both paths agree on where data lives.
-		dataOffset := int64(startBlock) << img.sb.BlkSizeBits
+		dataOffset, err := img.chunkAddr(startBlock)
+		if err != nil {
+			return nil
+		}
 		reader, mapped, err := img.mapDev(deviceID, dataOffset)
 		if err != nil {
 			return nil
@@ -672,13 +742,16 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 
 		var addr int64
 		var deviceID uint16
+		var err error
 
 		if unit == 8 {
 			startBlkLo := binary.LittleEndian.Uint32(entryBuf[4:8])
 			if ^startBlkLo == 0 {
 				addr = -1
 			} else {
-				addr = int64(startBlkLo) << img.sb.BlkSizeBits
+				if addr, err = img.chunkAddr(uint64(startBlkLo)); err != nil {
+					return nil, err
+				}
 				deviceID = binary.LittleEndian.Uint16(entryBuf[2:4]) & img.deviceIDMask
 			}
 		} else {
@@ -686,7 +759,9 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 			if ^rawAddr == 0 {
 				addr = -1
 			} else {
-				addr = int64(rawAddr) << img.sb.BlkSizeBits
+				if addr, err = img.chunkAddr(uint64(rawAddr)); err != nil {
+					return nil, err
+				}
 			}
 		}
 
@@ -1116,6 +1191,13 @@ func (b *file) readInfo() (ino *inode, err error) {
 		return b.info, nil
 	}
 
+	// Every read path — loadBlock, openDirect, buildChunkDataRanges, the xattr
+	// area — derives its offsets from an *inode this returns, so bounding the
+	// nid here is what keeps all of that arithmetic in range.
+	if err := b.img.checkNid(b.nid); err != nil {
+		return nil, err
+	}
+
 	addr := b.img.metaStartPos() + int64(b.nid*disk.SizeInodeCompact)
 	blkSize := int32(1 << b.img.sb.BlkSizeBits)
 	blk := b.img.getBlock()
@@ -1356,7 +1438,13 @@ func (b *file) buildChunkDataRanges(ino *inode) []DataRange {
 		blkHi := binary.LittleEndian.Uint16(idxBuf[off : off+2])
 		deviceID := binary.LittleEndian.Uint16(idxBuf[off+2:off+4]) & b.img.deviceIDMask
 		phys := (uint64(blkHi) << 32) | uint64(blkLo)
-		byteOffset := int64(phys) << b.img.sb.BlkSizeBits
+		// DataRange.Offset is public: a MetadataOnly consumer preads it
+		// against an external device, so an unrepresentable address must not
+		// reach it. Unlike readInfo, nothing here has a recover().
+		byteOffset, err := b.img.chunkAddr(phys)
+		if err != nil {
+			return nil
+		}
 
 		// Merge with the previous entry if it is a data range that is
 		// physically contiguous on the same device.
