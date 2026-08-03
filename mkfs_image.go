@@ -399,10 +399,9 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		}
 
 		// Remap chunk DeviceIDs for metadata-only sources.
-		if fsys.copyMetadataOnly && fsys.copyDeviceID > 0 {
-			offset := fsys.copyDeviceID - 1
-			for i := range fe.chunks {
-				fe.chunks[i].DeviceID += offset
+		if fsys.copyMetadataOnly {
+			if err := fsys.remapChunkDevices(cur.path, fe.chunks); err != nil {
+				return err
 			}
 		}
 

@@ -1238,16 +1238,8 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 
 	if fsys.copyMetadataOnly {
 		fe.metadataOnly = true
-		// Remap chunk DeviceIDs from source-relative to absolute.
-		// For single-device sources, all chunks use DeviceID=1
-		// and get mapped to copyDeviceID.
-		// For multi-device sources (e.g. EROFS images), chunks have
-		// DeviceIDs 1..N that get offset by copyDeviceID-1.
-		if fsys.copyDeviceID > 0 {
-			offset := fsys.copyDeviceID - 1
-			for i := range fe.chunks {
-				fe.chunks[i].DeviceID += offset
-			}
+		if err := fsys.remapChunkDevices(p, fe.chunks); err != nil {
+			return err
 		}
 	}
 
@@ -1585,6 +1577,48 @@ func (fsys *Writer) zeroPad() []byte {
 		fsys.padBuf = make([]byte, fsys.resolveBlockSize())
 	}
 	return fsys.padBuf
+}
+
+// remapChunkDevices rewrites a metadata-only entry's chunk DeviceIDs from
+// source-relative to destination-absolute. For single-device sources every
+// chunk uses DeviceID 1 and maps to copyDeviceID; for multi-device sources
+// (e.g. EROFS images) DeviceIDs 1..N are offset by copyDeviceID-1.
+//
+// DeviceID 0 names the source's *own* primary device — the source image file
+// itself. CopyFrom registers only the source's extra devices in the
+// destination, so that device has no representable target here. Offsetting it
+// like the rest silently aliases it onto copyDeviceID-1: the destination image
+// or whichever device precedes the source's, so the file reads back another
+// layer's bytes. chunksFromRanges rejects exactly this confusion for
+// non-EROFS sources; the image fast path must too.
+//
+// Hole chunks carry no device (they serialize to a null index entry), so they
+// are left alone.
+func (fsys *Writer) remapChunkDevices(p string, chunks []builder.Chunk) error {
+	if fsys.copyDeviceID == 0 {
+		return nil
+	}
+	offset := uint64(fsys.copyDeviceID - 1)
+	for i := range chunks {
+		if chunks[i].PhysicalBlock == builder.NullPhysicalBlock {
+			continue
+		}
+		if chunks[i].DeviceID == 0 {
+			return fmt.Errorf(
+				"mkfs: %s: chunk references the source's own device (DeviceID 0), which is not registered in the destination: %w",
+				p, ErrInvalid)
+		}
+		// Device IDs are 1-based indexes into the device table, so the
+		// remapped value must still name a device the destination declares.
+		id := uint64(chunks[i].DeviceID) + offset
+		if id > uint64(len(fsys.devices)) {
+			return fmt.Errorf("mkfs: %s: chunk device %d maps to device %d, past the %d declared devices: %w",
+				p, chunks[i].DeviceID, id, len(fsys.devices), ErrInvalid)
+		}
+		chunks[i].DeviceID = uint16(id)
+	}
+
+	return nil
 }
 
 // chunksFromRanges converts DataRange entries into internal chunk entries.
