@@ -38,6 +38,11 @@ type Writer struct {
 	copyMerge        bool   // merge mode: apply whiteouts
 	copyDeviceID     uint16 // device ID assigned to current MetadataOnly CopyFrom
 
+	// openFile is the file returned by the most recent Create that has not
+	// been closed. Data is appended to one shared stream, so at most one
+	// writer may be open at a time.
+	openFile *File
+
 	dataFile *os.File // external data file (nil = spool mode)
 	dataOff  int64    // current byte offset in data file
 	spool    *os.File // temp spool (created lazily)
@@ -175,10 +180,18 @@ func WithTempDir(dir string) CreateOpt {
 // --- Writer entry methods ---
 
 // Create creates a regular file with default mode 0644. The caller must
-// Close the returned File.
+// Close the returned File before creating another one, or before calling
+// [Writer.CopyFrom] or [Writer.Close].
+//
+// Only one file may be open for writing at a time. File data is appended to a
+// single stream, so a second writer would interleave its bytes with the
+// first's; Create returns an error rather than let that happen silently.
 func (fsys *Writer) Create(name string) (*File, error) {
 	if fsys.wErr != nil {
 		return nil, fsys.wErr
+	}
+	if err := fsys.checkNoOpenFile("create another file"); err != nil {
+		return nil, err
 	}
 	name = cleanPath(name)
 	if name == "/" {
@@ -213,7 +226,20 @@ func (fsys *Writer) Create(name string) (*File, error) {
 		e.dataStartOff = fsys.spoolOff
 	}
 
+	fsys.openFile = f
+
 	return f, nil
+}
+
+// checkNoOpenFile reports an error when a file from Create is still open.
+// action names what the caller was attempting, for the message.
+func (fsys *Writer) checkNoOpenFile(action string) error {
+	if fsys.openFile == nil {
+		return nil
+	}
+
+	return fmt.Errorf("mkfs: %q is still open for writing; close it before you %s",
+		fsys.openFile.entry.path, action)
 }
 
 // Mkdir creates a directory. Only permission bits from perm are used,
@@ -426,6 +452,11 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
 	}
+	// CopyFrom appends file data to the same stream as Create, so an open
+	// writer would have the copied bytes interleaved into its region.
+	if err := fsys.checkNoOpenFile("call CopyFrom"); err != nil {
+		return err
+	}
 	// Reset per-CopyFrom state.
 	fsys.copyMetadataOnly = false
 	fsys.copyMerge = false
@@ -629,6 +660,11 @@ func (fsys *Writer) Close() error {
 	if fsys.closed {
 		return fmt.Errorf("mkfs: FS already closed")
 	}
+	// A file's size is recorded by File.Close. Serializing now would emit it
+	// as empty and drop whatever was already written to it.
+	if err := fsys.checkNoOpenFile("close the image"); err != nil {
+		return err
+	}
 	fsys.closed = true
 
 	if fsys.spool != nil {
@@ -780,6 +816,9 @@ func (f *File) Close() error {
 	f.closed = true
 	f.entry.fileClosed = true
 	f.entry.size = uint64(f.written)
+	if f.fs.openFile == f {
+		f.fs.openFile = nil
+	}
 
 	if f.fs.dataFile != nil {
 		return f.closeDataFile()
