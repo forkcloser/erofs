@@ -549,20 +549,35 @@ func (img *image) getLongPrefix(index uint8) (string, error) {
 	return img.longPrefixes[index], nil
 }
 
+// loadAt reads up to size bytes at addr, capped at one filesystem block.
+//
+// A short read at the end of the image is not an error. Callers ask for a
+// whole block even when the structure they want is smaller, so a structure
+// living in the final block would otherwise be unreadable purely because the
+// block-aligned read runs past the end of the file. That is the normal shape
+// of a shared xattr area, which mkfs.erofs places in the last block of small
+// images. Every caller bounds its parsing by the returned length.
 func (img *image) loadAt(addr, size int64) (*block, error) {
 	blkSize := int64(1 << img.sb.BlkSizeBits)
 	if size > blkSize {
 		size = blkSize
 	}
+	if size <= 0 {
+		return nil, fmt.Errorf("failed to read %d bytes at %d: %w", size, addr, ErrInvalid)
+	}
 
 	b := img.getBlock()
-	if n, err := img.meta.ReadAt(b.buf[:size], addr); err != nil {
+	n, err := img.meta.ReadAt(b.buf[:size], addr)
+	if err != nil && !errors.Is(err, io.EOF) {
 		img.putBlock(b)
 		return nil, fmt.Errorf("failed to read %d bytes at %d: %w", size, addr, err)
-	} else {
-		b.offset = 0
-		b.end = int32(n)
 	}
+	if n <= 0 {
+		img.putBlock(b)
+		return nil, fmt.Errorf("failed to read %d bytes at %d: %w", size, addr, io.EOF)
+	}
+	b.offset = 0
+	b.end = int32(n)
 
 	return b, nil
 }
