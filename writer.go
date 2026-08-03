@@ -18,6 +18,11 @@ import (
 // page size at 64 KiB) and the reader rejects BlkSizeBits > 16.
 const maxBlockSize = 1 << 16
 
+// maxMetaBufferPrealloc bounds the metadata buffer's initial capacity. It is
+// a hint only, so exceeding it costs a few reallocations rather than
+// correctness.
+const maxMetaBufferPrealloc = 1 << 30 // 1 GiB
+
 // onlyWriter wraps an io.Writer to hide io.ReaderFrom so that
 // io.CopyBuffer uses the caller-provided buffer instead of
 // the destination's ReadFrom (which allocates its own).
@@ -61,6 +66,57 @@ func (w *erofsWriter) entryChunkSize(e *erofsEntry) int {
 	return w.blockSize << w.entryChunkBits(e)
 }
 
+// maxChunkIndexEntries backstops the chunk-index map a single inode may
+// carry, bounding it to 1 GiB of index entries.
+//
+// This is deliberately far above any realistic file — 512 GiB at a 4 KiB
+// chunk size — because it is only a sanity backstop, not the primary defense.
+// Untrusted images are bounded much more tightly at ingestion, where
+// copyFromImage requires the declared map to actually be present in the
+// source. This limit exists so that an overflowed or absurd size can never
+// reach the in-memory metadata buffer, which the writer grows without bound.
+const maxChunkIndexEntries = 1 << 27
+
+// chunkCount returns the number of chunk-index entries e requires.
+//
+// The arithmetic is done in uint64 and clamped: e.size may come from an
+// untrusted inode, where the obvious int conversion either overflows to a
+// negative count or yields a count whose index map is far larger than any
+// real filesystem. The clamped value is over the limit by one, so
+// checkChunkLimits rejects the entry before anything is written.
+func (w *erofsWriter) chunkCount(e *erofsEntry) int {
+	cs := uint64(w.entryChunkSize(e))
+	if cs == 0 {
+		return 0
+	}
+	n := e.size / cs
+	if e.size%cs != 0 {
+		n++
+	}
+	if n > maxChunkIndexEntries {
+		return maxChunkIndexEntries + 1
+	}
+
+	return int(n)
+}
+
+// checkChunkLimits rejects entries whose chunk-index map exceeds what the
+// reader will parse back. Called before any serialization so an implausible
+// size never reaches the metadata buffer.
+func (w *erofsWriter) checkChunkLimits() error {
+	for _, e := range w.entries {
+		if e.layout != disk.LayoutChunkBased {
+			continue
+		}
+		if w.chunkCount(e) > maxChunkIndexEntries {
+			return fmt.Errorf("mkfs: %s: chunk index for a %d byte file exceeds the %d entry limit: %w",
+				e.path, e.size, int64(maxChunkIndexEntries), ErrInvalid)
+		}
+	}
+
+	return nil
+}
+
 // minChunkBits returns the minimum chunkBits such that file size fits in
 // one chunk (chunkSize >= size). Capped at 31 (LayoutChunkFormatBits max).
 func (w *erofsWriter) minChunkBits(size uint64) uint8 {
@@ -72,6 +128,9 @@ func (w *erofsWriter) minChunkBits(size uint64) uint8 {
 }
 
 func (w *erofsWriter) write(out io.WriteSeeker) error {
+	if err := w.checkChunkLimits(); err != nil {
+		return err
+	}
 	w.copyBuf = make([]byte, 256*1024) // shared io.CopyBuffer buffer
 	return w.writeSeekable(out)
 }
@@ -126,8 +185,14 @@ func (w *erofsWriter) newMetaBuffer() *bytes.Buffer {
 		}
 		totalMetaBytes += sz
 	}
-	// SB area + metadata padded to block boundary.
+	// SB area + metadata padded to block boundary. The capacity is only a
+	// sizing hint — bytes.Buffer grows as needed — so clamping it is free and
+	// keeps an implausible entry size from requesting a huge allocation, or a
+	// negative one once the arithmetic overflows.
 	capacity := w.blockSize + ((totalMetaBytes + w.blockSize - 1) & ^(w.blockSize - 1))
+	if capacity < w.blockSize || capacity > maxMetaBufferPrealloc {
+		capacity = w.blockSize
+	}
 	buf := bytes.NewBuffer(make([]byte, 0, capacity))
 	return buf
 }
@@ -474,7 +539,7 @@ func (w *erofsWriter) writeXattrs(buf io.Writer, e *erofsEntry) error {
 func (w *erofsWriter) writeChunkIndexes(buf io.Writer, e *erofsEntry) error {
 	cs := w.entryChunkSize(e)
 	blocksPerChunk := cs / w.blockSize
-	nchunks := (int(e.size) + cs - 1) / cs
+	nchunks := w.chunkCount(e)
 
 	// Null chunk index (no mapping): StartBlkHi=0xFFFF, DeviceID=0, StartBlkLo=NullAddr.
 	var nullIdx [disk.SizeChunkIndex]byte

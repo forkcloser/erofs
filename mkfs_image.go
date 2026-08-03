@@ -4,15 +4,51 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"io/fs"
 	"path"
 
 	"github.com/forkcloser/erofs/internal/builder"
 	"github.com/forkcloser/erofs/internal/disk"
 )
 
+// maxEagerMetaBytes caps the metadata region copyFromImage will read into
+// memory in one shot when the source's true size cannot be determined.
+// Images whose declared metadata exceeds this are rejected rather than
+// allowed to drive an unbounded allocation.
+const maxEagerMetaBytes = 1 << 30 // 1 GiB
+
+// maxQueuePrealloc caps the BFS queue's initial capacity. This is only a
+// sizing hint — the queue still grows to whatever the image legitimately
+// needs — so capping it costs nothing and keeps a corrupt inode count from
+// requesting an enormous allocation up front.
+const maxQueuePrealloc = 1 << 16
+
+// imageSize reports the readable size of an image, when the io.ReaderAt can
+// say. *bytes.Reader, *io.SectionReader and *os.File all can, which covers
+// every way this package is realistically used. Callers must treat a false
+// result as "unknown", not as "empty".
+func imageSize(ra io.ReaderAt) (int64, bool) {
+	switch v := ra.(type) {
+	case interface{ Size() int64 }:
+		return v.Size(), true
+	case interface{ Stat() (fs.FileInfo, error) }:
+		fi, err := v.Stat()
+		if err != nil {
+			return 0, false
+		}
+		return fi.Size(), true
+	}
+
+	return 0, false
+}
+
 // newMetaReader returns an at() function backed by an eagerly-read
 // metadata buffer plus an on-demand block cache for data blocks
 // outside the metadata region.
+//
+// The caller is responsible for validating metaStart and totalBytes against
+// the real size of ra before calling: both derive from superblock fields and
+// would otherwise size the allocation below directly from untrusted input.
 func newMetaReader(ra io.ReaderAt, metaStart, totalBytes int64, blockSize int) func(int64) []byte {
 	metaSize := totalBytes - metaStart
 	if metaSize <= 0 {
@@ -73,6 +109,24 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		return nil
 	}
 
+	// sb.Blocks, sb.MetaBlkAddr and sb.Inos are read verbatim from the image
+	// and must never size an allocation on their own: a handful of tampered
+	// bytes would otherwise request a terabyte-scale buffer, which fails as
+	// an unrecoverable runtime OOM rather than a returned error.
+	if actual, ok := imageSize(img.meta); ok {
+		if totalBytes > actual {
+			return fmt.Errorf("superblock declares %d bytes but image is %d bytes: %w",
+				totalBytes, actual, ErrInvalid)
+		}
+	} else if totalBytes-metaStart > maxEagerMetaBytes {
+		return fmt.Errorf("metadata region of %d bytes exceeds the %d byte limit for a source of unknown size: %w",
+			totalBytes-metaStart, int64(maxEagerMetaBytes), ErrInvalid)
+	}
+	if metaStart < 0 || metaStart >= totalBytes {
+		return fmt.Errorf("metadata start %d outside image of %d bytes: %w",
+			metaStart, totalBytes, ErrInvalid)
+	}
+
 	blkBits := img.sb.BlkSizeBits
 	buildTime := img.sb.BuildTime
 	buildTimeNs := img.sb.BuildTimeNs
@@ -90,9 +144,18 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		sharedXattrOff = int64(img.sb.XattrBlkAddr) << blkBits
 	}
 
-	// Pre-allocate based on inode count from superblock.
-	inodeCount := int(img.sb.Inos)
-	if inodeCount == 0 {
+	// Pre-allocate based on the inode count from the superblock, bounded by
+	// what the metadata region can physically hold (one inode per 32-byte
+	// slot at minimum) and by maxQueuePrealloc.
+	maxInodes := (totalBytes - metaStart) / disk.SizeInodeCompact
+	inodeCount := int64(img.sb.Inos)
+	if inodeCount <= 0 || inodeCount > maxInodes {
+		inodeCount = maxInodes
+	}
+	if inodeCount > maxQueuePrealloc {
+		inodeCount = maxQueuePrealloc
+	}
+	if inodeCount < 64 {
 		inodeCount = 64
 	}
 	queue := make([]imgQEntry, 0, inodeCount)
@@ -265,12 +328,38 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		case disk.StatTypeReg:
 			if layout == disk.LayoutChunkBased && size > 0 {
 				chunkFmt := uint16(idata)
-				if chunkFmt&disk.LayoutChunkFormatIndexes != 0 {
-					chunkAddr := trailingAddr
+				indexed := chunkFmt&disk.LayoutChunkFormatIndexes != 0
+				chunkAddr := trailingAddr
+				unit := int64(4)
+				if indexed {
+					unit = disk.SizeChunkIndex
 					if chunkAddr%8 != 0 {
 						chunkAddr = (chunkAddr + 7) & ^int64(7)
 					}
-					fe.chunks = fsys.parseChunks(at(chunkAddr), chunkFmt, size, blkBits, img.deviceIDMask)
+				}
+
+				// The declared size must be backed by a complete chunk-index
+				// map inside the image. Without this an inode can claim a
+				// petabyte-scale file, and the size flows through
+				// calcTrailingSize into the in-memory metadata buffer, which
+				// then grows without bound. Both chunk formats are checked:
+				// only the indexed one yields chunks, but an unindexed inode
+				// carries the same untrusted size.
+				need, err := chunkMapBytes(chunkFmt, size, blkBits, unit)
+				if err != nil {
+					return fmt.Errorf("nid %d: %w", cur.nid, err)
+				}
+				if avail := int64(len(at(chunkAddr))); avail < need {
+					return fmt.Errorf("nid %d: chunk index truncated: have %d bytes, need %d for a %d byte file: %w",
+						cur.nid, avail, need, size, ErrInvalid)
+				}
+
+				if indexed {
+					chunks, err := fsys.parseChunks(at(chunkAddr), chunkFmt, size, blkBits, img.deviceIDMask)
+					if err != nil {
+						return fmt.Errorf("chunk index for nid %d: %w", cur.nid, err)
+					}
+					fe.chunks = chunks
 					fe.contiguous = true
 				}
 			}
@@ -368,16 +457,56 @@ func (fsys *Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPat
 	}
 }
 
+// chunkMapBytes returns the on-disk size of the chunk-index map an inode of
+// the given size and format declares, in entries of unit bytes each.
+//
+// The arithmetic is done in uint64: fileSize comes straight off disk and the
+// obvious int conversion overflows to a negative count for sizes past 2^63.
+func chunkMapBytes(chunkFmt uint16, fileSize uint64, blkBits uint8, unit int64) (int64, error) {
+	chunkBits := blkBits + uint8(chunkFmt&disk.LayoutChunkFormatBits)
+	if chunkBits >= 64 {
+		return 0, fmt.Errorf("chunk size of 2^%d bytes is out of range: %w", chunkBits, ErrInvalid)
+	}
+	cs := uint64(1) << chunkBits
+	nchunks := fileSize / cs
+	if fileSize%cs != 0 {
+		nchunks++
+	}
+	if nchunks > uint64(maxChunkIndexBytes/unit) {
+		return 0, fmt.Errorf("chunk index for a %d byte file exceeds the %d byte limit: %w",
+			fileSize, int64(maxChunkIndexBytes), ErrInvalid)
+	}
+
+	return int64(nchunks) * unit, nil
+}
+
 // parseChunks extracts chunk index entries from an in-memory buffer.
-func (fsys *Writer) parseChunks(data []byte, chunkFmt uint16, fileSize uint64, blkBits uint8, deviceIDMask uint16) []builder.Chunk {
+//
+// An error is returned when the inode's declared size implies a chunk-index
+// map that is larger than the data actually present, or larger than the
+// reader will ever parse back (maxChunkIndexBytes). Both mean the size field
+// cannot be trusted, and carrying it forward would let a corrupt source drive
+// the writer's own allocations — the entry's trailing size is derived from it.
+func (fsys *Writer) parseChunks(data []byte, chunkFmt uint16, fileSize uint64, blkBits uint8, deviceIDMask uint16) ([]builder.Chunk, error) {
 	chunkBits := blkBits + uint8(chunkFmt&disk.LayoutChunkFormatBits)
 	nchunks := int((fileSize-1)>>chunkBits) + 1
 	blocksPerChunk := 1 << (chunkBits - blkBits)
 
+	// builder.Chunk counts blocks in a uint16, so a chunk spanning more
+	// blocks than that cannot be represented at all.
+	if blocksPerChunk > 65535 {
+		return nil, fmt.Errorf("chunk size of %d blocks is not representable: %w", blocksPerChunk, ErrInvalid)
+	}
+
 	// Align to 8 bytes for index entries.
-	needed := nchunks * disk.SizeChunkIndex
-	if len(data) < needed {
-		return nil
+	needed := int64(nchunks) * disk.SizeChunkIndex
+	if needed > maxChunkIndexBytes {
+		return nil, fmt.Errorf("chunk index of %d bytes for a %d byte file exceeds the %d byte limit: %w",
+			needed, fileSize, int64(maxChunkIndexBytes), ErrInvalid)
+	}
+	if int64(len(data)) < needed {
+		return nil, fmt.Errorf("chunk index truncated: have %d bytes, need %d: %w",
+			len(data), needed, ErrInvalid)
 	}
 
 	chunks := make([]builder.Chunk, 0, nchunks)
@@ -406,7 +535,8 @@ func (fsys *Writer) parseChunks(data []byte, chunkFmt uint16, fileSize uint64, b
 			DeviceID:      deviceID,
 		})
 	}
-	return chunks
+
+	return chunks, nil
 }
 
 // parseXattrsFromBuf parses xattr entries from an in-memory buffer.

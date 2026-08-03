@@ -1,0 +1,215 @@
+package erofs
+
+import (
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"io"
+	"io/fs"
+	"runtime"
+	"testing"
+	"time"
+
+	"github.com/forkcloser/erofs/internal/disk"
+)
+
+// seekBuf is a minimal in-memory io.WriteSeeker + io.ReaderAt.
+type seekBuf struct {
+	buf []byte
+	off int64
+}
+
+func (m *seekBuf) Write(p []byte) (int, error) {
+	if need := int(m.off) + len(p); need > len(m.buf) {
+		m.buf = append(m.buf, make([]byte, need-len(m.buf))...)
+	}
+	copy(m.buf[m.off:], p)
+	m.off += int64(len(p))
+
+	return len(p), nil
+}
+
+func (m *seekBuf) Seek(off int64, whence int) (int64, error) {
+	switch whence {
+	case io.SeekStart:
+		m.off = off
+	case io.SeekCurrent:
+		m.off += off
+	case io.SeekEnd:
+		m.off = int64(len(m.buf)) + off
+	}
+
+	return m.off, nil
+}
+
+// buildTamperableImage writes a small image holding one regular file and
+// returns its bytes plus the nid of that file. The file's mtime differs from
+// the build time so it gets a 64-bit extended inode, whose i_size field is
+// wide enough to express the sizes these tests need.
+func buildTamperableImage(t *testing.T) ([]byte, uint64) {
+	t.Helper()
+
+	out := &seekBuf{}
+	w := Create(out, WithBuildTime(1000, 0))
+	f, err := w.Create("/f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Chtimes("/f", time.Unix(2000, 0), time.Unix(2000, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	img, err := Open(bytes.NewReader(out.buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := fs.Stat(img, "f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nid := uint64(fi.Sys().(*Stat).Ino)
+
+	inodeOff := img.(*image).metaStartPos() + int64(nid)*disk.SizeInodeCompact
+	if format := binary.LittleEndian.Uint16(out.buf[inodeOff:]); format&0x01 == 0 {
+		t.Fatalf("expected an extended inode for /f, got format %#x", format)
+	}
+
+	return out.buf, nid
+}
+
+// TestUntrustedChunkSizeIsBounded covers the case where an inode claims a
+// petabyte-scale chunk-based file. The declared size feeds calcTrailingSize,
+// which sizes the chunk-index map written into the in-memory metadata buffer;
+// without a bound, CopyFrom grows that buffer until the process dies.
+func TestUntrustedChunkSizeIsBounded(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		idata uint32
+	}{
+		{"unindexed", 0},
+		{"indexed", disk.LayoutChunkFormatIndexes},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buf, nid := buildTamperableImage(t)
+
+			img0, err := Open(bytes.NewReader(buf))
+			if err != nil {
+				t.Fatal(err)
+			}
+			inodeOff := img0.(*image).metaStartPos() + int64(nid)*disk.SizeInodeCompact
+
+			// Extended inode, chunk-based layout, claiming a 1 PiB file.
+			binary.LittleEndian.PutUint16(buf[inodeOff:], uint16(disk.LayoutChunkBased)<<1|1)
+			binary.LittleEndian.PutUint64(buf[inodeOff+8:], 1<<50)
+			binary.LittleEndian.PutUint32(buf[inodeOff+16:], tc.idata)
+
+			img, err := Open(bytes.NewReader(buf))
+			if err != nil {
+				t.Fatalf("tampered image failed to open: %v", err)
+			}
+
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+
+			dst := Create(&seekBuf{})
+			err = dst.CopyFrom(img, MetadataOnly())
+			if err == nil {
+				err = dst.Close()
+			}
+
+			runtime.ReadMemStats(&after)
+			grew := after.TotalAlloc - before.TotalAlloc
+
+			if err == nil {
+				t.Fatalf("CopyFrom accepted an inode claiming a 1 PiB chunk-based file")
+			}
+			if !errors.Is(err, ErrInvalid) {
+				t.Errorf("err = %v, want it to wrap ErrInvalid", err)
+			}
+			t.Logf("rejected with %v (allocated %d bytes)", err, grew)
+
+			// The whole point is that nothing proportional to the declared
+			// size is ever materialized.
+			if grew > 64<<20 {
+				t.Errorf("allocated %d bytes handling a bogus 1 PiB inode; want under 64 MiB", grew)
+			}
+		})
+	}
+}
+
+// TestUntrustedInodeCountIsBounded covers sb.Inos, which sized the BFS
+// queue's capacity directly.
+func TestUntrustedInodeCountIsBounded(t *testing.T) {
+	buf, _ := buildTamperableImage(t)
+
+	// sb.Inos sits at offset 16 within the superblock.
+	binary.LittleEndian.PutUint64(buf[disk.SuperBlockOffset+16:], 1<<62)
+
+	img, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("tampered image failed to open: %v", err)
+	}
+	if got := img.(*image).sb.Inos; got != 1<<62 {
+		t.Fatalf("patched the wrong superblock offset: sb.Inos = %d", got)
+	}
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	dst := Create(&seekBuf{})
+	if err := dst.CopyFrom(img, MetadataOnly()); err != nil {
+		t.Fatalf("CopyFrom: %v", err)
+	}
+
+	runtime.ReadMemStats(&after)
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 64<<20 {
+		t.Errorf("allocated %d bytes for an image claiming 2^62 inodes; want under 64 MiB", grew)
+	}
+}
+
+// TestUntrustedBlockCountIsRejected covers sb.Blocks, which sized the eager
+// metadata read.
+func TestUntrustedBlockCountIsRejected(t *testing.T) {
+	buf, _ := buildTamperableImage(t)
+
+	// sb.Blocks sits at offset 36 within the superblock.
+	binary.LittleEndian.PutUint32(buf[disk.SuperBlockOffset+36:], 0xFFFFFFFF)
+
+	img, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("tampered image failed to open: %v", err)
+	}
+	if got := img.(*image).sb.Blocks; got != 0xFFFFFFFF {
+		t.Fatalf("patched the wrong superblock offset: sb.Blocks = %d", got)
+	}
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	dst := Create(&seekBuf{})
+	err = dst.CopyFrom(img, MetadataOnly())
+
+	runtime.ReadMemStats(&after)
+	grew := after.TotalAlloc - before.TotalAlloc
+
+	if err == nil {
+		t.Fatal("CopyFrom accepted a superblock declaring far more blocks than the image holds")
+	}
+	if !errors.Is(err, ErrInvalid) {
+		t.Errorf("err = %v, want it to wrap ErrInvalid", err)
+	}
+	t.Logf("rejected with %v (allocated %d bytes)", err, grew)
+
+	if grew > 64<<20 {
+		t.Errorf("allocated %d bytes; want under 64 MiB", grew)
+	}
+}
