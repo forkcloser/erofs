@@ -189,25 +189,20 @@ func TestUntrustedBlockCountIsRejected(t *testing.T) {
 	// sb.Blocks sits at offset 36 within the superblock.
 	binary.LittleEndian.PutUint32(buf[disk.SuperBlockOffset+36:], 0xFFFFFFFF)
 
-	img, err := Open(bytes.NewReader(buf))
-	if err != nil {
-		t.Fatalf("tampered image failed to open: %v", err)
-	}
-	if got := img.(*image).sb.Blocks; got != 0xFFFFFFFF {
-		t.Fatalf("patched the wrong superblock offset: sb.Blocks = %d", got)
-	}
-
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 
-	dst := Create(&seekBuf{})
-	err = dst.CopyFrom(img, MetadataOnly())
+	// Open bounds the superblock's geometry against the image, so a block
+	// count this far past the end never reaches the code that would size an
+	// allocation from it. It used to open cleanly and be caught later, in
+	// CopyFrom.
+	_, err := Open(bytes.NewReader(buf))
 
 	runtime.ReadMemStats(&after)
 	grew := after.TotalAlloc - before.TotalAlloc
 
 	if err == nil {
-		t.Fatal("CopyFrom accepted a superblock declaring far more blocks than the image holds")
+		t.Fatal("Open accepted a superblock declaring far more blocks than the image holds")
 	}
 	if !errors.Is(err, ErrInvalid) {
 		t.Errorf("err = %v, want it to wrap ErrInvalid", err)
@@ -1068,4 +1063,152 @@ func TestCopyFromImageSharesChunkMaps(t *testing.T) {
 		t.Fatalf("%d entries carry chunks, want %d", entries, links+1)
 	}
 	t.Logf("%d names share one %d-entry chunk map", entries, len(dst.byPath["/f0"].chunks))
+}
+
+// TestUnalignedDataFileStart covers a data file that does not begin on a block
+// boundary. A chunk records a file's start as a block number, so the offset
+// has to divide exactly; the first file inherited dataOff from a Seek to the
+// end of a pre-existing data file, and the division truncated it onto an
+// earlier block, so the file read back the bytes already there.
+func TestUnalignedDataFileStart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "data.bin")
+	pre := []byte("PRE-EXISTING BYTES, NOT BLOCK ALIGNED")
+	if err := os.WriteFile(path, pre, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	df, err := os.OpenFile(path, os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = df.Close() }()
+
+	out := &seekBuf{}
+	w := Create(out, WithDataFile(df))
+	f, err := w.Create("/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := bytes.Repeat([]byte{0xCD}, 4096)
+	if _, err := f.Write(want); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dfr, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = dfr.Close() }()
+	img, err := Open(bytes.NewReader(out.buf), WithExtraDevices(dfr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := fs.ReadFile(img, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("/a read back %d bytes starting %q, want the bytes written",
+			len(got), got[:min(len(got), 24)])
+	}
+}
+
+// TestShortReadIsNotZeroFilled covers a file whose data range runs past the
+// end of the image. file.Read only clears io.EOF when it filled the buffer, so
+// ReadFile used to swallow the EOF and hand back a zero-padded buffer with a
+// nil error — a consumer validating a manifest would see attacker-chosen zeros
+// instead of a failure.
+func TestShortReadIsNotZeroFilled(t *testing.T) {
+	buf, nid := buildTamperableImage(t)
+
+	img0, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inodeOff := img0.(*image).metaStartPos() + int64(nid)*disk.SizeInodeCompact
+
+	// Flat-plain, one block past the end of the image.
+	blocks := uint32(len(buf) >> img0.(*image).sb.BlkSizeBits)
+	binary.LittleEndian.PutUint16(buf[inodeOff:], uint16(disk.LayoutFlatPlain)<<1|1)
+	binary.LittleEndian.PutUint64(buf[inodeOff+8:], 4096)
+	binary.LittleEndian.PutUint32(buf[inodeOff+16:], blocks)
+
+	img, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("tampered image failed to open: %v", err)
+	}
+	got, err := fs.ReadFile(img, "f")
+	if err == nil {
+		t.Fatalf("ReadFile returned %d bytes (all zero: %v) instead of an error",
+			len(got), bytes.Equal(got, make([]byte, len(got))))
+	}
+	t.Logf("rejected: %v", err)
+}
+
+// TestXattrPrefixAndDuplicates covers the two ways an image can put the same
+// xattr name in the map twice: an undefined name index, which used to map to
+// the empty prefix and let "security.capability" be spelled out in full, and a
+// plain repeat of a key, which the map silently took last-one-wins.
+func TestXattrPrefixAndDuplicates(t *testing.T) {
+	out := &seekBuf{}
+	w := Create(out, WithBuildTime(1000, 0))
+	f, err := w.Create("/f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Setxattr("/f", "security.capability", "real"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	buf := out.buf
+
+	img0, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := fs.Stat(img0, "f"); err != nil {
+		t.Fatal(err)
+	} else if st := fi.Sys().(*Stat); st.Xattrs["security.capability"] != "real" {
+		t.Fatalf("xattr did not round-trip: %v", st.Xattrs)
+	}
+
+	// The 4-byte xattr entry precedes the stored name; its second byte is
+	// the name index. Index 6 is "security."; 7 upward is undefined.
+	i := bytes.Index(buf, []byte("capability"))
+	if i < 0 {
+		t.Fatal("could not find the stored xattr name")
+	}
+	if got := buf[i-3]; got != 6 {
+		t.Fatalf("expected name index 6 before the name, got %d", got)
+	}
+	buf[i-3] = 7
+
+	img, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("tampered image failed to open: %v", err)
+	}
+	if _, err := fs.Stat(img, "f"); err == nil {
+		t.Error("Stat accepted an undefined xattr name index")
+	} else if !errors.Is(err, ErrInvalid) {
+		t.Errorf("err = %v, want it to wrap ErrInvalid", err)
+	}
+
+	// And a duplicate key must not be taken last-one-wins.
+	stat := &Stat{Xattrs: map[string]string{"security.capability": "real"}}
+	if err := setXattr(stat, 1, "security.capability", "spoofed"); err == nil {
+		t.Error("setXattr accepted a duplicate key")
+	}
+	if stat.Xattrs["security.capability"] != "real" {
+		t.Error("a rejected duplicate overwrote the original value")
+	}
 }

@@ -116,6 +116,20 @@ func (w *erofsWriter) checkLimits() error {
 			return fmt.Errorf("mkfs: %s: chunk index for a %d byte file exceeds the %d entry limit: %w",
 				e.path, e.size, int64(maxChunkIndexEntries), ErrInvalid)
 		}
+		// A chunk index stores the block address in 32 bits; the 48-bit
+		// format that widens it is not implemented end to end. Nothing
+		// upstream bounds a chunk's start block, so reject what would
+		// otherwise be truncated into an image that reads back as
+		// phys mod 2^32.
+		for _, c := range e.chunks {
+			if c.PhysicalBlock == builder.NullPhysicalBlock {
+				continue
+			}
+			if end := c.PhysicalBlock + uint64(c.Count); end > math.MaxUint32 {
+				return fmt.Errorf("mkfs: %s: chunk covering blocks %d..%d needs 48-bit addressing: %w",
+					e.path, c.PhysicalBlock, end, ErrNotImplemented)
+			}
+		}
 		// Setxattr validates at the API boundary, but xattrs also arrive
 		// through CopyFrom, where the source picks the lengths.
 		for _, name := range sortedXattrKeys(e.xattrs) {
@@ -495,13 +509,7 @@ func (w *erofsWriter) writeInode(buf io.Writer, e *erofsEntry) error {
 		inodeData = e.rdev
 	}
 
-	fileSize := e.size
-	switch e.mode & disk.StatTypeMask {
-	case disk.StatTypeDir:
-		fileSize = uint64(w.direntDataSize(e))
-	case disk.StatTypeSymlink:
-		fileSize = uint64(len(e.symTarget))
-	}
+	fileSize := w.inodeFileSize(e)
 
 	b := &w.inodeBuf
 	clear(b[:])
@@ -605,7 +613,12 @@ func (w *erofsWriter) writeChunkIndexes(buf io.Writer, e *erofsEntry) error {
 				}
 			} else {
 				phys := c.PhysicalBlock + uint64(coff)
-				binary.LittleEndian.PutUint16(scratch[0:2], uint16(phys>>32))
+				// The first two bytes are the kernel's "advise" field, which
+				// is defined to be zero unless the inode declares the 48-bit
+				// chunk format. Nothing here sets that bit, so writing the
+				// address's high half there produced an image the kernel and
+				// this reader both resolve as phys mod 2^32. checkLimits
+				// rejects anything that would need those bits.
 				binary.LittleEndian.PutUint16(scratch[2:4], c.DeviceID)
 				binary.LittleEndian.PutUint32(scratch[4:8], uint32(phys))
 				if _, err := buf.Write(scratch[:]); err != nil {

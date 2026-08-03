@@ -6,6 +6,26 @@ import (
 	"github.com/forkcloser/erofs/internal/disk"
 )
 
+// inodeFileSize returns the value an entry writes to i_size.
+//
+// For a directory that is the serialized dirent data, and for a symlink the
+// target length — neither is e.size, which for those types is whatever the
+// source reported (~4096 for a directory, typically). Compact-inode
+// eligibility has to be judged against this and not against e.size: i_size is
+// 32 bits wide in a compact inode, so testing the wrong quantity can pick a
+// compact inode for an entry whose real size does not fit, and the value is
+// then silently truncated into an unreadable inode.
+func (w *erofsWriter) inodeFileSize(e *erofsEntry) uint64 {
+	switch e.mode & disk.StatTypeMask {
+	case disk.StatTypeDir:
+		return uint64(w.direntDataSize(e))
+	case disk.StatTypeSymlink:
+		return uint64(len(e.symTarget))
+	}
+
+	return e.size
+}
+
 // planLayout assigns NIDs and determines trailing data sizes for all entries.
 func (w *erofsWriter) planLayout(root *erofsEntry) {
 	// Collect all entries in a deterministic order (DFS, pre-order).
@@ -56,7 +76,7 @@ func (w *erofsWriter) planLayout(root *erofsEntry) {
 		// (BuildTime, BuildTimeNs), so the entry's mtime has to match both
 		// fields, not just the seconds.
 		e.compact = e.uid <= 0xFFFF && e.gid <= 0xFFFF &&
-			e.nlink <= 0xFFFF && e.size <= 0xFFFFFFFF &&
+			e.nlink <= 0xFFFF && w.inodeFileSize(e) <= 0xFFFFFFFF &&
 			e.mtime == w.buildTime && e.mtimeNs == w.buildTimeNs
 
 		inodeSize := disk.SizeInodeExtended

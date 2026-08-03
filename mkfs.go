@@ -222,6 +222,9 @@ func (fsys *Writer) Create(name string) (*File, error) {
 	}
 
 	if fsys.dataFile != nil {
+		if err := fsys.alignDataOff(); err != nil {
+			return nil, err
+		}
 		f.dataStartOff = fsys.dataOff
 		e.dataStartOff = fsys.dataOff
 	} else {
@@ -504,6 +507,12 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 		}
 		if fsys.copyMetadataOnly {
 			devBlocks := srcImg.deviceBlocks()
+			// A device id is 16 bits on disk, so a table that would not fit
+			// has to be refused rather than wrapped into an id naming some
+			// other device — or, at 65536, the primary image itself.
+			if err := fsys.checkDeviceCount(len(devBlocks)); err != nil {
+				return err
+			}
 			fsys.devices = append(fsys.devices, devBlocks...)
 			fsys.copyDeviceID = uint16(len(fsys.devices) - len(devBlocks) + 1)
 			return fsys.copyFromImage(srcImg)
@@ -516,6 +525,9 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 	}
 	if fsys.copyMetadataOnly {
 		if db, ok := src.(deviceBlocker); ok {
+			if err := fsys.checkDeviceCount(1); err != nil {
+				return err
+			}
 			fsys.devices = append(fsys.devices, db.DeviceBlocks())
 			fsys.copyDeviceID = uint16(len(fsys.devices))
 		}
@@ -1256,6 +1268,9 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 		fe.contiguous = false
 		if fsys.dataFile != nil {
 			// Data file mode: copy through File for block-aligned padding and chunk recording.
+			if err := fsys.alignDataOff(); err != nil {
+				return err
+			}
 			f := &File{fs: fsys, entry: fe}
 			f.dataStartOff = fsys.dataOff
 			fe.dataStartOff = fsys.dataOff
@@ -1582,6 +1597,20 @@ func (fsys *Writer) zeroPad() []byte {
 	return fsys.padBuf
 }
 
+// checkDeviceCount rejects a device table that cannot be addressed.
+//
+// Chunk device ids are 16 bits, and id 0 names the primary image, so the table
+// holds at most 65535 devices. Appending past that wrapped the id arithmetic
+// and produced chunks pointing at an unrelated device.
+func (fsys *Writer) checkDeviceCount(adding int) error {
+	if total := len(fsys.devices) + adding; total > 65535 {
+		return fmt.Errorf("mkfs: %d devices exceeds the %d a 16-bit device id can name: %w",
+			total, 65535, ErrInvalid)
+	}
+
+	return nil
+}
+
 // remapChunkDevices rewrites a metadata-only entry's chunk DeviceIDs from
 // source-relative to destination-absolute. For single-device sources every
 // chunk uses DeviceID 1 and maps to copyDeviceID; for multi-device sources
@@ -1733,6 +1762,32 @@ func (fsys *Writer) lookup(name string) (*fsEntry, error) {
 		e = e.linkTo
 	}
 	return e, nil
+}
+
+// alignDataOff pads the data file up to a block boundary.
+//
+// A chunk records where a file's bytes start as a block number, so the start
+// offset has to divide exactly. closeDataFile pads after every file it writes,
+// which makes every offset after the first one aligned — but the first
+// inherits dataOff from a Seek to the end of a pre-existing data file, and
+// that need not be aligned at all. The division then truncated and the chunk
+// pointed at an earlier block, so the file read back somebody else's bytes.
+func (fsys *Writer) alignDataOff() error {
+	if fsys.dataFile == nil {
+		return nil
+	}
+	bs := int64(fsys.resolveBlockSize())
+	rem := fsys.dataOff % bs
+	if rem == 0 {
+		return nil
+	}
+	n, err := fsys.dataFile.Write(fsys.zeroPad()[:bs-rem])
+	fsys.dataOff += int64(n)
+	if err != nil {
+		return fmt.Errorf("mkfs: pad data file: %w", err)
+	}
+
+	return nil
 }
 
 // closeDataFile pads the data file to a block boundary and records chunks.

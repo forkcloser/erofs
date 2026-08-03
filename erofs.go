@@ -247,12 +247,41 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 			i.sb.FeatureIncompat, i.sb.ComprAlgs, ErrNotImplemented)
 	}
 
-	// Fall back to the extent the image declares for itself. It is untrusted
-	// too, but it is a ceiling — the kernel refuses blocks past it as well —
-	// and it is the only one available for a reader that cannot report its
-	// own length. A reader that can is authoritative and already used above.
-	if i.size <= 0 {
-		i.size = int64(i.sb.Blocks) << i.sb.BlkSizeBits
+	// The superblock's geometry is untrusted, and every offset the reader
+	// computes derives from it. Bound it here, once, rather than leaving each
+	// read path to cope with a block address that points nowhere.
+	declared := int64(i.sb.Blocks) << i.sb.BlkSizeBits
+	if i.size > 0 {
+		if declared > i.size {
+			return nil, fmt.Errorf("superblock declares %d blocks (%d bytes) but the image is %d bytes: %w",
+				i.sb.Blocks, declared, i.size, ErrInvalidSuperblock)
+		}
+	} else {
+		// Fall back to the extent the image declares for itself. Untrusted
+		// too, but it is a ceiling — the kernel refuses blocks past it as
+		// well — and it is the only one available for a reader that cannot
+		// report its own length.
+		i.size = declared
+	}
+	if i.size > 0 {
+		if off := i.metaStartPos(); off < 0 || off >= i.size {
+			return nil, fmt.Errorf("metadata starts at %d, outside the %d byte image: %w",
+				off, i.size, ErrInvalidSuperblock)
+		}
+		if off := int64(i.sb.XattrBlkAddr) << i.sb.BlkSizeBits; off < 0 || off >= i.size {
+			return nil, fmt.Errorf("shared xattrs start at %d, outside the %d byte image: %w",
+				off, i.size, ErrInvalidSuperblock)
+		}
+	}
+	if err := i.checkNid(uint64(i.sb.RootNid)); err != nil {
+		return nil, fmt.Errorf("root %w", err)
+	}
+	// Zero means "same as the filesystem block size", which is what this
+	// writer emits. Any other disagreeing value would have dirents read at
+	// one granularity and written at another.
+	if i.sb.DirBlkBits != 0 && i.sb.DirBlkBits != i.sb.BlkSizeBits {
+		return nil, fmt.Errorf("directory block bits %d do not match block size bits %d: %w",
+			i.sb.DirBlkBits, i.sb.BlkSizeBits, ErrInvalidSuperblock)
 	}
 
 	i.blkPool.New = func() any {
@@ -457,6 +486,13 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 		}
 		inodeAddr := img.metaStartPos() + int64(ino.nid)*disk.SizeInodeCompact
 		trailingAddr := inodeAddr + ino.flatDataOffset()
+		// Inline data lives in the inode's own block and cannot run past it —
+		// loadBlock rejects that outright. flatDataOffset folds in xsize,
+		// which i_xattr_icount drives up to 262148, so without the same check
+		// here a file's contents alias whatever follows its block.
+		if trailingAddr&(blockSize-1)+ino.size > blockSize {
+			return nil
+		}
 		return io.NewSectionReader(img.meta, trailingAddr, ino.size)
 	case disk.LayoutChunkBased:
 		// Chunk-based files store data at the physical block addresses
@@ -464,6 +500,11 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 		// the data is laid out consecutively and can be read directly.
 		chunkFmt := uint16(ino.inodeData)
 		if chunkFmt&disk.LayoutChunkFormatIndexes == 0 {
+			return nil
+		}
+		// Same format rules loadBlock applies. A fast path that accepts what
+		// the slow path rejects is how the two disagree about a file.
+		if chunkFmt&^(disk.LayoutChunkFormatBits|disk.LayoutChunkFormatIndexes) != 0 {
 			return nil
 		}
 		chunkBits := img.sb.BlkSizeBits + uint8(chunkFmt&disk.LayoutChunkFormatBits)
@@ -493,9 +534,13 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 			if ^blkLo == 0 {
 				return nil // hole
 			}
-			blkHi := binary.LittleEndian.Uint16(idxBuf[off : off+2])
+			// The high half is the kernel's "advise" field unless the
+			// 48-bit format is declared, which is rejected above and
+			// unimplemented anyway. loadBlock has always read the address
+			// as 32-bit; folding these bits in here made the two paths
+			// return different bytes for the same chunk file.
 			did := binary.LittleEndian.Uint16(idxBuf[off+2:off+4]) & img.deviceIDMask
-			phys := (uint64(blkHi) << 32) | uint64(blkLo)
+			phys := uint64(blkLo)
 
 			blocksPerChunk := uint64(1 << (chunkBits - img.sb.BlkSizeBits))
 			if i == 0 {
@@ -790,13 +835,21 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 		}
 		blockOffset = int(pos % int64(blockSize))
 
+		// Ahead of the hole branch: those bounds are plain arithmetic over
+		// untrusted sizes too, and a hole used to hand them back unchecked as
+		// the block's offset and end.
+		if blockOffset < 0 || blockEnd > blockSize || blockOffset >= blockEnd {
+			return nil, fmt.Errorf("invalid chunk block bounds [%d:%d] for nid %d: %w", blockOffset, blockEnd, fi.nid, ErrInvalid)
+		}
+
 		if addr == -1 {
-			// Null address, return new zero filled block
-			return &block{
-				buf:    make([]byte, 1<<img.sb.BlkSizeBits),
-				offset: int32(blockOffset),
-				end:    int32(blockEnd),
-			}, nil
+			// Null address: a hole, which reads as zeros.
+			b := img.getBlock()
+			clear(b.buf[blockOffset:blockEnd])
+			b.offset = int32(blockOffset)
+			b.end = int32(blockEnd)
+
+			return b, nil
 		}
 
 		// Add block offset within chunk
@@ -810,10 +863,6 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 			return nil, fmt.Errorf("failed to map device for nid %d: %w", fi.nid, err)
 		}
 		addr = mappedAddr
-
-		if blockOffset < 0 || blockEnd > blockSize || blockOffset >= blockEnd {
-			return nil, fmt.Errorf("invalid chunk block bounds [%d:%d] for nid %d: %w", blockOffset, blockEnd, fi.nid, ErrInvalid)
-		}
 		b := img.getBlock()
 		if n, err := reader.ReadAt(b.buf[blockOffset:blockEnd], addr+int64(blockOffset)); err != nil {
 			img.putBlock(b)
@@ -898,10 +947,8 @@ func (i *image) readLink(nid uint64, name string) (string, error) {
 		return "", fmt.Errorf("symlink target size %d out of range: %w", fi.size, ErrInvalid)
 	}
 	buf := make([]byte, fi.size)
-	if fi.size > 0 {
-		if _, err = f.Read(buf); err != nil && err != io.EOF {
-			return "", err
-		}
+	if err := readAll(f, buf); err != nil {
+		return "", err
 	}
 	return string(buf), nil
 }
@@ -963,6 +1010,14 @@ func checkDirentName(name []byte) error {
 //
 // name must satisfy [validPath]. Rejecting up front is what the [io/fs.FS]
 // contract requires, and it is what keeps ".." from walking out of a subtree.
+//
+// That applies to the path a caller writes, not to where a symlink leads. A
+// symlink target is resolved from the image root, so a link inside a subtree
+// can name anything in the image and [io/fs.Sub] is not a containment
+// boundary: fs.ReadFile(sub, "escape") serves whatever "escape" points at,
+// even though fs.ReadFile(sub, "../outside") is refused. io/fs does not
+// promise otherwise, and neither does a kernel mount. A caller that needs
+// containment has to walk with Lstat and refuse symlinks itself.
 func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.FileMode, basename string, err error) {
 	original := name
 	if !validPath(name) {
@@ -1065,6 +1120,16 @@ func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.File
 			if len(target) > 0 && target[0] == '/' {
 				target = target[1:]
 			}
+			// validPath was applied to the caller's name, not to this. A
+			// target that walks above the root leaves residual ".." that
+			// path.Clean cannot fold away, and the walk would then look for
+			// literal ".." dirents — which an image is free to provide. Note
+			// this restores the structural rule, not containment within a
+			// subtree: see the fs.Sub caveat on Open.
+			if target != "" && !validPath(target) {
+				return 0, 0, "", &fs.PathError{Op: op, Path: original, Err: fmt.Errorf(
+					"symlink resolves to %q, which is not a valid path: %w", target, ErrInvalid)}
+			}
 			nid = uint64(i.sb.RootNid)
 			ftype = fs.ModeDir
 			curPath = ""
@@ -1131,12 +1196,33 @@ func (i *image) ReadFile(name string) ([]byte, error) {
 		return nil, fmt.Errorf("file size %d exceeds ReadFile limit %d; use Open and io.Copy for large files: %w", fi.size, int64(maxReadFileSize), ErrInvalid)
 	}
 	buf := make([]byte, fi.size)
-	if fi.size > 0 {
-		if _, err = f.Read(buf); err != nil && err != io.EOF {
-			return nil, err
-		}
+	if err := readAll(f, buf); err != nil {
+		return nil, &fs.PathError{Op: "read", Path: name, Err: err}
 	}
 	return buf, nil
+}
+
+// readAll fills buf, treating a short read as corruption rather than as a
+// hole to pad with zeros.
+//
+// file.Read only clears io.EOF when it filled the buffer, so a file whose data
+// range runs past the end of the image returns (partial, io.EOF). Callers that
+// waved io.EOF through therefore handed back a zero-padded buffer and a nil
+// error, which is the worst possible answer: a consumer validating a config or
+// a manifest sees attacker-chosen zeros where it should see a failure.
+func readAll(f *file, buf []byte) error {
+	if len(buf) == 0 {
+		return nil
+	}
+	if _, err := io.ReadFull(f, buf); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("data ends before the declared size of %d bytes: %w", len(buf), ErrInvalid)
+		}
+
+		return err
+	}
+
+	return nil
 }
 
 func (i *image) ReadDir(name string) ([]fs.DirEntry, error) {
@@ -1268,7 +1354,7 @@ func (b *file) readInfo() (ino *inode, err error) {
 			inodeLayout: layout,
 			inodeData:   di.InodeData,
 			size:        int64(di.Size),
-			mode:        (disk.EroFSModeToGoFileMode(di.Mode) & ^fs.ModeType) | b.ftype,
+			mode:        disk.EroFSModeToGoFileMode(di.Mode),
 			rawMode:     di.Mode,
 			uid:         uint32(di.UID),
 			gid:         uint32(di.GID),
@@ -1290,7 +1376,7 @@ func (b *file) readInfo() (ino *inode, err error) {
 			inodeLayout: layout,
 			inodeData:   di.InodeData,
 			size:        int64(di.Size),
-			mode:        (disk.EroFSModeToGoFileMode(di.Mode) & ^fs.ModeType) | b.ftype,
+			mode:        disk.EroFSModeToGoFileMode(di.Mode),
 			rawMode:     di.Mode,
 			uid:         di.UID,
 			gid:         di.GID,
@@ -1299,6 +1385,31 @@ func (b *file) readInfo() (ino *inode, err error) {
 			mtimeNs:     di.MtimeNs,
 		}
 		xcnt = di.XattrCount
+	}
+
+	// The dirent's file type and the inode's i_mode are two independent
+	// on-disk fields, and the mode above used to take its type bits from the
+	// dirent while Stat took them from the inode — so a consumer testing
+	// fi.Mode()&fs.ModeSymlink and one testing Sys().(*Stat).Mode could reach
+	// opposite conclusions about the same file. Both now come from the inode,
+	// and a dirent that disagrees is an error rather than a silent override.
+	// i_size is unsigned on disk and int64 here. Internal callers guard for a
+	// negative value, but fs.FileInfo.Size is public and a consumer sizing a
+	// buffer from it would panic. It is deliberately not bounded by the image
+	// length: a metadata-only image is far smaller than the files it
+	// describes, whose data lives on an external device.
+	if b.info.size < 0 {
+		size := b.info.size
+		b.info = nil
+
+		return nil, fmt.Errorf("inode %d declares a size of %d bytes: %w", b.nid, size, ErrInvalid)
+	}
+
+	if inoType := b.info.mode.Type(); b.ftype != inoType {
+		b.info = nil
+
+		return nil, fmt.Errorf("inode %d has type %v but its dirent says %v: %w",
+			b.nid, inoType, b.ftype, ErrInvalid)
 	}
 
 	if xcnt > 0 {
@@ -1455,9 +1566,9 @@ func (b *file) buildChunkDataRanges(ino *inode) []DataRange {
 			continue
 		}
 
-		blkHi := binary.LittleEndian.Uint16(idxBuf[off : off+2])
+		// 32-bit addressing only; see openDirect.
 		deviceID := binary.LittleEndian.Uint16(idxBuf[off+2:off+4]) & b.img.deviceIDMask
-		phys := (uint64(blkHi) << 32) | uint64(blkLo)
+		phys := uint64(blkLo)
 		// DataRange.Offset is public: a MetadataOnly consumer preads it
 		// against an external device, so an unrepresentable address must not
 		// reach it. Unlike readInfo, nothing here has a recover().

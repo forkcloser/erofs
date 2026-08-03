@@ -114,18 +114,21 @@ func (fsys *Writer) copyFromImage(img *image) error {
 	// and must never size an allocation on their own: a handful of tampered
 	// bytes would otherwise request a terabyte-scale buffer, which fails as
 	// an unrecoverable runtime OOM rather than a returned error.
-	if actual, ok := imageSize(img.meta); ok {
-		if totalBytes > actual {
-			return fmt.Errorf("superblock declares %d bytes but image is %d bytes: %w",
-				totalBytes, actual, ErrInvalid)
-		}
-	} else if totalBytes-metaStart > maxEagerMetaBytes {
-		return fmt.Errorf("metadata region of %d bytes exceeds the %d byte limit for a source of unknown size: %w",
-			totalBytes-metaStart, int64(maxEagerMetaBytes), ErrInvalid)
+	if actual, ok := imageSize(img.meta); ok && totalBytes > actual {
+		return fmt.Errorf("superblock declares %d bytes but image is %d bytes: %w",
+			totalBytes, actual, ErrInvalid)
 	}
 	if metaStart < 0 || metaStart >= totalBytes {
 		return fmt.Errorf("metadata start %d outside image of %d bytes: %w",
 			metaStart, totalBytes, ErrInvalid)
+	}
+	// The cap applies whether or not the source can report its size. A file
+	// that can is not thereby trustworthy: a sparse one is as large as it
+	// cares to claim for free, so "declared <= actual" passes for a 256 TiB
+	// metadata region that costs the attacker nothing to produce.
+	if totalBytes-metaStart > maxEagerMetaBytes {
+		return fmt.Errorf("metadata region of %d bytes exceeds the %d byte limit: %w",
+			totalBytes-metaStart, int64(maxEagerMetaBytes), ErrInvalid)
 	}
 
 	blkBits := img.sb.BlkSizeBits
@@ -169,7 +172,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 	// bound. Non-directory nids are deliberately not tracked: a file nid
 	// legitimately appears under several names when the source has
 	// hardlinks, and each name needs its own entry here.
-	expanded := make(map[uint64]struct{})
+	expanded := make(map[int64]struct{})
 
 	// A chunk map is parsed once per inode, not once per name. Non-directory
 	// nids are deliberately not de-duped above, so a file with hardlinks is
@@ -200,6 +203,14 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			}
 		}
 
+		// Bound the nid before multiplying. nid*32 wraps, so nid and
+		// nid + k*2^59 name the same inode: the cycle guard below keyed on
+		// the nid would see 32 distinct directories where the image has one,
+		// and expand the same subtree under each.
+		if cur.nid > uint64(totalBytes-metaStart)/disk.SizeInodeCompact {
+			return fmt.Errorf("nid %d lies past the end of the %d byte image: %w",
+				cur.nid, totalBytes, ErrInvalid)
+		}
 		inodeAddr := metaStart + int64(cur.nid*disk.SizeInodeCompact)
 		buf := at(inodeAddr)
 		if len(buf) < disk.SizeInodeCompact {
@@ -310,12 +321,14 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		switch typ {
 		case disk.StatTypeDir:
 			// A directory reachable twice means the dirent graph is not a
-			// tree; expanding it again would loop forever.
-			if _, seen := expanded[cur.nid]; seen {
+			// tree; expanding it again would loop forever. Keyed on the
+			// address rather than the nid, since two nids differing only in
+			// the bits nid*32 discards address the same inode.
+			if _, seen := expanded[inodeAddr]; seen {
 				return fmt.Errorf("directory nid %d is reachable more than once (at %s): %w",
 					cur.nid, cur.path, ErrInvalid)
 			}
-			expanded[cur.nid] = struct{}{}
+			expanded[inodeAddr] = struct{}{}
 
 			dirSize := int(size)
 			if dirSize > 0 {
@@ -542,6 +555,12 @@ func chunkMapBytes(chunkFmt uint16, fileSize uint64, blkBits uint8, unit int64) 
 // cannot be trusted, and carrying it forward would let a corrupt source drive
 // the writer's own allocations — the entry's trailing size is derived from it.
 func (fsys *Writer) parseChunks(data []byte, chunkFmt uint16, fileSize uint64, blkBits uint8, deviceIDMask uint16) ([]builder.Chunk, error) {
+	// The same format rules the reader's loadBlock applies. 48-bit chunk
+	// addressing is unimplemented end to end, so a source declaring it must
+	// not be silently reinterpreted as 32-bit.
+	if chunkFmt&^(disk.LayoutChunkFormatBits|disk.LayoutChunkFormatIndexes) != 0 {
+		return nil, fmt.Errorf("unsupported chunk format %#x: %w", chunkFmt, ErrNotImplemented)
+	}
 	chunkBits := blkBits + uint8(chunkFmt&disk.LayoutChunkFormatBits)
 	nchunks := int((fileSize-1)>>chunkBits) + 1
 	blocksPerChunk := 1 << (chunkBits - blkBits)
@@ -594,9 +613,13 @@ func (fsys *Writer) parseChunks(data []byte, chunkFmt uint16, fileSize uint64, b
 
 			continue
 		}
-		startBlkHi := binary.LittleEndian.Uint16(data[off : off+2])
+		// 32-bit addressing: the high half is the kernel's "advise" field
+		// unless the 48-bit format is declared, and that format is rejected
+		// above. The reader has always resolved chunks this way, so folding
+		// these bits in produced an output whose chunks named blocks the
+		// reader would never look at.
 		deviceID := binary.LittleEndian.Uint16(data[off+2:off+4]) & deviceIDMask
-		physBlock := (uint64(startBlkHi) << 32) | uint64(startBlkLo)
+		physBlock := uint64(startBlkLo)
 
 		if len(chunks) > 0 {
 			prev := &chunks[len(chunks)-1]
