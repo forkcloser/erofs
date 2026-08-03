@@ -1789,7 +1789,8 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 			// Name bounds within buf, so the check runs on the block's own
 			// bytes and only the surviving name is materialized.
 			lo, hi := int(dirents[0].NameOff), bufLen
-			if i < entryN-1 {
+			switch {
+			case i < entryN-1:
 				start := int(disk.SizeDirent) * (int(i) + 1)
 				if start+int(disk.SizeDirent) > bufLen {
 					d.img.putBlock(b)
@@ -1802,10 +1803,10 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 						dirents[0].NameOff, dirents[1].NameOff, bufLen, ErrInvalid)
 				}
 				hi = int(dirents[1].NameOff)
-			} else if lo > bufLen {
+			case lo > bufLen:
 				d.img.putBlock(b)
 				return ents, fmt.Errorf("invalid dirent name offset %d (buf size %d): %w", dirents[0].NameOff, bufLen, ErrInvalid)
-			} else {
+			default:
 				// The last entry's name runs to the end of the block, with
 				// any NUL padding trimmed.
 				if j := bytes.IndexByte(buf[lo:], 0); j >= 0 {
