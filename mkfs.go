@@ -1,6 +1,7 @@
 package erofs
 
 import (
+	"cmp"
 	"fmt"
 	"io"
 	"io/fs"
@@ -8,7 +9,6 @@ import (
 	"os"
 	"path"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -1161,8 +1161,8 @@ func (d *readDir) collectChildren() []fs.DirEntry {
 		}
 		children = append(children, &dirEntry{entry: e})
 	}
-	sort.Slice(children, func(i, j int) bool {
-		return children[i].Name() < children[j].Name()
+	slices.SortFunc(children, func(a, b fs.DirEntry) int {
+		return cmp.Compare(a.Name(), b.Name())
 	})
 	return children
 }
@@ -1426,7 +1426,23 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 		er *erofsEntry
 	}
 
-	rootEr := fsys.fsToErofs(fsys.root)
+	// erofsEntry values are carved from one slab rather than allocated one at
+	// a time: there is exactly one per registered path, so the capacity is
+	// known up front and append never reallocates — which is what keeps the
+	// pointers handed out valid. The fallback covers the count being wrong.
+	arena := make([]erofsEntry, 0, len(fsys.byPath))
+	alloc := func(e *fsEntry) *erofsEntry {
+		if len(arena) == cap(arena) {
+			er := fsys.fsToErofs(e)
+
+			return &er
+		}
+		arena = append(arena, fsys.fsToErofs(e))
+
+		return &arena[len(arena)-1]
+	}
+
+	rootEr := alloc(fsys.root)
 	queue := []pair{{fsys.root, rootEr}}
 
 	// Hardlink wiring happens after the walk: an alias may sit in a
@@ -1477,7 +1493,7 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 				aliases = append(aliases, aliasFixup{target: c.linkTo, er: ent})
 				continue
 			}
-			ent := fsys.fsToErofs(c)
+			ent := alloc(c)
 			cur.er.children = append(cur.er.children, ent)
 			if c.extraLinks > 0 {
 				if converted == nil {
@@ -1491,8 +1507,8 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 		}
 
 		// Sort children for deterministic output.
-		sort.Slice(cur.er.children, func(i, j int) bool {
-			return cur.er.children[i].name < cur.er.children[j].name
+		slices.SortFunc(cur.er.children, func(a, b *erofsEntry) int {
+			return cmp.Compare(a.name, b.name)
 		})
 	}
 
@@ -1512,7 +1528,7 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 }
 
 // fsToErofs converts a single fsEntry to an erofsEntry, resolving data readers.
-func (fsys *Writer) fsToErofs(e *fsEntry) *erofsEntry {
+func (fsys *Writer) fsToErofs(e *fsEntry) erofsEntry {
 	var nlink uint32
 	switch {
 	case e.nlinkSet:
@@ -1533,7 +1549,7 @@ func (fsys *Writer) fsToErofs(e *fsEntry) *erofsEntry {
 		}
 	}
 
-	return &erofsEntry{
+	return erofsEntry{
 		mode:          e.mode,
 		uid:           e.uid,
 		gid:           e.gid,

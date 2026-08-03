@@ -179,3 +179,68 @@ func BenchmarkDecodeDirent(b *testing.B) {
 		}
 	})
 }
+
+// TestSuperBlockMarshalMatchesReflection pins the hand-written codecs to what
+// encoding/binary produces. They exist only to avoid reflection's cost, so any
+// divergence is a bug: these bytes are the on-disk format.
+func TestSuperBlockMarshalMatchesReflection(t *testing.T) {
+	sb := SuperBlock{
+		MagicNumber: MagicNumber, Checksum: 0x11223344, FeatureCompat: 0x55667788,
+		BlkSizeBits: 12, ExtSlots: 3, RootNid: 0xABCD,
+		Inos: 0x0102030405060708, BuildTime: 0x1112131415161718, BuildTimeNs: 0x21222324,
+		Blocks: 0x31323334, MetaBlkAddr: 0x41424344, XattrBlkAddr: 0x51525354,
+		UUID:        [16]uint8{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		VolumeName:  [16]uint8{16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1},
+		ComprAlgs:   0x6162,
+		DevtSlotOff: 9, DirBlkBits: 12, XattrPrefixCount: 7, XattrPrefixStart: 0x71727374,
+		PackedNid: 0x8182838485868788, XattrFilterRes: 0x91,
+		FeatureIncompat: FeatureIncompatChunkedFile, ExtraDevices: 2,
+	}
+	for i := range sb.Reserved {
+		sb.Reserved[i] = uint8(i + 1)
+	}
+
+	var want bytes.Buffer
+	if err := binary.Write(&want, binary.LittleEndian, &sb); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, SizeSuperBlock)
+	sb.Marshal(got)
+	if !bytes.Equal(got, want.Bytes()) {
+		t.Fatalf("Marshal disagrees with binary.Write:\n got %x\nwant %x", got, want.Bytes())
+	}
+
+	var back SuperBlock
+	back.Unmarshal(got)
+	if back != sb {
+		t.Errorf("Unmarshal(Marshal(sb)) = %+v, want %+v", back, sb)
+	}
+}
+
+func TestDeviceSlotMarshalMatchesReflection(t *testing.T) {
+	var ds DeviceSlot
+	for i := range ds.Tag {
+		ds.Tag[i] = uint8(i)
+	}
+	ds.Blocks = 0x01020304
+	ds.MappedBlkAddr = 0x05060708
+	for i := range ds.Reserved {
+		ds.Reserved[i] = uint8(255 - i)
+	}
+
+	var want bytes.Buffer
+	if err := binary.Write(&want, binary.LittleEndian, &ds); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, SizeDeviceSlot)
+	ds.Marshal(got)
+	if !bytes.Equal(got, want.Bytes()) {
+		t.Fatalf("Marshal disagrees with binary.Write:\n got %x\nwant %x", got, want.Bytes())
+	}
+
+	var back DeviceSlot
+	back.Unmarshal(got)
+	if back != ds {
+		t.Error("Unmarshal(Marshal(ds)) did not round-trip")
+	}
+}

@@ -229,9 +229,7 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 				return nil, fmt.Errorf("failed to read device slot %d at offset %d: %w", idx, offset, err)
 			}
 			var slot disk.DeviceSlot
-			if _, err := binary.Decode(slotBuf[:], binary.LittleEndian, &slot); err != nil {
-				return nil, fmt.Errorf("failed to decode device slot %d: %w", idx, err)
-			}
+			slot.Unmarshal(slotBuf[:])
 			i.devices[idx] = deviceInfo{
 				device:        o.extraDevices[idx],
 				mappedBlkAddr: slot.MappedBlkAddr,
@@ -1238,9 +1236,14 @@ func (i *image) ReadDir(name string) ([]fs.DirEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	slices.SortFunc(entries, func(a, b fs.DirEntry) int {
-		return cmp.Compare(a.Name(), b.Name())
-	})
+	// EROFS keeps dirents sorted within a block — dir.lookup's binary search
+	// depends on it — so for a well-formed image this only has to confirm the
+	// order, not establish it. A hostile image may not be sorted, and
+	// fs.ReadDir's contract says sorted, so the sort still has to be here.
+	byName := func(a, b fs.DirEntry) int { return cmp.Compare(a.Name(), b.Name()) }
+	if !slices.IsSortedFunc(entries, byName) {
+		slices.SortFunc(entries, byName)
+	}
 	return entries, nil
 }
 
@@ -1432,7 +1435,7 @@ func (b *file) statInfo() (*fileInfo, error) {
 		mode:    ino.mode,
 		mtime:   ino.mtime,
 		mtimeNs: ino.mtimeNs,
-		stat: &Stat{
+		stat: Stat{
 			Mode:        disk.EroFSModeToGoFileMode(ino.rawMode),
 			Size:        ino.size,
 			InodeLayout: ino.inodeLayout,
@@ -1446,7 +1449,7 @@ func (b *file) statInfo() (*fileInfo, error) {
 		},
 	}
 	if ino.xsize > 0 {
-		if err := loadXattrs(b, fi.stat); err != nil {
+		if err := loadXattrs(b, &fi.stat); err != nil {
 			return nil, err
 		}
 	}
@@ -1464,37 +1467,37 @@ func (b *file) statInfo() (*fileInfo, error) {
 				return f.buildChunkDataRanges(&inoCopy)
 			}
 		} else {
-			fi.dataRanges = b.buildDataRanges(ino)
+			fi.dataRanges = b.buildDataRanges(ino, fi.rangeBuf[:0])
 		}
 	}
 	return fi, nil
 }
 
 // buildDataRanges computes the physical data ranges for a regular file.
-func (b *file) buildDataRanges(ino *inode) []DataRange {
+// buildDataRanges appends the file's ranges to dst, which lets a flat layout —
+// at most two ranges — be backed by the caller's own storage.
+func (b *file) buildDataRanges(ino *inode, dst []DataRange) []DataRange {
 	blockSize := int64(1 << b.img.sb.BlkSizeBits)
 	switch ino.inodeLayout {
 	case disk.LayoutFlatPlain:
 		dataOffset := int64(ino.inodeData) << b.img.sb.BlkSizeBits
-		return []DataRange{{Device: 0, Offset: dataOffset, Size: ino.size}}
+		return append(dst, DataRange{Device: 0, Offset: dataOffset, Size: ino.size})
 	case disk.LayoutFlatInline:
 		inodeAddr := b.img.metaStartPos() + int64(ino.nid)*disk.SizeInodeCompact
 		trailingAddr := inodeAddr + ino.flatDataOffset()
 		if ino.size <= blockSize {
-			return []DataRange{{Device: 0, Offset: trailingAddr, Size: ino.size}}
+			return append(dst, DataRange{Device: 0, Offset: trailingAddr, Size: ino.size})
 		}
 		// Multi-block inline: earlier full blocks at dataBlkAddr, last block inline.
 		// headSize is the number of complete blocks before the inline tail, in bytes.
 		// ino.inodeData is the starting block address, not a block count.
 		headSize := ((ino.size - 1) / blockSize) * blockSize
 		tailSize := ino.size - headSize
-		var ranges []DataRange
 		if headSize > 0 {
 			dataOffset := int64(ino.inodeData) << b.img.sb.BlkSizeBits
-			ranges = append(ranges, DataRange{Device: 0, Offset: dataOffset, Size: headSize})
+			dst = append(dst, DataRange{Device: 0, Offset: dataOffset, Size: headSize})
 		}
-		ranges = append(ranges, DataRange{Device: 0, Offset: trailingAddr, Size: tailSize})
-		return ranges
+		return append(dst, DataRange{Device: 0, Offset: trailingAddr, Size: tailSize})
 	case disk.LayoutChunkBased:
 		return b.buildChunkDataRanges(ino)
 	}
@@ -1759,8 +1762,33 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 			return ents, fmt.Errorf("invalid dirent name offset %d (buf size %d): %w", dirents[0].NameOff, bufLen, ErrInvalid)
 		}
 
+		// The names occupy one contiguous region running from the first
+		// entry's name offset to the end of the block. Converting it once and
+		// sub-slicing per entry costs one allocation for the block rather than
+		// one per entry: a Go substring shares its parent's backing array.
+		nameBase := int(dirents[0].NameOff)
+		names := string(buf[nameBase:])
+
+		// Likewise one slab for the block's entries. It has to be sized up
+		// front and indexed: appending would move earlier elements and
+		// invalidate the pointers already handed out. Sized to what this call
+		// can still return — entries before d.consumed were handed out by an
+		// earlier call, and n bounds the rest — so a caller paginating with a
+		// small n does not pay for the whole block on every call.
+		want := int(entryN) - int(d.consumed)
+		if want < 0 {
+			want = 0
+		}
+		if n > 0 && n < want {
+			want = n
+		}
+		batch := make([]direntry, want)
+		used := 0
+
 		for i := range entryN {
-			var name string
+			// Name bounds within buf, so the check runs on the block's own
+			// bytes and only the surviving name is materialized.
+			lo, hi := int(dirents[0].NameOff), bufLen
 			if i < entryN-1 {
 				start := int(disk.SizeDirent) * (int(i) + 1)
 				if start+int(disk.SizeDirent) > bufLen {
@@ -1773,35 +1801,43 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 					return ents, fmt.Errorf("invalid dirent name offset range [%d:%d] (buf size %d): %w",
 						dirents[0].NameOff, dirents[1].NameOff, bufLen, ErrInvalid)
 				}
-				name = string(buf[dirents[0].NameOff:dirents[1].NameOff])
+				hi = int(dirents[1].NameOff)
+			} else if lo > bufLen {
+				d.img.putBlock(b)
+				return ents, fmt.Errorf("invalid dirent name offset %d (buf size %d): %w", dirents[0].NameOff, bufLen, ErrInvalid)
 			} else {
-				if int(dirents[0].NameOff) > bufLen {
-					d.img.putBlock(b)
-					return ents, fmt.Errorf("invalid dirent name offset %d (buf size %d): %w", dirents[0].NameOff, bufLen, ErrInvalid)
+				// The last entry's name runs to the end of the block, with
+				// any NUL padding trimmed.
+				if j := bytes.IndexByte(buf[lo:], 0); j >= 0 {
+					hi = lo + j
 				}
-				// The last entry name extends to end of block;
-				// trim any NUL padding.
-				raw := buf[dirents[0].NameOff:]
-				if j := bytes.IndexByte(raw, 0); j >= 0 {
-					raw = raw[:j]
-				}
-				name = string(raw)
+			}
+			// Offsets ascend from the first, so this cannot go negative for a
+			// block that passed the checks above — but it is one subtraction
+			// away from indexing outside names if that ever changes.
+			if lo < nameBase {
+				d.img.putBlock(b)
+				return ents, fmt.Errorf("dirent %d name offset %d precedes the name region at %d: %w",
+					i, lo, nameBase, ErrInvalid)
 			}
 
-			if err := checkDirentName([]byte(name)); err != nil {
+			if err := checkDirentName(buf[lo:hi]); err != nil {
 				d.img.putBlock(b)
 
 				return ents, err
 			}
+			name := names[lo-nameBase : hi-nameBase]
 
 			if i >= d.consumed && name != "." && name != ".." {
-				f := file{
+				e := &batch[used]
+				used++
+				e.file = file{
 					img:   d.img,
 					name:  name,
 					nid:   dirents[0].Nid,
 					ftype: disk.EroFSFtypeToFileMode(dirents[0].FileType),
 				}
-				ents = append(ents, &direntry{f})
+				ents = append(ents, e)
 				d.consumed = i + 1
 
 				if n > 0 && len(ents) == n {
@@ -2042,13 +2078,18 @@ func (ino *inode) flatDataOffset() int64 {
 //
 //	if u, ok := fi.(interface{ UID() uint32 }); ok { uid = u.UID() }
 type fileInfo struct {
-	name       string
-	size       int64
-	mode       fs.FileMode
-	mtime      uint64
-	mtimeNs    uint32
-	stat       *Stat
+	name    string
+	size    int64
+	mode    fs.FileMode
+	mtime   uint64
+	mtimeNs uint32
+	// Held by value, with Sys returning its address: one allocation for the
+	// fileInfo instead of two, and Stat is never shared with anything else.
+	stat       Stat
 	dataRanges []DataRange
+	// A flat layout produces at most two ranges, so they are backed here
+	// rather than by a separate heap slice.
+	rangeBuf [2]DataRange
 
 	// rangesOnce and rangesLoader support lazy computation of data ranges
 	// for chunk-based files (LayoutChunkBased). The loader performs a ReadAt
@@ -2063,7 +2104,7 @@ func (fi *fileInfo) Name() string       { return fi.name }
 func (fi *fileInfo) Size() int64        { return fi.size }
 func (fi *fileInfo) Mode() fs.FileMode  { return fi.mode }
 func (fi *fileInfo) IsDir() bool        { return fi.mode.IsDir() }
-func (fi *fileInfo) Sys() any           { return fi.stat }
+func (fi *fileInfo) Sys() any           { return &fi.stat }
 func (fi *fileInfo) ModTime() time.Time { return time.Unix(int64(fi.mtime), int64(fi.mtimeNs)) }
 func (fi *fileInfo) UID() uint32        { return fi.stat.UID }
 func (fi *fileInfo) GID() uint32        { return fi.stat.GID }
@@ -2092,13 +2133,7 @@ func (fi *fileInfo) GetXattr(name string) (string, bool) {
 	return v, ok
 }
 func decodeSuperBlock(b [disk.SizeSuperBlock]byte, sb *disk.SuperBlock) error {
-	n, err := binary.Decode(b[:], binary.LittleEndian, sb)
-	if err != nil {
-		return err
-	}
-	if n != disk.SizeSuperBlock {
-		return fmt.Errorf("invalid super block: decoded %d bytes", n)
-	}
+	sb.Unmarshal(b[:])
 	if sb.MagicNumber != disk.MagicNumber {
 		return fmt.Errorf("invalid super block: invalid magic number %x", sb.MagicNumber)
 	}

@@ -1,7 +1,8 @@
 package erofs
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 
 	"github.com/forkcloser/erofs/internal/disk"
 )
@@ -47,8 +48,8 @@ func (w *erofsWriter) planLayout(root *erofsEntry) {
 		}
 		w.entries = append(w.entries, e)
 		if e.mode&disk.StatTypeMask == disk.StatTypeDir {
-			sort.Slice(e.children, func(i, j int) bool {
-				return e.children[i].name < e.children[j].name
+			slices.SortFunc(e.children, func(a, b *erofsEntry) int {
+				return cmp.Compare(a.name, b.name)
 			})
 			for _, c := range e.children {
 				walk(c)
@@ -236,7 +237,7 @@ func direntNames(e *erofsEntry) []string {
 	for _, c := range e.children {
 		names = append(names, c.name)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	return names
 }
 

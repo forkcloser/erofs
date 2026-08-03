@@ -224,3 +224,87 @@ func (e *XattrEntry) Unmarshal(b []byte) {
 	e.NameIndex = b[1]
 	e.ValueLen = binary.LittleEndian.Uint16(b[2:4])
 }
+
+// Marshal encodes the superblock into b, which must be at least
+// SizeSuperBlock bytes. Hand-written for the same reason as the Unmarshal
+// methods above: binary.Write reaches the same bytes through reflection at
+// roughly two orders of magnitude the cost.
+func (s *SuperBlock) Marshal(b []byte) {
+	_ = b[SizeSuperBlock-1] // bounds check once
+	clear(b[:SizeSuperBlock])
+	binary.LittleEndian.PutUint32(b[0:4], s.MagicNumber)
+	binary.LittleEndian.PutUint32(b[4:8], s.Checksum)
+	binary.LittleEndian.PutUint32(b[8:12], s.FeatureCompat)
+	b[12] = s.BlkSizeBits
+	b[13] = s.ExtSlots
+	binary.LittleEndian.PutUint16(b[14:16], s.RootNid)
+	binary.LittleEndian.PutUint64(b[16:24], s.Inos)
+	binary.LittleEndian.PutUint64(b[24:32], s.BuildTime)
+	binary.LittleEndian.PutUint32(b[32:36], s.BuildTimeNs)
+	binary.LittleEndian.PutUint32(b[36:40], s.Blocks)
+	binary.LittleEndian.PutUint32(b[40:44], s.MetaBlkAddr)
+	binary.LittleEndian.PutUint32(b[44:48], s.XattrBlkAddr)
+	copy(b[48:64], s.UUID[:])
+	copy(b[64:80], s.VolumeName[:])
+	binary.LittleEndian.PutUint32(b[80:84], s.FeatureIncompat)
+	binary.LittleEndian.PutUint16(b[84:86], s.ComprAlgs)
+	binary.LittleEndian.PutUint16(b[86:88], s.ExtraDevices)
+	binary.LittleEndian.PutUint16(b[88:90], s.DevtSlotOff)
+	b[90] = s.DirBlkBits
+	b[91] = s.XattrPrefixCount
+	binary.LittleEndian.PutUint32(b[92:96], s.XattrPrefixStart)
+	binary.LittleEndian.PutUint64(b[96:104], s.PackedNid)
+	b[104] = s.XattrFilterRes
+	copy(b[105:128], s.Reserved[:])
+}
+
+// Unmarshal decodes a superblock from b, which must be at least
+// SizeSuperBlock bytes.
+func (s *SuperBlock) Unmarshal(b []byte) {
+	_ = b[SizeSuperBlock-1] // bounds check once
+	s.MagicNumber = binary.LittleEndian.Uint32(b[0:4])
+	s.Checksum = binary.LittleEndian.Uint32(b[4:8])
+	s.FeatureCompat = binary.LittleEndian.Uint32(b[8:12])
+	s.BlkSizeBits = b[12]
+	s.ExtSlots = b[13]
+	s.RootNid = binary.LittleEndian.Uint16(b[14:16])
+	s.Inos = binary.LittleEndian.Uint64(b[16:24])
+	s.BuildTime = binary.LittleEndian.Uint64(b[24:32])
+	s.BuildTimeNs = binary.LittleEndian.Uint32(b[32:36])
+	s.Blocks = binary.LittleEndian.Uint32(b[36:40])
+	s.MetaBlkAddr = binary.LittleEndian.Uint32(b[40:44])
+	s.XattrBlkAddr = binary.LittleEndian.Uint32(b[44:48])
+	copy(s.UUID[:], b[48:64])
+	copy(s.VolumeName[:], b[64:80])
+	s.FeatureIncompat = binary.LittleEndian.Uint32(b[80:84])
+	s.ComprAlgs = binary.LittleEndian.Uint16(b[84:86])
+	s.ExtraDevices = binary.LittleEndian.Uint16(b[86:88])
+	s.DevtSlotOff = binary.LittleEndian.Uint16(b[88:90])
+	s.DirBlkBits = b[90]
+	s.XattrPrefixCount = b[91]
+	s.XattrPrefixStart = binary.LittleEndian.Uint32(b[92:96])
+	s.PackedNid = binary.LittleEndian.Uint64(b[96:104])
+	s.XattrFilterRes = b[104]
+	copy(s.Reserved[:], b[105:128])
+}
+
+// Marshal encodes the device slot into b, which must be at least
+// SizeDeviceSlot bytes.
+func (d *DeviceSlot) Marshal(b []byte) {
+	_ = b[SizeDeviceSlot-1] // bounds check once
+	clear(b[:SizeDeviceSlot])
+	copy(b[0:64], d.Tag[:])
+	binary.LittleEndian.PutUint32(b[64:68], d.Blocks)
+	binary.LittleEndian.PutUint32(b[68:72], d.MappedBlkAddr)
+	copy(b[72:128], d.Reserved[:])
+}
+
+// Unmarshal decodes a device slot from b, which must be at least
+// SizeDeviceSlot bytes.
+func (d *DeviceSlot) Unmarshal(b []byte) {
+	_ = b[SizeDeviceSlot-1] // bounds check once
+	copy(d.Tag[:], b[0:64])
+	d.Blocks = binary.LittleEndian.Uint32(b[64:68])
+	d.MappedBlkAddr = binary.LittleEndian.Uint32(b[68:72])
+	copy(d.Reserved[:], b[72:128])
+}

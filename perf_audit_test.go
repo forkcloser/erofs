@@ -182,7 +182,9 @@ func BenchmarkPerfStatInode(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		f := &file{img: img, nid: uint64(img.sb.RootNid)}
+		// ftype has to match the inode's own type: readInfo rejects a dirent
+		// that disagrees, and the zero value means a regular file.
+		f := &file{img: img, nid: uint64(img.sb.RootNid), ftype: fs.ModeDir}
 		if _, err := f.readInfo(); err != nil {
 			b.Fatal(err)
 		}

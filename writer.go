@@ -2,12 +2,13 @@ package erofs
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"math"
 	"os"
-	"sort"
+	"slices"
 
 	"github.com/forkcloser/erofs/internal/builder"
 	"github.com/forkcloser/erofs/internal/disk"
@@ -41,6 +42,7 @@ type erofsWriter struct {
 	chunkBits   uint8                        // log2(chunkSize / blockSize); chunkSize = blockSize << chunkBits
 	copyBuf     []byte                       // reusable buffer for io.CopyBuffer
 	zeroBuf     []byte                       // blockSize-length zero buffer for padding
+	dirBuf      []byte                       // reusable scratch for one dirent block
 	inodeBuf    [disk.SizeInodeExtended]byte // scratch buffer for writeInode
 }
 
@@ -131,9 +133,12 @@ func (w *erofsWriter) checkLimits() error {
 			}
 		}
 		// Setxattr validates at the API boundary, but xattrs also arrive
-		// through CopyFrom, where the source picks the lengths.
-		for _, name := range sortedXattrKeys(e.xattrs) {
-			if err := validateXattr(name, e.xattrs[name]); err != nil {
+		// through CopyFrom, where the source picks the lengths. Iterated in
+		// map order: every key is checked either way, and sorting here cost a
+		// slice and a sort per entry to no purpose. writeXattrs still sorts,
+		// where the on-disk order actually matters.
+		for name, value := range e.xattrs {
+			if err := validateXattr(name, value); err != nil {
 				return fmt.Errorf("mkfs: %s: %w", e.path, err)
 			}
 		}
@@ -198,6 +203,18 @@ func (w *erofsWriter) writeSeekable(out io.WriteSeeker) error {
 		return err
 	}
 	return w.writeBlock0(out)
+}
+
+// direntBuf returns a zeroed scratch buffer of n bytes for serializing one
+// dirent block. It is reused across blocks: a directory can hold thousands.
+func (w *erofsWriter) direntBuf(n int) []byte {
+	if cap(w.dirBuf) < n {
+		w.dirBuf = make([]byte, n)
+	}
+	w.dirBuf = w.dirBuf[:n]
+	clear(w.dirBuf)
+
+	return w.dirBuf
 }
 
 // newMetaBuffer returns a pre-sized bytes.Buffer for metadata serialization.
@@ -350,11 +367,11 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 		DevtSlotOff:     devtSlotOff,
 	}
 
-	sbBuf := &bytes.Buffer{}
-	if err := binary.Write(sbBuf, binary.LittleEndian, &sb); err != nil {
-		return fmt.Errorf("write superblock: %w", err)
-	}
-	copy(sbArea[disk.SuperBlockOffset:], sbBuf.Bytes())
+	// Marshalled straight into sbArea. binary.Write reaches the same bytes
+	// through reflection, at roughly two orders of magnitude the cost, and
+	// wanted a fresh bytes.Buffer for the superblock and for every device
+	// slot besides.
+	sb.Marshal(sbArea[disk.SuperBlockOffset:])
 
 	// Write device slots right after superblock.
 	for i, blocks := range w.devices {
@@ -364,12 +381,8 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 		devSlot := disk.DeviceSlot{
 			Blocks: uint32(blocks),
 		}
-		devBuf := &bytes.Buffer{}
-		if err := binary.Write(devBuf, binary.LittleEndian, &devSlot); err != nil {
-			return fmt.Errorf("write device slot: %w", err)
-		}
 		off := disk.SuperBlockOffset + disk.SizeSuperBlock + i*disk.SizeDeviceSlot
-		copy(sbArea[off:], devBuf.Bytes())
+		devSlot.Marshal(sbArea[off:])
 	}
 
 	_, err := buf.Write(sbArea)
@@ -663,8 +676,8 @@ func (w *erofsWriter) writeDirents(buf io.Writer, e *erofsEntry) (int, error) {
 			fileType: c.erofsFileType,
 		})
 	}
-	sort.Slice(allEnts, func(i, j int) bool {
-		return allEnts[i].name < allEnts[j].name
+	slices.SortFunc(allEnts, func(a, b direntInfo) int {
+		return cmp.Compare(a.name, b.name)
 	})
 
 	totalWritten := 0
@@ -693,30 +706,24 @@ func (w *erofsWriter) writeDirents(buf io.Writer, e *erofsEntry) (int, error) {
 		blockEnts := allEnts[start:i]
 		blockHeaderSize := len(blockEnts) * disk.SizeDirent
 
-		// Write dirent headers
-		var scratch [disk.SizeDirent]byte
-		nameOff := uint16(blockHeaderSize)
+		// Serialized into a block-sized scratch buffer and written once.
+		// Writing each 12-byte header and each name separately is a syscall
+		// apiece when out is an *os.File — invisible to an in-memory
+		// benchmark, and the dominant cost when writing to disk.
+		blk := w.direntBuf(blockUsed)
+		nameOff := blockHeaderSize
 		for j, de := range blockEnts {
-			if j > 0 {
-				nameOff += uint16(len(blockEnts[j-1].name))
-			}
-			binary.LittleEndian.PutUint64(scratch[0:8], de.nid)
-			binary.LittleEndian.PutUint16(scratch[8:10], nameOff)
-			scratch[10] = de.fileType
-			scratch[11] = 0
-			if _, err := buf.Write(scratch[:]); err != nil {
-				return totalWritten, err
-			}
-			totalWritten += disk.SizeDirent
+			off := j * disk.SizeDirent
+			binary.LittleEndian.PutUint64(blk[off:off+8], de.nid)
+			binary.LittleEndian.PutUint16(blk[off+8:off+10], uint16(nameOff))
+			blk[off+10] = de.fileType
+			blk[off+11] = 0
+			nameOff += copy(blk[nameOff:], de.name)
 		}
-
-		// Write names
-		for _, de := range blockEnts {
-			n, err := io.WriteString(buf, de.name)
-			if err != nil {
-				return totalWritten, err
-			}
-			totalWritten += n
+		n, err := buf.Write(blk)
+		totalWritten += n
+		if err != nil {
+			return totalWritten, err
 		}
 
 		// Pad to block boundary if there are more entries
