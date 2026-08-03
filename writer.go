@@ -105,6 +105,13 @@ func (w *erofsWriter) chunkCount(e *erofsEntry) int {
 // a narrower field never reaches the metadata buffer.
 func (w *erofsWriter) checkLimits() error {
 	for _, e := range w.entries {
+		// A zero-length target is not a resolvable symlink: readers fold it
+		// away and restart the walk at the root, so any path through the link
+		// silently loses its prefix. Symlink rejects it at the API boundary;
+		// this catches the CopyFrom paths, where the source picks the target.
+		if e.mode&disk.StatTypeMask == disk.StatTypeSymlink && len(e.symTarget) == 0 {
+			return fmt.Errorf("mkfs: %s: empty symlink target: %w", e.path, ErrInvalid)
+		}
 		if e.layout == disk.LayoutChunkBased && w.chunkCount(e) > maxChunkIndexEntries {
 			return fmt.Errorf("mkfs: %s: chunk index for a %d byte file exceeds the %d entry limit: %w",
 				e.path, e.size, int64(maxChunkIndexEntries), ErrInvalid)

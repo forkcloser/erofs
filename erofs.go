@@ -775,6 +775,14 @@ func (i *image) readLink(nid uint64, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// An empty target is not a valid symlink: POSIX rejects symlink(""), so
+	// the kernel never produces one. It cannot be resolved either — resolve
+	// folds it away with path.Clean and restarts the walk at the root, so a
+	// path *through* such a link would silently drop everything to its left
+	// and serve an unrelated file.
+	if fi.size == 0 {
+		return "", fmt.Errorf("empty symlink target: %w", ErrInvalid)
+	}
 	if fi.size < 0 || fi.size > maxSymlinkSize {
 		return "", fmt.Errorf("symlink target size %d out of range: %w", fi.size, ErrInvalid)
 	}
@@ -882,7 +890,7 @@ func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.File
 			}
 			target, err := i.readLink(nid, basename)
 			if err != nil {
-				return 0, 0, "", err
+				return 0, 0, "", &fs.PathError{Op: op, Path: original, Err: err}
 			}
 			// Prepend the symlink target to the remaining path
 			if rest != "" {

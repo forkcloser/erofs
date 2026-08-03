@@ -288,6 +288,9 @@ func (fsys *Writer) Symlink(oldname, newname string) error {
 	if newname == "/" {
 		return fmt.Errorf("mkfs: cannot create symlink at root")
 	}
+	if oldname == "" {
+		return fmt.Errorf("mkfs: %s: empty symlink target: %w", newname, ErrInvalid)
+	}
 	if err := fsys.checkPath(newname); err != nil {
 		return err
 	}

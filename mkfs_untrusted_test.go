@@ -470,3 +470,93 @@ func TestCopyFromNegativeSize(t *testing.T) {
 	}
 	t.Logf("rejected: %v", err)
 }
+
+// TestEmptySymlinkTargetRejected covers a symlink whose i_size is 0.
+//
+// readLink returned "" for it, and resolve then folded the empty target away
+// with path.Clean and restarted the walk at the root: the link itself resolved
+// to the root directory, and — the dangerous part — a path *through* it
+// discarded every component to its left, so "sub/el/secret" served "/secret".
+// The writer used to produce such images itself via Symlink("", ...); this one
+// has to be built by hand now that it does not.
+func TestEmptySymlinkTargetRejected(t *testing.T) {
+	out := &seekBuf{}
+	w := Create(out)
+	f, err := w.Create("/secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("TOPSECRET")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Mkdir("/sub", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Symlink("x", "/sub/el"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	img0, err := Open(bytes.NewReader(out.buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := img0.(*image).Lstat("sub/el")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nid := uint64(fi.Sys().(*Stat).Ino)
+
+	// Zero the symlink's i_size in place. The field is 32 bits wide in a
+	// compact inode and 64 in an extended one; both start at offset 8.
+	inodeOff := img0.(*image).metaStartPos() + int64(nid)*disk.SizeInodeCompact
+	if binary.LittleEndian.Uint16(out.buf[inodeOff:])&0x01 == 0 {
+		binary.LittleEndian.PutUint32(out.buf[inodeOff+8:], 0)
+	} else {
+		binary.LittleEndian.PutUint64(out.buf[inodeOff+8:], 0)
+	}
+
+	img, err := Open(bytes.NewReader(out.buf))
+	if err != nil {
+		t.Fatalf("tampered image failed to open: %v", err)
+	}
+
+	if target, err := img.(*image).ReadLink("sub/el"); err == nil {
+		t.Errorf("ReadLink(sub/el) = %q, want an error", target)
+	} else if !errors.Is(err, ErrInvalid) {
+		t.Errorf("ReadLink err = %v, want it to wrap ErrInvalid", err)
+	}
+	if fi, err := fs.Stat(img, "sub/el"); err == nil {
+		t.Errorf("Stat(sub/el) = mode=%v isdir=%v, want an error (it resolved to the root)",
+			fi.Mode(), fi.IsDir())
+	}
+	if data, err := fs.ReadFile(img, "sub/el/secret"); err == nil {
+		t.Errorf("ReadFile(sub/el/secret) = %q, want an error (the path was re-rooted at /)", data)
+	}
+}
+
+// TestWriterRejectsEmptySymlinkTarget checks both entry points: the direct API
+// and a CopyFrom source that reports an empty target.
+func TestWriterRejectsEmptySymlinkTarget(t *testing.T) {
+	w := Create(&seekBuf{})
+	if err := w.Symlink("", "/el"); err == nil {
+		t.Error("Symlink accepted an empty target")
+	} else if !errors.Is(err, ErrInvalid) {
+		t.Errorf("Symlink err = %v, want it to wrap ErrInvalid", err)
+	}
+
+	// checkLimits backstops the CopyFrom paths, where the target comes from
+	// the source rather than the caller.
+	w2 := Create(&seekBuf{})
+	w2.addChild(&fsEntry{path: "/el", mode: disk.StatTypeSymlink | 0o777})
+	if err := w2.Close(); err == nil {
+		t.Error("Close accepted an entry with an empty symlink target")
+	} else if !errors.Is(err, ErrInvalid) {
+		t.Errorf("Close err = %v, want it to wrap ErrInvalid", err)
+	}
+}
