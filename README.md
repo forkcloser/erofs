@@ -6,16 +6,30 @@ A Go library for reading and creating [EROFS](https://erofs.docs.kernel.org/) fi
 
 A fork of [github.com/erofs/go-erofs](https://github.com/erofs/go-erofs),
 hardened against untrusted images, corrected on several on-disk paths, and
-made substantially faster to read. Every change below is covered by a
-regression test that fails against the code it replaced.
+made substantially faster to read. Each fix below ships with a regression
+test, and the security-relevant ones were confirmed to fail against the code
+they replace.
 
 **Untrusted input.** `CopyFrom` sized allocations directly from superblock and
 inode fields, so a few edited bytes in an 8 KiB image could request a
 terabyte-scale buffer — which Go reports as an unrecoverable fatal OOM, not a
 returned error. The directory walk also had no cycle detection and never
-terminated on an image whose directories reach themselves. Both paths are now
-bounded, and a fuzz target covers `copyFromImage`, the second on-disk parser,
-which no existing target reached.
+terminated on an image whose directories reach themselves.
+
+Path resolution bounded symlink hops but not the work done per hop, so an
+8 KiB image could hold a single `Open` for 88 seconds across 33 million reads;
+the total walk is now bounded. `nid` and chunk block addresses are validated
+before they become file offsets, since the overflowed values were handed to
+the caller's `io.ReaderAt` as negative offsets — an error for `*bytes.Reader`
+and `*os.File`, a panic for a slice-backed reader. Chunk-index buffers are no
+longer allocated from a declared size before the read that would show the data
+is absent. Dirent names carrying a path separator are rejected, so the
+standard extract pattern (`fs.WalkDir` plus `filepath.Join`) cannot be walked
+out of its destination directory, and in merge mode a crafted name can no
+longer collapse to a whiteout that erases every prior layer. Superblock
+geometry is bounded at `Open`, and xattrs with an undefined name-index prefix
+or a duplicate key are rejected rather than silently taken last-one-wins,
+which is what let `security.capability` be spoofed.
 
 **Correctness.** Chunk extents are mapped at block granularity and holes are
 preserved across a re-index; previously a region declared as a hole could read
@@ -26,6 +40,22 @@ files can no longer be opened for writing at once and share one data region,
 and xattr names and values are checked against their on-disk field widths
 instead of being truncated into them.
 
+Several defects were images this library wrote but could not read back. The
+device table was stamped with an offset 128 bytes from where it was written.
+At the maximum block size a full directory block listed every entry but could
+not open the last one in each block, because the name-end offset was computed
+in a `uint16` that 65536 truncates to zero. `Symlink("", …)` produced a link
+that resolved to the root, so any path through it silently discarded
+everything to its left. Chunk indexes carried address bits the declared format
+does not cover, which the kernel reads as `phys mod 2^32`. A metadata-only
+copy could remap a chunk onto the destination's own data file and serve an
+unrelated layer's bytes; a source reporting a negative `Size()` produced a
+plausible-looking image whose every inode sat one byte off its slot; and a
+pre-existing data file that did not start on a block boundary put the first
+file's chunk on an earlier block. `fs.FileInfo.Mode` and `Sys().(*Stat).Mode`
+took the file type from two different on-disk fields and could disagree; both
+now come from the inode.
+
 **Compatibility.** Images produced by the reference `mkfs.erofs` are readable.
 Any inode carrying a shared xattr — which is how SELinux labels are stored —
 used to fail outright, because the shared xattr area sits in the image's final
@@ -33,20 +63,34 @@ block and a whole-block read there runs past the end of the file. The reader
 also now honours the [`fs.FS`](https://pkg.go.dev/io/fs#FS) path contract:
 rooted paths, `.` and empty elements, and `..` traversal are rejected, so
 `fstest.TestFS` passes. Names that are not valid UTF-8 remain readable, since
-EROFS stores names as byte strings.
+EROFS stores names as byte strings. Note that a symlink target is resolved
+from the image root, as it is under a kernel mount, so
+[`fs.Sub`](https://pkg.go.dev/io/fs#Sub) bounds the paths a caller may write
+but not where a link inside the subtree may lead.
 
-**Performance.** Reading a whole file takes 2 `ReadAt` calls instead of one per
-filesystem block, and `io.Copy` goes through `io.WriterTo`. Inodes, dirents and
-xattr headers are decoded directly rather than through reflection, and a pooled
-block that was being stranded on every inode read is returned. Measured against
-the fork point:
+**Performance.** Reading a whole file no longer costs one `ReadAt` per
+filesystem block, and `io.Copy` goes through `io.WriterTo`. Inodes, dirents,
+xattr headers, the superblock and device slots are all encoded and decoded
+directly rather than through reflection, and a pooled block that was being
+stranded on every inode read is returned. `ReadDir` converts each block's name
+region once and sub-slices per entry instead of allocating a string and a heap
+entry apiece, and the writer carves its entries from one slab and emits a
+dirent block per `Write` rather than one per name.
 
-| operation | before | after |
+Measured against the fork point (`44d5e74`), medians of six runs on an Apple
+M5 Pro with go1.25, through the public API only:
+
+| operation | upstream | this fork |
 | --- | --- | --- |
-| Stat an inode | 580 ns, 4243 B | **71 ns, 96 B** |
-| Resolve a path | 1638 ns | **425 ns** |
-| Read a 500-entry directory | 28.8 µs | **15.9 µs** |
-| Read an 8 MiB file | 827 µs, 2049 reads | **437 µs, 2 reads** |
+| `fs.Stat` by path | 1638 ns, 4701 B, 9 allocs | **477 ns, 528 B, 5 allocs** |
+| `Open` by path | 1467 ns, 4437 B, 6 allocs | **427 ns, 288 B, 4 allocs** |
+| Read a 500-entry directory | 30.9 µs, 1015 allocs | **10.3 µs, 18 allocs** |
+| Read an 8 MiB file | 346 µs, 2051 reads | **241 µs, 4 reads** |
+| Write a 500-entry directory | 1.41 ms, 4348 allocs | **1.37 ms, 3319 allocs** |
+
+The read count is `ReadAt` calls per whole-file `fs.ReadFile`, covering the
+lookup and the inode as well as the data. Writing is bounded by serialization
+rather than by allocation, so fewer allocations there buy little wall time.
 
 Requires Go 1.25.
 
