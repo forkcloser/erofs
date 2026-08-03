@@ -156,6 +156,13 @@ func WithExtraDevices(devices ...io.ReaderAt) OpenOpt {
 // No additional memory mapping is done and must be handled by
 // the caller.
 //
+// Paths passed to the returned FS follow the [io/fs.FS] convention: unrooted
+// and slash-separated, with no ".", ".." or empty elements, using "." for the
+// root. Anything else yields a [io/fs.PathError] wrapping [io/fs.ErrInvalid].
+// One deliberate relaxation of [io/fs.ValidPath]: names need not be valid
+// UTF-8, because EROFS stores names as byte strings and an image may contain
+// entries that would otherwise be unreachable.
+//
 // Individual operations bound their own work, but the directory structure of
 // an image is not validated to be a tree. A corrupt or hostile image may
 // contain a directory that is reachable from itself, and a caller that walks
@@ -762,16 +769,47 @@ func (i *image) readLink(nid uint64, name string) (string, error) {
 	return string(buf), nil
 }
 
-// resolve cleans the path and walks directory entries to find the target inode.
+// validPath reports whether name is acceptable as a path for this FS.
+//
+// It applies [io/fs.ValidPath]'s structural rules — unrooted, slash-separated,
+// with no empty, "." or ".." elements — but not its requirement that the name
+// be valid UTF-8. EROFS stores names as byte strings, exactly as Linux does,
+// so an image can legitimately hold names that are not UTF-8; refusing to open
+// those would hide entries that really are in the image, and this package can
+// write them. Everything fs.FS relies on for containment is structural, so
+// omitting the UTF-8 rule gives nothing away.
+func validPath(name string) bool {
+	if name == "." {
+		return true
+	}
+	for {
+		i := 0
+		for i < len(name) && name[i] != '/' {
+			i++
+		}
+		elem := name[:i]
+		if elem == "" || elem == "." || elem == ".." {
+			return false
+		}
+		if i == len(name) {
+			return true
+		}
+		name = name[i+1:]
+	}
+}
+
+// resolve walks directory entries to find the target inode.
 // When follow is true, symlinks are followed (including the final component).
 // When follow is false, the final component is not followed (for Lstat/ReadLink).
 // Intermediate symlinks are always followed.
+//
+// name must satisfy [validPath]. Rejecting up front is what the [io/fs.FS]
+// contract requires, and it is what keeps ".." from walking out of a subtree.
 func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.FileMode, basename string, err error) {
 	original := name
-	if path.IsAbs(name) {
-		name = name[1:]
+	if !validPath(name) {
+		return 0, 0, "", &fs.PathError{Op: op, Path: name, Err: fs.ErrInvalid}
 	}
-	name = path.Clean(name)
 	if name == "." {
 		name = ""
 	}
