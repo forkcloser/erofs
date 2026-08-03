@@ -213,3 +213,138 @@ func TestUntrustedBlockCountIsRejected(t *testing.T) {
 		t.Errorf("allocated %d bytes; want under 64 MiB", grew)
 	}
 }
+
+// patchDirentNid rewrites every 8-byte dirent nid slot equal to from so it
+// points at to, turning a valid tree into a cyclic graph.
+func patchDirentNid(buf []byte, from, to uint64) int {
+	var want, repl [8]byte
+	binary.LittleEndian.PutUint64(want[:], from)
+	binary.LittleEndian.PutUint64(repl[:], to)
+	n := 0
+	for off := 0; off+8 <= len(buf); off += 4 {
+		if bytes.Equal(buf[off:off+8], want[:]) {
+			copy(buf[off:off+8], repl[:])
+			n++
+		}
+	}
+
+	return n
+}
+
+// buildCyclicImage returns an image whose directory /d contains a dirent
+// named "e" that points back at /d itself.
+func buildCyclicImage(t *testing.T) []byte {
+	t.Helper()
+
+	out := &seekBuf{}
+	w := Create(out, WithBuildTime(1000, 0))
+	if err := w.Mkdir("/d", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Mkdir("/d/e", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	buf := out.buf
+
+	img, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := img.(*image)
+	dNid, _, _, err := i.resolve("x", "d", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eNid, _, _, err := i.resolve("x", "d/e", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if patchDirentNid(buf, eNid, dNid) == 0 {
+		t.Fatal("could not construct a directory cycle")
+	}
+
+	return buf
+}
+
+// TestUntrustedDirectoryCycleTerminates covers a dirent graph that is not a
+// tree. Without a visited set the BFS revisits the same subtree forever,
+// growing the queue and the path strings without bound.
+func TestUntrustedDirectoryCycleTerminates(t *testing.T) {
+	buf := buildCyclicImage(t)
+
+	img, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("cyclic image failed to open: %v", err)
+	}
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	done := make(chan error, 1)
+	go func() {
+		dst := Create(&seekBuf{})
+		done <- dst.CopyFrom(img, MetadataOnly())
+	}()
+
+	select {
+	case err := <-done:
+		runtime.ReadMemStats(&after)
+		grew := after.TotalAlloc - before.TotalAlloc
+		if err == nil {
+			t.Fatal("CopyFrom accepted an image with a directory cycle")
+		}
+		if !errors.Is(err, ErrInvalid) {
+			t.Errorf("err = %v, want it to wrap ErrInvalid", err)
+		}
+		t.Logf("rejected with %v (allocated %d bytes)", err, grew)
+		if grew > 64<<20 {
+			t.Errorf("allocated %d bytes on a cyclic image; want under 64 MiB", grew)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("CopyFrom did not terminate on a cyclic image")
+	}
+}
+
+// TestReaderWalkOnCyclicImage records the reader's behaviour on the same
+// image. fs.WalkDir has no cycle detection of its own, so the walk is
+// expected to keep descending; the callback bounds it so this test can
+// assert the exposure without running away.
+func TestReaderWalkOnCyclicImage(t *testing.T) {
+	buf := buildCyclicImage(t)
+
+	img, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("cyclic image failed to open: %v", err)
+	}
+
+	const budget = 200
+	errBudget := errors.New("visit budget exhausted")
+	visits := 0
+	deepest := ""
+
+	err = fs.WalkDir(img, ".", func(p string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		visits++
+		if len(p) > len(deepest) {
+			deepest = p
+		}
+		if visits >= budget {
+			return errBudget
+		}
+
+		return nil
+	})
+
+	if errors.Is(err, errBudget) {
+		t.Logf("fs.WalkDir descended %d times on a 3-entry image (deepest path %d bytes); "+
+			"callers walking an untrusted image must impose their own depth limit", visits, len(deepest))
+
+		return
+	}
+	t.Logf("fs.WalkDir terminated after %d visits: %v", visits, err)
+}

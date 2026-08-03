@@ -161,6 +161,15 @@ func (fsys *Writer) copyFromImage(img *image) error {
 	queue := make([]imgQEntry, 0, inodeCount)
 	queue = append(queue, imgQEntry{nid: uint64(img.sb.RootNid), path: "/"})
 
+	// Directory nids are expanded at most once. EROFS, like POSIX, has no
+	// directory hardlinks, so a directory reachable by two paths means the
+	// dirent graph is not a tree. Following it would revisit the same
+	// subtree forever, growing both the queue and the path strings without
+	// bound. Non-directory nids are deliberately not tracked: a file nid
+	// legitimately appears under several names when the source has
+	// hardlinks, and each name needs its own entry here.
+	expanded := make(map[uint64]struct{})
+
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
@@ -281,8 +290,28 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			fe.metadataOnly = true
 		}
 
+		// Sizes come straight off disk. For the types whose content this
+		// function materializes, the declared size must fit inside the image
+		// before it is used as an allocation length — or converted to int,
+		// where a value past 2^63 overflows to a negative length.
+		switch typ {
+		case disk.StatTypeDir, disk.StatTypeSymlink:
+			if size > uint64(totalBytes) {
+				return fmt.Errorf("nid %d declares %d bytes, larger than the %d byte image: %w",
+					cur.nid, size, totalBytes, ErrInvalid)
+			}
+		}
+
 		switch typ {
 		case disk.StatTypeDir:
+			// A directory reachable twice means the dirent graph is not a
+			// tree; expanding it again would loop forever.
+			if _, seen := expanded[cur.nid]; seen {
+				return fmt.Errorf("directory nid %d is reachable more than once (at %s): %w",
+					cur.nid, cur.path, ErrInvalid)
+			}
+			expanded[cur.nid] = struct{}{}
+
 			dirSize := int(size)
 			if dirSize > 0 {
 				var dirData []byte

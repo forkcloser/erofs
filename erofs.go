@@ -155,6 +155,15 @@ func WithExtraDevices(devices ...io.ReaderAt) OpenOpt {
 // The ReaderAt must be a valid EROFS block file.
 // No additional memory mapping is done and must be handled by
 // the caller.
+//
+// Individual operations bound their own work, but the directory structure of
+// an image is not validated to be a tree. A corrupt or hostile image may
+// contain a directory that is reachable from itself, and a caller that walks
+// the whole tree — [io/fs.WalkDir], for instance, which has no cycle
+// detection for any [io/fs.FS] — will descend through such a cycle
+// indefinitely. Callers walking an image from an untrusted source should
+// impose their own depth or visit limit. [Writer.CopyFrom] does this
+// internally and rejects cyclic images.
 func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 	o := options{}
 	for _, opt := range opts {
