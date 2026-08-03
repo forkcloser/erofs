@@ -345,3 +345,55 @@ func TestDataRangeSparseChunkBased(t *testing.T) {
 		t.Error("no hole entries found in fixture — buildChunkDataRanges hole path was not exercised")
 	}
 }
+
+// TestMaxBlockSizeWideDir checks that a directory large enough to fill whole
+// 64 KiB blocks round-trips through lookup as well as ReadDir.
+//
+// The dirent decoders derived the end of the last name in a block from
+// uint16(len(buf)), which is 0 for a full block at the maximum supported block
+// size. ReadDir was unaffected (it slices to the end of the block directly),
+// so the two disagreed: every block's last entry was listed but could not be
+// opened.
+func TestMaxBlockSizeWideDir(t *testing.T) {
+	var buf testBuffer
+	w := erofs.Create(&buf, erofs.WithBlockSize(65536))
+	if err := w.Mkdir("/d", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Enough entries to fill several full 64 KiB dirent blocks.
+	const n = 8000
+	for i := range n {
+		f, err := w.Create(fmt.Sprintf("/d/f%06d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	img, err := erofs.Open(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ents, err := fs.ReadDir(img, "d")
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(ents) != n {
+		t.Fatalf("ReadDir returned %d entries, want %d", len(ents), n)
+	}
+	for _, e := range ents {
+		name := "d/" + e.Name()
+		f, err := img.Open(name)
+		if err != nil {
+			t.Fatalf("Open(%s): %v", name, err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

@@ -1614,24 +1614,25 @@ func blockFirstName(buf []byte) ([]byte, error) {
 	}
 	var first disk.Dirent
 	first.Unmarshal(buf)
-	entryN := first.NameOff / disk.SizeDirent
-	if entryN == 0 || int(first.NameOff) > len(buf) {
-		return nil, fmt.Errorf("invalid name offset %d: %w", first.NameOff, ErrInvalid)
+	nameOff := int(first.NameOff)
+	entryN := nameOff / disk.SizeDirent
+	if entryN == 0 || nameOff > len(buf) {
+		return nil, fmt.Errorf("invalid name offset %d: %w", nameOff, ErrInvalid)
 	}
-	var nameEnd uint16
+	// int, not uint16: at the maximum supported block size a full block is
+	// 65536 bytes, which truncates to 0.
+	nameEnd := len(buf)
 	if entryN > 1 {
-		nextOff := int(disk.SizeDirent) + 8
+		nextOff := disk.SizeDirent + 8
 		if nextOff+2 > len(buf) {
 			return nil, fmt.Errorf("next dirent name offset out of range: %w", ErrInvalid)
 		}
-		nameEnd = binary.LittleEndian.Uint16(buf[nextOff:])
-	} else {
-		nameEnd = uint16(len(buf))
+		nameEnd = int(binary.LittleEndian.Uint16(buf[nextOff:]))
 	}
-	if first.NameOff > nameEnd || int(nameEnd) > len(buf) {
-		return nil, fmt.Errorf("name range [%d:%d] out of bounds: %w", first.NameOff, nameEnd, ErrInvalid)
+	if nameOff > nameEnd || nameEnd > len(buf) {
+		return nil, fmt.Errorf("name range [%d:%d] out of bounds: %w", nameOff, nameEnd, ErrInvalid)
 	}
-	name := buf[first.NameOff:nameEnd]
+	name := buf[nameOff:nameEnd]
 	// Trim NUL terminator if present
 	if i := bytes.IndexByte(name, 0); i >= 0 {
 		name = name[:i]
@@ -1641,27 +1642,28 @@ func blockFirstName(buf []byte) ([]byte, error) {
 
 // blockDirent decodes the dirent at index i from buf and returns the
 // name bytes for that entry. entryN is the total number of entries.
-func blockDirent(buf []byte, i, entryN uint16) (disk.Dirent, []byte, error) {
+func blockDirent(buf []byte, i, entryN int) (disk.Dirent, []byte, error) {
 	var de disk.Dirent
-	off := int(disk.SizeDirent * i)
+	off := disk.SizeDirent * i
 	if off+disk.SizeDirent > len(buf) {
 		return de, nil, fmt.Errorf("dirent %d offset %d out of range: %w", i, off, ErrInvalid)
 	}
 	de.Unmarshal(buf[off:])
-	var nameEnd uint16
+	nameOff := int(de.NameOff)
+	// int, not uint16: at the maximum supported block size a full block is
+	// 65536 bytes, which truncates to 0.
+	nameEnd := len(buf)
 	if i < entryN-1 {
-		nextOff := int(disk.SizeDirent*(i+1)) + 8
+		nextOff := disk.SizeDirent*(i+1) + 8
 		if nextOff+2 > len(buf) {
 			return de, nil, fmt.Errorf("dirent %d next name offset out of range: %w", i, ErrInvalid)
 		}
-		nameEnd = binary.LittleEndian.Uint16(buf[nextOff:])
-	} else {
-		nameEnd = uint16(len(buf))
+		nameEnd = int(binary.LittleEndian.Uint16(buf[nextOff:]))
 	}
-	if de.NameOff > nameEnd || int(nameEnd) > len(buf) {
-		return de, nil, fmt.Errorf("dirent %d name range [%d:%d] out of bounds: %w", i, de.NameOff, nameEnd, ErrInvalid)
+	if nameOff > nameEnd || nameEnd > len(buf) {
+		return de, nil, fmt.Errorf("dirent %d name range [%d:%d] out of bounds: %w", i, nameOff, nameEnd, ErrInvalid)
 	}
-	name := buf[de.NameOff:nameEnd]
+	name := buf[nameOff:nameEnd]
 	// The last entry name may be NUL-terminated before the end of the block.
 	if i == entryN-1 {
 		if j := bytes.IndexByte(name, 0); j >= 0 {
@@ -1682,12 +1684,12 @@ func lookupBlock(buf, target []byte) (uint64, fs.FileMode, error) {
 	if first.NameOff%disk.SizeDirent != 0 {
 		return 0, 0, fmt.Errorf("invalid name offset %d not aligned to dirent size: %w", first.NameOff, ErrInvalid)
 	}
-	entryN := first.NameOff / disk.SizeDirent
+	entryN := int(first.NameOff) / disk.SizeDirent
 	if int(first.NameOff) > len(buf) {
 		return 0, 0, fmt.Errorf("name offset %d exceeds block size %d: %w", first.NameOff, len(buf), ErrInvalid)
 	}
 
-	lo, hi := uint16(0), entryN
+	lo, hi := 0, entryN
 	for lo < hi {
 		mid := lo + (hi-lo)/2
 		de, name, err := blockDirent(buf, mid, entryN)
