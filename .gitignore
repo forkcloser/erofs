@@ -12,6 +12,10 @@ Desktop.ini
 # Build output and Go artifacts
 /build
 /tmp
+# `go test -c` drops <pkg>.test next to the package; one of these (7 MB) was
+# committed by accident, which is what made a rebase of that commit conflict.
+*.test
+*.out
 
 # Scratch / work-in-progress files
 # *.local

@@ -1,4 +1,22 @@
-name: CI
+# Inherited, and not yet folded into the limen pipeline.
+#
+# Everything here exists for one reason: the tests that read a real image shell
+# out to mkfs.erofs, and erofs-utils is a C project distributed as source — it
+# has no release binary aqua could pin, so `just test` under the hermetic PATH
+# cannot reach it and every image-backed test skips itself. This workflow builds
+# erofs-utils (patched) from source and runs the suite against it, on linux,
+# macos, and — via a MinGW cross-compile — windows, plus the fuzz targets.
+#
+# Retiring it means giving the pinned toolchain an mkfs.erofs, after which these
+# jobs become `just` recipes like any other and this file goes away. Until then
+# ci.yaml ("ci") is the authority on everything that does NOT need an image, and
+# this workflow covers only what it cannot.
+#
+# Deliberately absent: a lint job. ci.yaml runs `just lint` — the repo's pinned
+# golangci-lint (aqua.yaml), its .golangci.yml, once per supported GOOS. The job
+# that used to live here ran an action-supplied golangci-lint v2.1 against the
+# same code, so the two could disagree about the same tree.
+name: erofs-utils integration
 
 on:
   push:
@@ -13,19 +31,6 @@ env:
   EROFS_UTILS_VERSION: v1.9.1
 
 jobs:
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
-        with:
-          go-version: "1.25"
-          cache: false
-      - uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
-        with:
-          version: v2.1
-
   build-and-test:
     name: Build & Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
