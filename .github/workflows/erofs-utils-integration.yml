@@ -28,7 +28,7 @@ permissions:
   contents: read
 
 env:
-  EROFS_UTILS_VERSION: v1.9.1
+  EROFS_UTILS_VERSION: v1.9.3
 
 jobs:
   build-and-test:
