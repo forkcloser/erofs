@@ -165,8 +165,8 @@ jobs:
 
   # INTERIM in its plumbing, permanent in intent: a short fuzz of every Fuzz*
   # target, once, on linux, with mkfs.erofs available (several targets round-
-  # trip through it). The recipe is the project's `fuzz` until limen ships
-  # `do::test::go::fuzz`; the erofs-utils build step leaves with the rest.
+  # trip through it). The recipe is limen's `do::test::go::fuzz` (verdict by
+  # crasher, hiccup retried once); only the erofs-utils build step is interim.
   fuzz:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -201,7 +201,7 @@ jobs:
             fuzz-corpus-${{ runner.os }}-
 
       - name: Fuzz
-        run: just fuzz
+        run: just do test go fuzz
 
       # Surface crashers as artifacts: the log names the target, but the
       # input itself is what reproduces the bug locally.
