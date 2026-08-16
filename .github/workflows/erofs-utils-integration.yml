@@ -176,8 +176,8 @@ jobs:
             LDFLAGS="-Wl,-Bstatic -static-libgcc -L/usr/${MINGW_HOST}/lib" \
             liblz4_LIBS="/usr/${MINGW_HOST}/lib/liblz4.a"
 
-          make -j"$(nproc)" -C lib CPPFLAGS="-include posix_compat.h"
-          make -j"$(nproc)" -C mkfs CPPFLAGS="-include posix_compat.h" LIBS="-llz4"
+          make -j"$(nproc)" -C lib CPPFLAGS="-D_GNU_SOURCE -include posix_compat.h"
+          make -j"$(nproc)" -C mkfs CPPFLAGS="-D_GNU_SOURCE -include posix_compat.h" LIBS="-llz4"
 
           ${MINGW_HOST}-strip mkfs/mkfs.erofs.exe
 
