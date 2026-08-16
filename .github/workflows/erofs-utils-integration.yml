@@ -158,7 +158,14 @@ jobs:
           done
 
           ./autogen.sh
-          PKG_CONFIG_PATH=/usr/${MINGW_HOST}/lib/pkgconfig \
+          # PKG_CONFIG_LIBDIR (not _PATH): _PATH prepends to the host's
+          # search dirs, so host .pc files leak into the cross build —
+          # v1.9.3's libxml2 auto-probe found the runner's libxml-2.0.pc
+          # and put -lxml2 on a link line no mingw library can satisfy.
+          # _LIBDIR replaces the search path outright: only the mingw
+          # sysroot (where the cross-compiled lz4 installs its .pc) is
+          # visible, and every other auto-probe fails closed.
+          PKG_CONFIG_LIBDIR=/usr/${MINGW_HOST}/lib/pkgconfig \
           ./configure \
             --host=${MINGW_HOST} \
             --disable-shared \
@@ -169,6 +176,7 @@ jobs:
             --without-selinux \
             --without-uuid \
             --without-openssl \
+            --without-libxml2 \
             --disable-fuse \
             --disable-debug \
             --disable-dependency-tracking \
