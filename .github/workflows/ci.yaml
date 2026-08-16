@@ -1,6 +1,9 @@
-# DO NOT EDIT MANUALLY.
-# This workflow is generic — no project-specific content — and is destined to
-# become part of the canonical baseline limen distributes.
+# Seeded from limen's canonical ci.yaml and the project's own from there:
+# `verify` and `gate` are the canonical shape, verbatim; the erofs-utils
+# pieces (a build step in `verify`, plus `mkfs-windows`, `verify-windows-image`
+# and `fuzz`) are this project's, and are INTERIM — see
+# .github/scripts/build-erofs-utils.sh for why they exist and what retires
+# them. Everything they add still answers to the canonical `gate`.
 #
 # Design: minimal GitHub glue around the same tooling every developer runs
 # locally. The only marketplace action is GitHub's own checkout, pinned by
@@ -80,8 +83,142 @@ jobs:
       - name: Lint
         run: just lint
 
+      # INTERIM: the image-backed tests shell out to mkfs.erofs, which the
+      # pinned toolchain cannot carry (no release binary to pin), so it is
+      # built from source here — checksum-verified, patched, one script for
+      # every job — into build/erofs-utils/bin, the one directory the root
+      # Justfile adds to limen's hermetic PATH (a /usr/local install would be
+      # invisible to `just test`). Not on windows: no native build there; the
+      # windows-2025 leg WITH an image is `verify-windows-image` below, fed by
+      # a cross-compile. The windows legs of this matrix run `just test`
+      # as-is and their image tests skip themselves — `mkfs-info` says so.
+      - name: Build erofs-utils (interim)
+        if: runner.os != 'Windows'
+        run: .github/scripts/build-erofs-utils.sh native
+
       - name: Test
+        env:
+          # The legs that just built mkfs.erofs must FAIL if `just test`
+          # cannot see it — a silent fall-back to "every image test skipped"
+          # is a coverage regression, not a pass. Windows legs: not required.
+          EROFS_REQUIRE_MKFS: ${{ runner.os != 'Windows' && '1' || '' }}
         run: just test
+
+  # INTERIM: cross-compile a static mkfs.erofs.exe so the windows leg below
+  # can run the image-backed tests. Artifact upload/download are GitHub's own
+  # actions, SHA-pinned — the same trust class as checkout — and go away with
+  # the rest of the erofs-utils machinery.
+  mkfs-windows:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Cross-compile mkfs.erofs for windows
+        run: .github/scripts/build-erofs-utils.sh windows
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: mkfs-erofs-windows
+          path: build/erofs-utils/bin/mkfs.erofs.exe
+          if-no-files-found: error
+
+  # INTERIM: the windows-2025 leg WITH an image. Same recipe as every other
+  # leg — `just test` — with mkfs.erofs on PATH; the difference from the
+  # canonical windows legs of `verify` is only that the image tests do not
+  # skip. Windows-arm is not covered with an image (the cross build is
+  # x86_64 and would run under emulation; not worth a leg for an interim).
+  verify-windows-image:
+    needs: [mkfs-windows]
+    runs-on: windows-2025
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # Into the same project-local tool dir the native builds use: the root
+      # Justfile's PATH addition finds it, no GITHUB_PATH plumbing needed.
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: mkfs-erofs-windows
+          path: build/erofs-utils/bin
+
+      - name: Install aqua (pinned, checksum-verified)
+        uses: ./.github/actions/setup-aqua
+
+      - name: Install pinned tools
+        run: aqua install --only-link
+
+      - name: Test
+        env:
+          # This leg exists for the image tests: fail if mkfs.erofs is not seen.
+          EROFS_REQUIRE_MKFS: "1"
+          # mkfs.erofs uses TMPDIR for its temporaries; windows does not set it.
+          TMPDIR: ${{ runner.temp }}
+        run: just test
+
+  # INTERIM in its plumbing, permanent in intent: a short fuzz of every Fuzz*
+  # target, once, on linux, with mkfs.erofs available (several targets round-
+  # trip through it). The recipe is limen's `do::test::go::fuzz` (verdict by
+  # crasher, hiccup retried once); only the erofs-utils build step is interim.
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install aqua (pinned, checksum-verified)
+        uses: ./.github/actions/setup-aqua
+
+      - name: Install pinned tools
+        run: aqua install --only-link
+
+      - name: Build erofs-utils (interim)
+        run: .github/scripts/build-erofs-utils.sh native
+
+      # The generated corpus is what makes fuzzing cumulative: each run
+      # starts from every interesting input earlier runs discovered rather
+      # than from the seeds. Key on the fuzz test sources so a changed
+      # target restarts its own corpus; restore-keys keep the rest. GitHub's
+      # own action, SHA-pinned.
+      - id: fuzzdir
+        run: echo "dir=$(go env GOCACHE)/fuzz" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.fuzzdir.outputs.dir }}
+          key: fuzz-corpus-${{ runner.os }}-${{ hashFiles('**/*_fuzz_test.go') }}
+          restore-keys: |
+            fuzz-corpus-${{ runner.os }}-
+
+      # Several targets round-trip through mkfs.erofs; without it they skip
+      # and the fuzz run is quietly worth less. Same guard as the test legs.
+      - name: Fuzz
+        env:
+          EROFS_REQUIRE_MKFS: "1"
+        run: |
+          just mkfs-info
+          just do test go fuzz
+
+      # Surface crashers as artifacts: the log names the target, but the
+      # input itself is what reproduces the bug locally.
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        if: failure()
+        with:
+          name: fuzz-crashers
+          path: testdata/fuzz/
+          if-no-files-found: ignore
 
   # The ONE required status check (see defaultRequiredChecks in
   # internal/github/audit.go). Branch protection names contexts as strings, so
@@ -91,7 +228,7 @@ jobs:
   # whatever its shape, to a single stable name: change the legs above freely,
   # the ruleset never moves.
   gate:
-    needs: [verify]
+    needs: [verify, verify-windows-image, fuzz]
     # always(), and the result asserted explicitly. Without always() a failed
     # or cancelled dependency SKIPS this job instead of failing it, and a
     # skipped required check does not block a merge — branch protection that
@@ -102,11 +239,15 @@ jobs:
     timeout-minutes: 5
     permissions: {}
     steps:
-      - name: Every verify leg succeeded
+      - name: Every leg succeeded
         env:
           # Via env, never interpolated into the script: the shell sees data,
           # not something the expression layer can rewrite into code.
           RESULT: ${{ needs.verify.result }}
+          RESULT_WINDOWS_IMAGE: ${{ needs.verify-windows-image.result }}
+          RESULT_FUZZ: ${{ needs.fuzz.result }}
         run: |
           printf 'verify: %s\n' "$RESULT"
-          [ "$RESULT" = "success" ]
+          printf 'verify-windows-image: %s\n' "$RESULT_WINDOWS_IMAGE"
+          printf 'fuzz: %s\n' "$RESULT_FUZZ"
+          [ "$RESULT" = "success" ] && [ "$RESULT_WINDOWS_IMAGE" = "success" ] && [ "$RESULT_FUZZ" = "success" ]

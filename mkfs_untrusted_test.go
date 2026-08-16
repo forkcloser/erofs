@@ -1212,3 +1212,156 @@ func TestXattrPrefixAndDuplicates(t *testing.T) {
 		t.Error("a rejected duplicate overwrote the original value")
 	}
 }
+
+// TestCopyFromImageXattrParity covers the copyFromImage fast path, the other
+// door an image's attributes come in through. The reader rejects an undefined
+// xattr name index and a duplicated key (TestXattrPrefixAndDuplicates); the
+// fast-path parser used to map the index to the empty prefix and take the
+// duplicate last-wins, so an image that the reader refused would still be
+// copied — spoofed security.capability included — by CopyFrom(MetadataOnly).
+func TestCopyFromImageXattrParity(t *testing.T) {
+	build := func(t *testing.T, xattrs map[string]string) []byte {
+		t.Helper()
+		out := &seekBuf{}
+		w := Create(out, WithBuildTime(1000, 0))
+		f, err := w.Create("/f")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range xattrs {
+			if err := w.Setxattr("/f", k, v); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return out.buf
+	}
+	copyMeta := func(t *testing.T, buf []byte) error {
+		t.Helper()
+		img, err := Open(bytes.NewReader(buf))
+		if err != nil {
+			t.Fatalf("image failed to open: %v", err)
+		}
+		return Create(&seekBuf{}).CopyFrom(img, MetadataOnly())
+	}
+
+	t.Run("undefinedIndex", func(t *testing.T) {
+		buf := build(t, map[string]string{"security.capability": "real"})
+		if err := copyMeta(t, buf); err != nil {
+			t.Fatalf("untampered image failed to copy: %v", err)
+		}
+		// The 4-byte entry precedes the stored name; its second byte is the
+		// name index. 6 is "security."; 7 upward is undefined.
+		i := bytes.Index(buf, []byte("capability"))
+		if i < 0 || buf[i-3] != 6 {
+			t.Fatalf("could not locate the stored xattr entry (index byte %d)", buf[i-3])
+		}
+		buf[i-3] = 7
+		err := copyMeta(t, buf)
+		if err == nil {
+			t.Fatal("CopyFrom accepted an undefined xattr name index")
+		}
+		if !errors.Is(err, ErrInvalid) {
+			t.Errorf("err = %v, want it to wrap ErrInvalid", err)
+		}
+	})
+
+	t.Run("duplicateKey", func(t *testing.T) {
+		// Two names under the same prefix, then rewrite the second's stored
+		// suffix so both spell the same full key.
+		buf := build(t, map[string]string{
+			"user.aaaa": "first",
+			"user.bbbb": "second",
+		})
+		if err := copyMeta(t, buf); err != nil {
+			t.Fatalf("untampered image failed to copy: %v", err)
+		}
+		i := bytes.Index(buf, []byte("bbbb"))
+		if i < 0 {
+			t.Fatal("could not locate the second stored xattr name")
+		}
+		copy(buf[i:], "aaaa")
+		err := copyMeta(t, buf)
+		if err == nil {
+			t.Fatal("CopyFrom accepted a duplicated xattr key")
+		}
+		if !errors.Is(err, ErrInvalid) {
+			t.Errorf("err = %v, want it to wrap ErrInvalid", err)
+		}
+	})
+}
+
+// TestEmptyDirentNameIsRejected covers a dirent whose name is zero bytes long.
+// No writer emits one, and as a path element it names the directory itself,
+// so a lookup for it silently succeeds; the reader used to hand it out as an
+// entry, and the copyFromImage fast path silently skipped over it — neither
+// treated the image as the corrupt thing it is.
+func TestEmptyDirentNameIsRejected(t *testing.T) {
+	out := &seekBuf{}
+	w := Create(out, WithBuildTime(1000, 0))
+	for _, n := range []string{"/a", "/b"} {
+		f, err := w.Create(n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	buf := out.buf
+
+	img0, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	aNid, _, _, err := img0.(*image).resolve("a", "a", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Find a's dirent by its nid, then give it b's NameOff — the next dirent
+	// is 12 bytes on — so a's name spans zero bytes. Nothing else changes.
+	var want [8]byte
+	binary.LittleEndian.PutUint64(want[:], aNid)
+	off := -1
+	for o := 0; o+disk.SizeDirent*2 <= len(buf); o += 4 {
+		if bytes.Equal(buf[o:o+8], want[:]) {
+			off = o
+			break
+		}
+	}
+	if off < 0 {
+		t.Fatal("could not locate the dirent for /a")
+	}
+	nextNameOff := binary.LittleEndian.Uint16(buf[off+disk.SizeDirent+8:])
+	binary.LittleEndian.PutUint16(buf[off+8:], nextNameOff)
+
+	img, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("tampered image failed to open: %v", err)
+	}
+	if ents, err := fs.ReadDir(img, "."); err == nil {
+		names := make([]string, 0, len(ents))
+		for _, e := range ents {
+			names = append(names, e.Name())
+		}
+		t.Errorf("ReadDir returned %q, want an error", names)
+	} else if !errors.Is(err, ErrInvalid) {
+		t.Errorf("ReadDir err = %v, want it to wrap ErrInvalid", err)
+	}
+
+	err = Create(&seekBuf{}).CopyFrom(img, MetadataOnly())
+	if err == nil {
+		t.Error("CopyFrom accepted an empty dirent name")
+	} else if !errors.Is(err, ErrInvalid) {
+		t.Errorf("CopyFrom err = %v, want it to wrap ErrInvalid", err)
+	}
+}

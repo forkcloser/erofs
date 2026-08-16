@@ -279,7 +279,11 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			xattrAddr := inodeAddr + int64(icSize)
 			xb := at(xattrAddr)
 			if len(xb) >= xattrSize {
-				xattrs = parseXattrsFromBuf(xb[:xattrSize], at, sharedXattrOff, img.getLongPrefix)
+				var err error
+				xattrs, err = parseXattrsFromBuf(xb[:xattrSize], at, sharedXattrOff, img.getLongPrefix)
+				if err != nil {
+					return fmt.Errorf("xattrs for nid %d: %w", cur.nid, err)
+				}
 			}
 		}
 
@@ -493,17 +497,20 @@ func (fsys *Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPat
 				nameBytes = nameBytes[:len(nameBytes)-1]
 			}
 			name := string(nameBytes)
-			if name == "." || name == ".." || name == "" {
-				continue
-			}
 			// A name is one path element. Without this a nested dirent named
 			// "y/../../../.wh..wh..opq" builds a childPath that path.Dir
 			// collapses to "/", so the merge-mode whiteout handler wipes every
 			// entry from every prior layer; "x/../../.wh.secret" deletes an
 			// arbitrary path, and a plain "etc/passwd" overwrites a file in a
-			// directory the source never named.
+			// directory the source never named. Checked before the "."/".."
+			// filter so an empty name — which the NUL-stripping above can
+			// produce from an all-NUL entry — is an error here as it is in
+			// the reader, not something skipped over.
 			if err := checkDirentName(nameBytes); err != nil {
 				return fmt.Errorf("in %s: %w", parentPath, err)
+			}
+			if name == "." || name == ".." {
+				continue
 			}
 
 			childPath := parentPath + "/" + name
@@ -646,9 +653,17 @@ func (fsys *Writer) parseChunks(data []byte, chunkFmt uint16, fileSize uint64, b
 // parseXattrsFromBuf parses xattr entries from an in-memory buffer.
 // at provides on-demand access to the shared xattr block at sharedOff.
 // longPrefix resolves long xattr prefix indexes (NameIndex with high bit set).
-func parseXattrsFromBuf(buf []byte, at func(int64) []byte, sharedOff int64, longPrefix func(uint8) (string, error)) map[string]string {
+//
+// The same rules as the reader's loadXattrs apply, because this is the
+// other door an image's attributes come in through: an unknown name index
+// is an error rather than the empty prefix (which let a hostile image spell
+// "security.capability" in full under an undefined index and collide with
+// the properly prefixed entry), and a name listed twice is an error rather
+// than last-wins (which let the parser's iteration order pick which copy a
+// policy decision saw).
+func parseXattrsFromBuf(buf []byte, at func(int64) []byte, sharedOff int64, longPrefix func(uint8) (string, error)) (map[string]string, error) {
 	if len(buf) < disk.SizeXattrBodyHeader {
-		return nil
+		return nil, nil
 	}
 
 	var xh disk.XattrHeader
@@ -656,6 +671,14 @@ func parseXattrsFromBuf(buf []byte, at func(int64) []byte, sharedOff int64, long
 	pos := disk.SizeXattrBodyHeader
 
 	xattrs := make(map[string]string)
+	set := func(name, value string) error {
+		if _, dup := xattrs[name]; dup {
+			return fmt.Errorf("duplicate xattr %q: %w", name, ErrInvalid)
+		}
+		xattrs[name] = value
+
+		return nil
+	}
 
 	// Resolve shared xattr references.
 	for i := 0; i < int(xh.SharedCount) && pos+4 <= len(buf); i++ {
@@ -676,9 +699,14 @@ func parseXattrsFromBuf(buf []byte, at func(int64) []byte, sharedOff int64, long
 			continue
 		}
 		sb := sharedBlock[disk.SizeXattrEntry:]
-		name := xattrName(xe, sb[:xe.NameLen], longPrefix)
+		name, err := xattrName(xe, sb[:xe.NameLen], longPrefix)
+		if err != nil {
+			return nil, fmt.Errorf("shared xattr %d: %w", idx, err)
+		}
 		value := string(sb[xe.NameLen : int(xe.NameLen)+int(xe.ValueLen)])
-		xattrs[name] = value
+		if err := set(name, value); err != nil {
+			return nil, err
+		}
 	}
 
 	// Parse inline xattr entries.
@@ -692,12 +720,17 @@ func parseXattrsFromBuf(buf []byte, at func(int64) []byte, sharedOff int64, long
 			break
 		}
 
-		name := xattrName(xe, buf[pos:pos+int(xe.NameLen)], longPrefix)
+		name, err := xattrName(xe, buf[pos:pos+int(xe.NameLen)], longPrefix)
+		if err != nil {
+			return nil, fmt.Errorf("inline xattr: %w", err)
+		}
 		pos += int(xe.NameLen)
 		value := string(buf[pos : pos+int(xe.ValueLen)])
 		pos += int(xe.ValueLen)
 
-		xattrs[name] = value
+		if err := set(name, value); err != nil {
+			return nil, err
+		}
 
 		// Round up to 4-byte boundary.
 		if rem := pos % 4; rem != 0 {
@@ -705,24 +738,32 @@ func parseXattrsFromBuf(buf []byte, at func(int64) []byte, sharedOff int64, long
 		}
 	}
 	if len(xattrs) == 0 {
-		return nil
+		return nil, nil
 	}
-	return xattrs
+	return xattrs, nil
 }
 
 // xattrName builds the full xattr name from an entry and its raw name bytes.
-// longPrefix resolves long prefix indexes when the high bit of NameIndex is set.
-func xattrName(xe disk.XattrEntry, rawName []byte, longPrefix func(uint8) (string, error)) string {
+// longPrefix resolves long prefix indexes when the high bit of NameIndex is
+// set. An index the format does not define is an error, as in the reader.
+func xattrName(xe disk.XattrEntry, rawName []byte, longPrefix func(uint8) (string, error)) (string, error) {
 	var prefix string
 	if xe.NameIndex&0x80 != 0 {
 		// Long prefix: high bit set, low 7 bits index the prefix table.
-		if longPrefix != nil {
-			if p, err := longPrefix(xe.NameIndex & 0x7F); err == nil {
-				prefix = p
-			}
+		if longPrefix == nil {
+			return "", fmt.Errorf("long xattr prefix %d without a prefix table: %w", xe.NameIndex&0x7F, ErrInvalid)
 		}
-	} else if xe.NameIndex != 0 {
-		prefix = xattrIndex(xe.NameIndex).String()
+		p, err := longPrefix(xe.NameIndex & 0x7F)
+		if err != nil {
+			return "", err
+		}
+		prefix = p
+	} else {
+		p, err := xattrIndex(xe.NameIndex).prefix()
+		if err != nil {
+			return "", err
+		}
+		prefix = p
 	}
-	return prefix + string(rawName)
+	return prefix + string(rawName), nil
 }

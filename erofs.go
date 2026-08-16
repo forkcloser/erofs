@@ -990,7 +990,12 @@ func validPath(name string) bool {
 //
 // "." and "..", the directory's own self and parent entries, are legitimate
 // on disk; callers filter them by name rather than treating them as errors.
+// An empty name is not: no writer emits one, and as a path element it names
+// the directory itself, so a lookup for it would silently succeed.
 func checkDirentName(name []byte) error {
+	if len(name) == 0 {
+		return fmt.Errorf("empty dirent name: %w", ErrInvalid)
+	}
 	if bytes.ContainsRune(name, '/') {
 		return fmt.Errorf("dirent name %q contains a path separator: %w", name, ErrInvalid)
 	}
