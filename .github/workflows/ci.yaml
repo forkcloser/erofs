@@ -86,15 +86,22 @@ jobs:
       # INTERIM: the image-backed tests shell out to mkfs.erofs, which the
       # pinned toolchain cannot carry (no release binary to pin), so it is
       # built from source here — checksum-verified, patched, one script for
-      # every job. Not on windows: no native build; the windows-2025 leg with
-      # an image is `verify-windows-image` below, fed by a cross-compile. The
-      # windows legs of this matrix run `just test` as-is, and `mkfs-info`
-      # says so in the log: image tests skip themselves there.
+      # every job — into build/erofs-utils/bin, the one directory the root
+      # Justfile adds to limen's hermetic PATH (a /usr/local install would be
+      # invisible to `just test`). Not on windows: no native build there; the
+      # windows-2025 leg WITH an image is `verify-windows-image` below, fed by
+      # a cross-compile. The windows legs of this matrix run `just test`
+      # as-is and their image tests skip themselves — `mkfs-info` says so.
       - name: Build erofs-utils (interim)
         if: runner.os != 'Windows'
         run: .github/scripts/build-erofs-utils.sh native
 
       - name: Test
+        env:
+          # The legs that just built mkfs.erofs must FAIL if `just test`
+          # cannot see it — a silent fall-back to "every image test skipped"
+          # is a coverage regression, not a pass. Windows legs: not required.
+          EROFS_REQUIRE_MKFS: ${{ runner.os != 'Windows' && '1' || '' }}
         run: just test
 
   # INTERIM: cross-compile a static mkfs.erofs.exe so the windows leg below
@@ -112,15 +119,12 @@ jobs:
           persist-credentials: false
 
       - name: Cross-compile mkfs.erofs for windows
-        run: |
-          exe=$(.github/scripts/build-erofs-utils.sh windows | tail -n 1)
-          mkdir -p build/mkfs-windows
-          cp "$exe" build/mkfs-windows/mkfs.erofs.exe
+        run: .github/scripts/build-erofs-utils.sh windows
 
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: mkfs-erofs-windows
-          path: build/mkfs-windows/mkfs.erofs.exe
+          path: build/erofs-utils/bin/mkfs.erofs.exe
           if-no-files-found: error
 
   # INTERIM: the windows-2025 leg WITH an image. Same recipe as every other
@@ -140,14 +144,12 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      # Into the same project-local tool dir the native builds use: the root
+      # Justfile's PATH addition finds it, no GITHUB_PATH plumbing needed.
       - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
           name: mkfs-erofs-windows
-          path: build/mkfs-windows
-
-      - name: Put mkfs.erofs on PATH
-        run: |
-          echo "$GITHUB_WORKSPACE/build/mkfs-windows" >> "$GITHUB_PATH"
+          path: build/erofs-utils/bin
 
       - name: Install aqua (pinned, checksum-verified)
         uses: ./.github/actions/setup-aqua
@@ -157,11 +159,11 @@ jobs:
 
       - name: Test
         env:
+          # This leg exists for the image tests: fail if mkfs.erofs is not seen.
+          EROFS_REQUIRE_MKFS: "1"
           # mkfs.erofs uses TMPDIR for its temporaries; windows does not set it.
           TMPDIR: ${{ runner.temp }}
-        run: |
-          mkfs.erofs -V
-          just test
+        run: just test
 
   # INTERIM in its plumbing, permanent in intent: a short fuzz of every Fuzz*
   # target, once, on linux, with mkfs.erofs available (several targets round-
@@ -200,8 +202,14 @@ jobs:
           restore-keys: |
             fuzz-corpus-${{ runner.os }}-
 
+      # Several targets round-trip through mkfs.erofs; without it they skip
+      # and the fuzz run is quietly worth less. Same guard as the test legs.
       - name: Fuzz
-        run: just do test go fuzz
+        env:
+          EROFS_REQUIRE_MKFS: "1"
+        run: |
+          just mkfs-info
+          just do test go fuzz
 
       # Surface crashers as artifacts: the log names the target, but the
       # input itself is what reproduces the bug locally.

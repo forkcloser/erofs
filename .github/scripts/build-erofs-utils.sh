@@ -16,11 +16,23 @@
 # unpinned, knowingly: the build-dependency packages from the runner's own
 # apt/brew repositories.
 #
+# Where it lands — and why that matters: `just` runs every recipe under limen's
+# HERMETIC PATH (aqua's bin plus the base system dirs; see .limen/just/main.just),
+# so a `make install` into /usr/local is invisible to `just test` and every
+# image-backed test skips itself while the log says the build succeeded. The
+# binary therefore installs into the project's own tool dir, build/erofs-utils/,
+# whose bin/ the root Justfile prepends to PATH — the one declared exception to
+# the hermetic list, and the same location on every OS (the windows cross-build
+# is copied there by CI). No sudo, no system prefix.
+#
 # Usage:
-#   build-erofs-utils.sh native    build and `make install` for this host
-#                                  (linux or macOS); mkfs.erofs lands on PATH
+#   build-erofs-utils.sh native    build and install for this host (linux or
+#                                  macOS) into build/erofs-utils/bin/mkfs.erofs
 #   build-erofs-utils.sh windows   cross-compile a static mkfs.erofs.exe with
-#                                  MinGW-w64 (linux host); prints its path
+#                                  MinGW-w64 (linux host) into
+#                                  build/erofs-utils/bin/mkfs.erofs.exe
+# Set SKIP_DEPS=1 to skip the apt/brew build-dependency step (a developer
+# machine that already has autotools and lz4).
 set -euo pipefail
 
 EROFS_UTILS_VERSION="1.9.3"
@@ -33,6 +45,7 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 patches="$repo/.github/workflows/patches/erofs-utils"
 headers="$repo/.github/workflows/mingw-compat-headers"
 work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/erofs-utils-build"
+prefix="$repo/build/erofs-utils"
 
 die() {
     echo "build-erofs-utils: $*" >&2
@@ -73,16 +86,18 @@ nproc_portable() {
 }
 
 build_native() {
-    case "$(uname -s)" in
-        Linux)
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq autoconf automake libtool pkg-config libz-dev liblz4-dev uuid-dev
-            ;;
-        Darwin)
-            brew install autoconf automake libtool pkg-config lz4
-            ;;
-        *) die "native build supports linux and macOS only (got $(uname -s))" ;;
-    esac
+    if [ -z "${SKIP_DEPS:-}" ]; then
+        case "$(uname -s)" in
+            Linux)
+                sudo apt-get update -qq
+                sudo apt-get install -y -qq autoconf automake libtool pkg-config libz-dev liblz4-dev uuid-dev
+                ;;
+            Darwin)
+                brew install autoconf automake libtool pkg-config lz4
+                ;;
+            *) die "native build supports linux and macOS only (got $(uname -s))" ;;
+        esac
+    fi
     local src
     src=$(unpack_erofs_utils)
     (
@@ -92,17 +107,20 @@ build_native() {
         # to 16K only when the build CPU is aarch64), so the same source
         # yields a different mkfs per runner. Pin it: the 16384 leg of
         # TestReadReferenceImage skips itself otherwise.
-        MAX_BLOCK_SIZE=16384 ./configure --enable-lz4
+        MAX_BLOCK_SIZE=16384 ./configure --enable-lz4 --prefix="$prefix"
         make -j"$(nproc_portable)"
-        sudo make install
+        make install
     )
-    mkfs.erofs -V
+    "$prefix/bin/mkfs.erofs" -V
+    echo "installed $prefix/bin/mkfs.erofs"
 }
 
 build_windows() {
     [ "$(uname -s)" = "Linux" ] || die "the windows cross-build needs a linux host"
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq autoconf automake libtool pkg-config mingw-w64
+    if [ -z "${SKIP_DEPS:-}" ]; then
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq autoconf automake libtool pkg-config mingw-w64
+    fi
     mkdir -p "$work"
 
     # lz4, static, into the mingw sysroot — the only library the cross build
@@ -158,7 +176,9 @@ build_windows() {
         make -j"$(nproc_portable)" -C mkfs CPPFLAGS="-D_GNU_SOURCE -include posix_compat.h" LIBS="-llz4"
         "${MINGW_HOST}-strip" mkfs/mkfs.erofs.exe
     )
-    echo "$src/mkfs/mkfs.erofs.exe"
+    mkdir -p "$prefix/bin"
+    cp "$src/mkfs/mkfs.erofs.exe" "$prefix/bin/mkfs.erofs.exe"
+    echo "installed $prefix/bin/mkfs.erofs.exe"
 }
 
 case "${1:-}" in
