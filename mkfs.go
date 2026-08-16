@@ -2,6 +2,7 @@ package erofs
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -468,6 +469,107 @@ func (fsys *Writer) SetNlink(name string, nlink uint32) error {
 	e.nlink = nlink
 	e.nlinkSet = true
 	return nil
+}
+
+// Remove removes the named file, empty directory, symlink, device or
+// hardlink name. Removing one name of a hard-linked file leaves the other
+// names — and the shared inode — intact, as unlink(2) does. Removing a
+// non-empty directory fails with ErrDirNotEmpty; use RemoveAll for that.
+// Removing "/" or a missing path is an error (fs.ErrInvalid, fs.ErrNotExist).
+//
+// Together with CopyFrom this supports merging layers programmatically,
+// without expressing deletions as AUFS whiteout files in a source tree.
+func (fsys *Writer) Remove(name string) error {
+	if fsys.wErr != nil {
+		return fsys.wErr
+	}
+	name = cleanPath(name)
+	if name == "/" {
+		return &fs.PathError{Op: "remove", Path: name, Err: fs.ErrInvalid}
+	}
+	// Deliberately not lookup(): that resolves a hardlink name to the
+	// shared inode, which is right for metadata and wrong here — Remove
+	// takes away exactly the name it was given.
+	e, ok := fsys.byPath[name]
+	if !ok {
+		return &fs.PathError{Op: "remove", Path: name, Err: fs.ErrNotExist}
+	}
+	if err := fsys.checkNotOpen(e, "remove"); err != nil {
+		return err
+	}
+	if e.mode&disk.StatTypeMask == disk.StatTypeDir {
+		for _, c := range e.children {
+			if !c.removed {
+				return &fs.PathError{Op: "remove", Path: name, Err: ErrDirNotEmpty}
+			}
+		}
+	}
+	fsys.unlinkEntry(e)
+
+	return nil
+}
+
+// RemoveAll removes the named path and any children it has. Unlike Remove
+// it succeeds when the path does not exist and never complains about a
+// non-empty directory. Removing "/" is refused (fs.ErrInvalid): empty an
+// image by removing root's children. A path that would traverse a
+// non-directory fails with ErrNotDirectory.
+func (fsys *Writer) RemoveAll(name string) error {
+	if fsys.wErr != nil {
+		return fsys.wErr
+	}
+	name = cleanPath(name)
+	if name == "/" {
+		return &fs.PathError{Op: "removeall", Path: name, Err: fs.ErrInvalid}
+	}
+	e, ok := fsys.byPath[name]
+	if !ok {
+		// Missing is fine, but only if every existing ancestor is a
+		// directory — RemoveAll("/file/child") is a caller bug, not a no-op.
+		for dir := path.Dir(name); dir != "/"; dir = path.Dir(dir) {
+			if anc, ok := fsys.byPath[dir]; ok {
+				if anc.mode&disk.StatTypeMask != disk.StatTypeDir {
+					return &fs.PathError{Op: "removeall", Path: name, Err: ErrNotDirectory}
+				}
+
+				break
+			}
+		}
+
+		return nil
+	}
+	if fsys.openFile != nil && fsys.openFile.entry.inSubtreeOf(e) {
+		return fsys.checkNotOpen(fsys.openFile.entry, "remove")
+	}
+	fsys.remove(name)
+
+	return nil
+}
+
+// ErrDirNotEmpty is returned (wrapped in an *fs.PathError) by Remove when
+// the named directory still has children. Use RemoveAll to remove a
+// directory together with its contents.
+var ErrDirNotEmpty = errors.New("directory not empty")
+
+// checkNotOpen refuses to act on the file currently open from Create.
+func (fsys *Writer) checkNotOpen(e *fsEntry, action string) error {
+	if fsys.openFile != nil && fsys.openFile.entry == e {
+		return fmt.Errorf("mkfs: %q is still open for writing; close it before you %s it",
+			e.path, action)
+	}
+
+	return nil
+}
+
+// inSubtreeOf reports whether e is d or lies beneath it.
+func (e *fsEntry) inSubtreeOf(d *fsEntry) bool {
+	for cur := e; cur != nil; cur = cur.parent {
+		if cur == d {
+			return true
+		}
+	}
+
+	return false
 }
 
 // --- Writer bulk copy ---
@@ -1381,11 +1483,7 @@ func (fsys *Writer) remove(p string) {
 	if !ok {
 		return
 	}
-	e.removed = true
-	delete(fsys.byPath, p)
-	if e.linkTo != nil {
-		e.linkTo.extraLinks--
-	}
+	fsys.unlinkEntry(e)
 	if e.mode&disk.StatTypeMask == disk.StatTypeDir {
 		fsys.removeSubtree(e)
 	}
@@ -1406,16 +1504,83 @@ func (fsys *Writer) removeChildren(dir string) {
 func (fsys *Writer) removeSubtree(e *fsEntry) {
 	for _, c := range e.children {
 		if !c.removed {
-			c.removed = true
-			delete(fsys.byPath, c.path)
-			if c.linkTo != nil {
-				c.linkTo.extraLinks--
-			}
+			fsys.unlinkEntry(c)
 			if c.mode&disk.StatTypeMask == disk.StatTypeDir {
 				fsys.removeSubtree(c)
 			}
 		}
 	}
+}
+
+// unlinkEntry drops one name. It is the single place an entry becomes
+// removed, so the hardlink bookkeeping in both directions lives here:
+//
+//   - removing an alias decrements its target's live-alias count;
+//   - removing a target that still has live aliases must not orphan the
+//     inode — the aliases still name it, exactly as unlink(2) leaves a
+//     multiply-linked file alive. One surviving alias is promoted to
+//     carry the inode (data, metadata, chunks) and the rest are
+//     repointed at it, so nothing downstream ever sees a dangling linkTo.
+func (fsys *Writer) unlinkEntry(e *fsEntry) {
+	e.removed = true
+	delete(fsys.byPath, e.path)
+	if e.linkTo != nil {
+		e.linkTo.extraLinks--
+
+		return
+	}
+	if e.extraLinks > 0 {
+		fsys.promoteAlias(e)
+	}
+}
+
+// promoteAlias hands e's inode to one of its surviving aliases. Aliases are
+// found by scanning the tree: they are rare, and keeping a back-reference
+// list on every entry would tax the common case for the exceptional one.
+// The lowest path wins so the outcome — and thus the image — is
+// deterministic regardless of link creation order.
+func (fsys *Writer) promoteAlias(target *fsEntry) {
+	var aliases []*fsEntry
+	var walk func(*fsEntry)
+	walk = func(d *fsEntry) {
+		for _, c := range d.children {
+			if c.removed {
+				continue
+			}
+			if c.linkTo == target {
+				aliases = append(aliases, c)
+			}
+			if c.mode&disk.StatTypeMask == disk.StatTypeDir {
+				walk(c)
+			}
+		}
+	}
+	walk(fsys.root)
+	if len(aliases) == 0 {
+		target.extraLinks = 0
+
+		return
+	}
+	slices.SortFunc(aliases, func(a, b *fsEntry) int {
+		return cmp.Compare(a.path, b.path)
+	})
+	heir := aliases[0]
+
+	// The heir takes over the inode wholesale, keeping only its own name
+	// and place in the tree.
+	path, parent := heir.path, heir.parent
+	*heir = *target
+	heir.path, heir.parent = path, parent
+	heir.linkTo = nil
+	heir.removed = false
+	heir.extraLinks = uint32(len(aliases) - 1)
+	for _, a := range aliases[1:] {
+		a.linkTo = heir
+	}
+	// The old target is now a dead husk: nothing points at it and it owns
+	// nothing. Zero the link count so a stale reference cannot double-count.
+	target.extraLinks = 0
+	target.children = nil
 }
 
 // buildErofsTree converts the fsEntry tree into an erofsEntry tree via BFS.
