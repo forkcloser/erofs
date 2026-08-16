@@ -44,7 +44,41 @@ runs:
           echo "${AQUA_INSTALLER_SHA256}  ${tmp}/aqua-installer" | shasum -a 256 -c -
         fi
         chmod +x "${tmp}/aqua-installer"
-        "${tmp}/aqua-installer" -v "${AQUA_VERSION}"
+        # The installer picks aqua's build from `uname -m`. On the windows
+        # arm64 runners that answer is WRONG: Git for Windows' arm64 build
+        # ships an x86_64 Git Bash (git.exe is native; bash, coreutils and
+        # uname are not — its release notes say so), so under this shell
+        # `uname -m` is x86_64, the installer fetches aqua_windows_amd64, and
+        # that aqua then resolves EVERY package for windows/amd64: go, just,
+        # gotestsum, the race runtime — the whole leg emulated, and no arm64
+        # coverage at all. The runner knows what it is (RUNNER_ARCH); tell the
+        # installer through the one input it reads. A shim on PATH, for the
+        # installer's process only, answering `uname -m` with aarch64: the
+        # installer's own checksum table already covers aqua_windows_arm64
+        # and its bootstrap aqua then installs the pinned version natively —
+        # every byte still verified the same way, only the choice corrected.
+        # Self-retiring: skipped once the shell's uname is honest.
+        if [ "${RUNNER_OS:-}" = "Windows" ] && [ "${RUNNER_ARCH:-}" = "ARM64" ] && [ "$(uname -m)" != "aarch64" ]; then
+          echo "windows/arm64 runner under an emulated shell (uname -m: $(uname -m)); steering the installer to arm64"
+          mkdir -p "${tmp}/shim"
+          real_uname="$(command -v uname)"
+          printf '#!/usr/bin/env bash\nif [ "${1:-}" = "-m" ]; then echo aarch64; else exec "%s" "$@"; fi\n' "${real_uname}" >"${tmp}/shim/uname"
+          chmod +x "${tmp}/shim/uname"
+          PATH="${tmp}/shim:${PATH}" "${tmp}/aqua-installer" -v "${AQUA_VERSION}"
+          # Assert, do not assume: read the PE machine field of the installed
+          # binary (0xAA64 = ARM64, 0x8664 = AMD64). If this ever fails, the
+          # leg is silently emulated again — better red than slow and false.
+          exe="${AQUA_ROOT_DIR}/bin/aqua.exe"
+          pe_offset="$(od -An -tu4 -j 60 -N 4 "${exe}" | tr -d ' ')"
+          machine="$(od -An -tx2 -j "$((pe_offset + 4))" -N 2 "${exe}" | tr -d ' ')"
+          if [ "${machine}" != "aa64" ]; then
+            echo "installed aqua is not an arm64 binary (PE machine 0x${machine}); the windows/arm64 leg would run emulated amd64 tooling" >&2
+            exit 1
+          fi
+          echo "aqua: native windows/arm64 (PE machine 0x${machine})"
+        else
+          "${tmp}/aqua-installer" -v "${AQUA_VERSION}"
+        fi
         rm -rf "${tmp}"
         echo "${AQUA_ROOT_DIR}/bin" >>"$GITHUB_PATH"
     - name: Authorize the committed aqua policy
