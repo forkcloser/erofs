@@ -35,7 +35,7 @@ packages:
     version: v0.1.0 # renovate: depName=_go/github.com/farcloser/godolint/cmd/godolint
     registry: local
   # --- farcloser tools (local registry; standard once registered upstream) ---
-  - name: farcloser/limen@v0.0.14 # renovate: depName=farcloser/limen
+  - name: farcloser/limen@v0.0.15 # renovate: depName=farcloser/limen
     registry: local
   # --- toolchain + binary-release tools (standard registry, aqua-verified) ---
   - name: golang/go
