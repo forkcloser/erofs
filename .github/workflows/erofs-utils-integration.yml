@@ -111,12 +111,30 @@ jobs:
           sudo make install
           mkfs.erofs -V
 
+      # The generated corpus is what makes fuzzing cumulative: each run
+      # starts from every interesting input earlier runs discovered rather
+      # than from the seeds. Key on the fuzz test sources so a changed
+      # target restarts its own corpus; restore-keys keep the rest.
+      - id: fuzzdir
+        run: echo "dir=$(go env GOCACHE)/fuzz" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.fuzzdir.outputs.dir }}
+          key: fuzz-corpus-${{ runner.os }}-${{ hashFiles('**/*_fuzz_test.go') }}
+          restore-keys: |
+            fuzz-corpus-${{ runner.os }}-
+
       - name: Fuzz
         run: |
           fuzz_time=10s
-          # Build the test binary once to avoid repeated compilation per target.
-          go test -c -o fuzz.test .
-          cache_dir=$(go env GOCACHE)/fuzz
+          # Each target is driven by `go test -fuzz` itself, not a
+          # prebuilt binary: only the go tool's fuzz build compiles in the
+          # coverage counters, and without them the engine mutates blind
+          # ("not built with coverage instrumentation ... may be
+          # inefficient" — it was random byte-flipping, not fuzzing). The
+          # per-target rebuild is a cached second or two; the first run
+          # below warms it.
+          #
           # A real fuzz failure always writes the failing input under
           # testdata/fuzz/<Target>/. The coordinator can also report
           # "context deadline exceeded" when a worker is mid-iteration as
@@ -125,13 +143,15 @@ jobs:
           # most. So the verdict comes from the crasher, not the exit
           # code: exit 1 without a new testdata file is retried once
           # (a second hiccup in a row is treated as real).
+          targets=$(go test -list 'Fuzz.*' . 2>/dev/null | grep '^Fuzz')
+          echo "targets: $(echo "$targets" | wc -w)"
           fail=0
-          for target in $(./fuzz.test -test.list 'Fuzz.*' 2>/dev/null | grep '^Fuzz'); do
+          for target in $targets; do
             echo "::group::$target"
             before=$(find "testdata/fuzz/$target" -type f 2>/dev/null | wc -l)
             ok=0
             for attempt in 1 2; do
-              if ./fuzz.test -test.fuzz="^${target}\$" -test.fuzztime=$fuzz_time -test.timeout=180s -test.fuzzcachedir="$cache_dir"; then
+              if go test -fuzz="^${target}\$" -run='^$' -fuzztime=$fuzz_time -timeout=180s . ; then
                 ok=1; break
               fi
               after=$(find "testdata/fuzz/$target" -type f 2>/dev/null | wc -l)
@@ -145,6 +165,15 @@ jobs:
             echo "::endgroup::"
           done
           exit $fail
+
+      # Surface crashers as artifacts: the log names the target, but the
+      # input itself is what reproduces the bug locally.
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        if: failure()
+        with:
+          name: fuzz-crashers
+          path: testdata/fuzz/
+          if-no-files-found: ignore
 
   cross-compile-mkfs-windows:
     name: Cross-compile mkfs.erofs for Windows
