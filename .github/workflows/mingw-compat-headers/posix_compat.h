@@ -1,21 +1,16 @@
 #ifndef _POSIX_COMPAT_H
 #define _POSIX_COMPAT_H
 /*
- * MinGW-w64 defines _ino_t as unsigned short (16-bit) and MSVCRT never
- * fills st_ino at all — which made mkfs treat every file as a hardlink
- * of inode 0 and emit self-referential images (a file dirent aliasing
- * the root directory's nid).  Take over the typedef before any CRT
- * header runs so struct stat can carry a full 64-bit NTFS file index.
- * This is only sound because the stat family below never calls the CRT
- * implementations (their notion of the struct layout still has the
- * 16-bit field): stat/lstat/fstat are macro-redirected to Win32-native
- * implementations at the bottom of this header, and this header is
- * force-included (-include) as the first thing in every translation
- * unit, so no erofs-utils code can reach the CRT versions.
+ * This header is force-included (-include) as the first thing in every
+ * erofs-utils translation unit built for Windows. It must never change
+ * the layout of any CRT type: struct stat in particular is defined by
+ * whichever CRT header runs first in a given TU (sys/stat.h, wchar.h and
+ * _mingw_stat64.h all reach it), and a typedef that differs between TUs
+ * gives them different field offsets for the same struct — st_size
+ * written at one offset and read at another comes back as zero. The
+ * 64-bit inode identity that mkfs needs and the CRT's 16-bit st_ino
+ * cannot hold is carried beside the struct instead (see __pc_lstat_id).
  */
-#define _INO_T_DEFINED
-typedef unsigned long long _ino_t;
-typedef unsigned long long ino_t;
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -192,33 +187,60 @@ static inline time_t __pc_ft2unix(const FILETIME* ft) {
   return (time_t)((v - 116444736000000000ULL) / 10000000ULL);
 }
 
-static inline int __pc_stat_from_handle(HANDLE h, struct stat* st,
-                                        int is_symlink, const char* linkpath) {
+/*
+ * The stat family below is deliberately split in two.
+ *
+ * mingw-w64 has several struct stat layouts (stat, _stat64, _stat64i32,
+ * ...) and `#define stat _stat64`-style redirects that fire depending on
+ * _FILE_OFFSET_BITS and on which CRT header happened to run first in a
+ * translation unit. Naming `struct stat` in a prototype inside this
+ * header pins the prototype to whichever layout was live *here*, while
+ * the caller may hold a different one — and then st_size written at one
+ * offset is read at another and comes back as zero (that was CI's
+ * "dir/b.txt = \"\"" on the mingw-w64 v11 / msvcrt toolchain; the v12+
+ * UCRT toolchains agree with themselves and hid it).
+ *
+ * So the layout-independent core fills a POD of our own (__pc_finfo),
+ * and the stat/lstat/fstat entry points are MACROS that copy it into the
+ * caller's struct — expanded in the caller's TU, so `->st_size` there is
+ * the caller's field at the caller's offset, by construction.
+ */
+typedef struct {
+  unsigned long long ino;   /* NTFS file index: what hard links share */
+  unsigned int dev;         /* volume serial */
+  unsigned int mode;
+  unsigned int nlink;
+  long long size;
+  long long mtime, atime, ctime;
+} __pc_finfo;
+
+static inline int __pc_finfo_from_handle(HANDLE h, __pc_finfo* fi,
+                                         int is_symlink, const char* linkpath) {
   BY_HANDLE_FILE_INFORMATION bi;
   if (!GetFileInformationByHandle(h, &bi)) { errno = EIO; return -1; }
-  memset(st, 0, sizeof(*st));
-  st->st_dev = (unsigned int)bi.dwVolumeSerialNumber;
-  st->st_ino = ((unsigned long long)bi.nFileIndexHigh << 32) | bi.nFileIndexLow;
-  st->st_nlink = (short)(bi.nNumberOfLinks ? bi.nNumberOfLinks : 1);
-  st->st_mtime = __pc_ft2unix(&bi.ftLastWriteTime);
-  st->st_atime = __pc_ft2unix(&bi.ftLastAccessTime);
-  st->st_ctime = __pc_ft2unix(&bi.ftCreationTime);
+  memset(fi, 0, sizeof(*fi));
+  fi->ino = ((unsigned long long)bi.nFileIndexHigh << 32) | bi.nFileIndexLow;
+  fi->dev = (unsigned int)bi.dwVolumeSerialNumber;
+  fi->nlink = bi.nNumberOfLinks ? bi.nNumberOfLinks : 1;
+  fi->mtime = __pc_ft2unix(&bi.ftLastWriteTime);
+  fi->atime = __pc_ft2unix(&bi.ftLastAccessTime);
+  fi->ctime = __pc_ft2unix(&bi.ftCreationTime);
   if (is_symlink) {
     char tgt[4096];
     ssize_t n = __pc_readlink(linkpath, tgt, sizeof(tgt));
-    st->st_mode = S_IFLNK | 0777;
-    st->st_size = n > 0 ? n : 0;
+    fi->mode = S_IFLNK | 0777;
+    fi->size = n > 0 ? n : 0;
   } else if (bi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-    st->st_mode = S_IFDIR | 0755;
+    fi->mode = S_IFDIR | 0755;
   } else {
-    st->st_mode = S_IFREG |
+    fi->mode = S_IFREG |
         ((bi.dwFileAttributes & FILE_ATTRIBUTE_READONLY) ? 0444 : 0644);
-    st->st_size = ((long long)bi.nFileSizeHigh << 32) | bi.nFileSizeLow;
+    fi->size = ((long long)bi.nFileSizeHigh << 32) | bi.nFileSizeLow;
   }
   return 0;
 }
 
-static inline int __pc_statx(const char* path, struct stat* st, int follow) {
+static inline int __pc_finfo_path(const char* path, __pc_finfo* fi, int follow) {
   DWORD attrs = GetFileAttributesA(path);
   if (attrs == INVALID_FILE_ATTRIBUTES) { errno = ENOENT; return -1; }
   int is_symlink = 0;
@@ -236,40 +258,105 @@ static inline int __pc_statx(const char* path, struct stat* st, int follow) {
                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                          NULL, OPEN_EXISTING, flags, NULL);
   if (h == INVALID_HANDLE_VALUE) { errno = ENOENT; return -1; }
-  int r = __pc_stat_from_handle(h, st, is_symlink, path);
+  int r = __pc_finfo_from_handle(h, fi, is_symlink, path);
   CloseHandle(h);
   return r;
 }
 
-static inline int __pc_stat(const char* path, struct stat* st) {
-  return __pc_statx(path, st, 1);
-}
-static inline int __pc_lstat(const char* path, struct stat* st) {
-  return __pc_statx(path, st, 0);
-}
-static inline int __pc_fstat(int fd, struct stat* st) {
+static inline int __pc_finfo_fd(int fd, __pc_finfo* fi) {
   HANDLE h = (HANDLE)_get_osfhandle(fd);
   if (h == INVALID_HANDLE_VALUE) { errno = EBADF; return -1; }
   if (GetFileType(h) != FILE_TYPE_DISK) {
-    memset(st, 0, sizeof(*st));
-    st->st_mode = S_IFCHR | 0644;
-    st->st_nlink = 1;
+    memset(fi, 0, sizeof(*fi));
+    fi->mode = S_IFCHR | 0644;
+    fi->nlink = 1;
     return 0;
   }
-  return __pc_stat_from_handle(h, st, 0, NULL);
+  return __pc_finfo_from_handle(h, fi, 0, NULL);
 }
 
+/* Copy a __pc_finfo into the caller's struct stat, whatever its layout.
+ * st_ino gets the truncated index (CRT width); the full identity is
+ * available through lstat_id / __PC_STAT_ID below. */
+#define __PC_FILL_STAT(st, fi) do {                                     \
+    memset((st), 0, sizeof(*(st)));                                     \
+    (st)->st_dev   = (fi).dev;                                          \
+    (st)->st_ino   = (fi).ino;                                          \
+    (st)->st_mode  = (fi).mode;                                         \
+    (st)->st_nlink = (fi).nlink;                                        \
+    (st)->st_size  = (fi).size;                                         \
+    (st)->st_mtime = (fi).mtime;                                        \
+    (st)->st_atime = (fi).atime;                                        \
+    (st)->st_ctime = (fi).ctime;                                        \
+  } while (0)
+
+/* Statement-expression form so the entry points can be used as
+ * expressions (`if (lstat(p, &st))`) while still expanding at the call
+ * site. GNU C is a hard requirement of erofs-utils anyway. */
+#define __pc_stat_impl(path, st, follow) ({                             \
+    __pc_finfo __fi; int __r = __pc_finfo_path((path), &__fi, (follow)); \
+    if (!__r) __PC_FILL_STAT((st), __fi);                               \
+    __r; })
+#define __pc_stat(path, st)  __pc_stat_impl((path), (st), 1)
+#define __pc_lstat(path, st) __pc_stat_impl((path), (st), 0)
 /*
- * stat must be a function-like macro: an object-like one would also
- * rewrite the type name in `struct stat`.  The others are object-like
- * on purpose — erofs_vfops has a member named fstat, and an object-like
- * macro renames the member declaration and its uses consistently, while
- * a function-like macro would rewrite only the call sites.
+ * lstat plus the file's 64-bit identity: the NTFS file index, which all
+ * hard links to a file share and which is unique per volume. Together
+ * with st_dev (volume serial) this is what mkfs keys hardlink detection
+ * on; the CRT's 16-bit st_ino cannot carry it, so it travels separately.
+ * The patched erofs_iget_from_local calls this in place of lstat.
  */
-#define stat(path, st)  __pc_stat((path), (st))
-#define lstat           __pc_lstat
-#define fstat           __pc_fstat
-#define readlink        __pc_readlink
+#define __pc_lstat_id(path, st, idp) ({                                 \
+    __pc_finfo __fi; int __r = __pc_finfo_path((path), &__fi, 0);       \
+    if (!__r) { __PC_FILL_STAT((st), __fi); *(idp) = __fi.ino; }        \
+    __r; })
+
+/*
+ * Wiring the entry points in without disturbing the CRT.
+ *
+ * Under _FILE_OFFSET_BITS=64, mingw-w64 (v11, msvcrt) does
+ *     #define stat  _stat64
+ *     #define fstat _fstat64
+ * so that BOTH the function name and the type name `struct stat` resolve
+ * to the 64-bit-size variant, in every TU alike. A function-like
+ * `#define stat(path, st)` of our own would REPLACE that object-like
+ * macro: from then on `struct stat st;` in a caller stops being rewritten
+ * (a 48-byte struct with a 32-bit st_size), while anything parsed before
+ * the replacement — the CRT prototypes, and this header's own code — saw
+ * `struct _stat64` (56 bytes, 64-bit st_size). Two layouts for one name
+ * is exactly the corruption we are fixing.
+ *
+ * So the redirect is left alone and the CRT's *target names* are what we
+ * take over: _stat64 / _fstat64 (and the plain names for good measure).
+ * The CRT prototypes for _stat64/_fstat64 are declared functions; a
+ * function-like macro of the same name is legal C and wins at every call
+ * site, while `struct _stat64` — the type the CRT macro expands
+ * `struct stat` to — is untouched (types are not macro-expanded via
+ * function-like macros: `struct _stat64 st;` has no `(` after the name).
+ */
+static inline int __pc_fstat(int fd, void* st_void) {
+  __pc_finfo fi;
+  int r = __pc_finfo_fd(fd, &fi);
+  if (r) return r;
+  struct stat* st = (struct stat*)st_void;   /* = struct _stat64 here and in every TU */
+  __PC_FILL_STAT(st, fi);
+  return 0;
+}
+#define _stat64(path, st)  __pc_stat((path), (st))
+/* fstat: object-like on purpose. erofs_vfops has a member named fstat;
+ * after the CRT's rewrite it is `_fstat64` in both its declaration and
+ * every `vf->ops->fstat(...)` use. An object-like macro renames both
+ * consistently (to __pc_fstat — a harmless member name); a function-like
+ * one would rename only the uses and break the build. */
+#define _fstat64           __pc_fstat
+#ifndef stat
+#define stat(path, st)     __pc_stat((path), (st))
+#endif
+#ifndef fstat
+#define fstat              __pc_fstat
+#endif
+#define lstat(path, st)    __pc_lstat((path), (st))
+#define readlink           __pc_readlink
 
 /*
  * Linux new_encode_dev/new_decode_dev compatible device number encoding.

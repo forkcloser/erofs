@@ -56,6 +56,29 @@ index 28de701..104be85 100644
 +}
 +
 +static inline void * ERR_CAST(const void *ptr)
+diff --git a/include/erofs/inode.h b/include/erofs/inode.h
+index bf089e8..2de43d5 100644
+--- a/include/erofs/inode.h
++++ b/include/erofs/inode.h
+@@ -32,7 +32,11 @@
+-void erofs_inode_manager_init(void);
+-void erofs_insert_ihash(struct erofs_inode *inode);
+-void erofs_remove_ihash(struct erofs_inode *inode);
+-struct erofs_inode *erofs_iget(dev_t dev, ino_t ino);
+-unsigned int erofs_iput(struct erofs_inode *inode);
+-erofs_nid_t erofs_lookupnid(struct erofs_inode *inode);
+-int erofs_iflush(struct erofs_inode *inode);
++void erofs_inode_manager_init(void);
++void erofs_insert_ihash(struct erofs_inode *inode);
++void erofs_remove_ihash(struct erofs_inode *inode);
++#ifdef _WIN32
++struct erofs_inode *erofs_iget(dev_t dev, unsigned long long ino);
++#else
++struct erofs_inode *erofs_iget(dev_t dev, ino_t ino);
++#endif
++unsigned int erofs_iput(struct erofs_inode *inode);
++erofs_nid_t erofs_lookupnid(struct erofs_inode *inode);
++int erofs_iflush(struct erofs_inode *inode);
 diff --git a/include/erofs/internal.h b/include/erofs/internal.h
 index 2cc9cc8..e1bbdc8 100644
 --- a/include/erofs/internal.h
@@ -141,7 +164,7 @@ index 6beb46b..38086ea 100644
 +/*
 + * Created by Li Guifu <bluce.lee@aliyun.com>
 diff --git a/lib/inode.c b/lib/inode.c
-index 0547b60..0166031 100644
+index 0547b60..dc91762 100644
 --- a/lib/inode.c
 +++ b/lib/inode.c
 @@ -1,3 +1,24 @@
@@ -186,7 +209,90 @@ index 0547b60..0166031 100644
 +#include <string.h>
 +#include <stdlib.h>
 +#include <stdio.h>
-@@ -2126,13 +2148,13 @@
+@@ -121,7 +143,11 @@
+-}
+-
+-/* get the inode from the (source) inode # */
+-struct erofs_inode *erofs_iget(dev_t dev, ino_t ino)
+-{
+-	u32 nr = (ino ^ dev) % ARRAY_SIZE(erofs_ihash);
+-	struct list_head *head = &erofs_ihash[nr];
++}
++
++/* get the inode from the (source) inode # */
++#ifdef _WIN32
++struct erofs_inode *erofs_iget(dev_t dev, unsigned long long ino)
++#else
++struct erofs_inode *erofs_iget(dev_t dev, ino_t ino)
++#endif
++{
++	u32 nr = (ino ^ dev) % ARRAY_SIZE(erofs_ihash);
++	struct list_head *head = &erofs_ihash[nr];
+@@ -1406,8 +1432,16 @@
+-	struct erofs_inode *inode;
+-	struct stat st;
+-	int ret;
+-
+-	ret = lstat(path, &st);
+-	if (ret)
+-		return ERR_PTR(-errno);
+-
++	struct erofs_inode *inode;
++	struct stat st;
++	int ret;
++#ifdef _WIN32
++	/* The CRT's st_ino is 16 bits and MSVCRT never fills it; the NTFS
++	 * file index (what hard links actually share) travels beside the
++	 * struct instead. See posix_compat.h. */
++	unsigned long long win_ino;
++
++	ret = __pc_lstat_id(path, &st, &win_ino);
++#else
++	ret = lstat(path, &st);
++#endif
++	if (ret)
++		return ERR_PTR(-errno);
++
+@@ -1417,7 +1451,11 @@
+-	 * since hard-link directory isn't allowed.
+-	 */
+-	if (!S_ISDIR(st.st_mode) && !params->hard_dereference) {
+-		inode = erofs_iget(st.st_dev, st.st_ino);
+-		if (inode)
+-			return inode;
+-	}
++	 * since hard-link directory isn't allowed.
++	 */
++	if (!S_ISDIR(st.st_mode) && !params->hard_dereference) {
++#ifdef _WIN32
++		inode = erofs_iget(st.st_dev, win_ino);
++#else
++		inode = erofs_iget(st.st_dev, st.st_ino);
++#endif
++		if (inode)
++			return inode;
++	}
+@@ -1432,6 +1470,13 @@
+-		erofs_iput(inode);
+-		return ERR_PTR(ret);
+-	}
+-	inode->datasource = EROFS_INODE_DATA_SOURCE_LOCALPATH;
+-	return inode;
+-}
++		erofs_iput(inode);
++		return ERR_PTR(ret);
++	}
++#ifdef _WIN32
++	/* erofs_fill_inode keyed the ihash on the truncated st_ino; rekey on
++	 * the real identity so later lookups (above) can find it. */
++	erofs_remove_ihash(inode);
++	inode->i_ino[1] = win_ino;
++	erofs_insert_ihash(inode);
++#endif
++	inode->datasource = EROFS_INODE_DATA_SOURCE_LOCALPATH;
++	return inode;
++}
+@@ -2126,13 +2171,13 @@
 -
 -static bool erofs_inode_visited(struct erofs_inode *inode)
 -{

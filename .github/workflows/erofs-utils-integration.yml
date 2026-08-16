@@ -64,7 +64,11 @@ jobs:
             patch -p1 < "$p"
           done
           ./autogen.sh
-          ./configure --enable-lz4
+          # configure caps the block size at the BUILD host's page size
+          # (bumped to 16K only when the build CPU is aarch64), so the
+          # same source yields a different mkfs per runner. Pin it: the
+          # 16384 leg of TestReadReferenceImage skips itself otherwise.
+          MAX_BLOCK_SIZE=16384 ./configure --enable-lz4
           make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
           sudo make install
           mkfs.erofs -V
@@ -98,7 +102,11 @@ jobs:
             patch -p1 < "$p"
           done
           ./autogen.sh
-          ./configure --enable-lz4
+          # configure caps the block size at the BUILD host's page size
+          # (bumped to 16K only when the build CPU is aarch64), so the
+          # same source yields a different mkfs per runner. Pin it: the
+          # 16384 leg of TestReadReferenceImage skips itself otherwise.
+          MAX_BLOCK_SIZE=16384 ./configure --enable-lz4
           make -j"$(nproc)"
           sudo make install
           mkfs.erofs -V
@@ -166,6 +174,7 @@ jobs:
           # sysroot (where the cross-compiled lz4 installs its .pc) is
           # visible, and every other auto-probe fails closed.
           PKG_CONFIG_LIBDIR=/usr/${MINGW_HOST}/lib/pkgconfig \
+          MAX_BLOCK_SIZE=16384 \
           ./configure \
             --host=${MINGW_HOST} \
             --disable-shared \
