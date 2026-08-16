@@ -1,4 +1,22 @@
-name: CI
+# Inherited, and not yet folded into the limen pipeline.
+#
+# Everything here exists for one reason: the tests that read a real image shell
+# out to mkfs.erofs, and erofs-utils is a C project distributed as source — it
+# has no release binary aqua could pin, so `just test` under the hermetic PATH
+# cannot reach it and every image-backed test skips itself. This workflow builds
+# erofs-utils (patched) from source and runs the suite against it, on linux,
+# macos, and — via a MinGW cross-compile — windows, plus the fuzz targets.
+#
+# Retiring it means giving the pinned toolchain an mkfs.erofs, after which these
+# jobs become `just` recipes like any other and this file goes away. Until then
+# ci.yaml ("ci") is the authority on everything that does NOT need an image, and
+# this workflow covers only what it cannot.
+#
+# Deliberately absent: a lint job. ci.yaml runs `just lint` — the repo's pinned
+# golangci-lint (aqua.yaml), its .golangci.yml, once per supported GOOS. The job
+# that used to live here ran an action-supplied golangci-lint v2.1 against the
+# same code, so the two could disagree about the same tree.
+name: erofs-utils integration
 
 on:
   push:
@@ -10,22 +28,9 @@ permissions:
   contents: read
 
 env:
-  EROFS_UTILS_VERSION: v1.9.1
+  EROFS_UTILS_VERSION: v1.9.3
 
 jobs:
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
-        with:
-          go-version: "1.25"
-          cache: false
-      - uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
-        with:
-          version: v2.1
-
   build-and-test:
     name: Build & Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -59,7 +64,11 @@ jobs:
             patch -p1 < "$p"
           done
           ./autogen.sh
-          ./configure --enable-lz4
+          # configure caps the block size at the BUILD host's page size
+          # (bumped to 16K only when the build CPU is aarch64), so the
+          # same source yields a different mkfs per runner. Pin it: the
+          # 16384 leg of TestReadReferenceImage skips itself otherwise.
+          MAX_BLOCK_SIZE=16384 ./configure --enable-lz4
           make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
           sudo make install
           mkfs.erofs -V
@@ -93,22 +102,78 @@ jobs:
             patch -p1 < "$p"
           done
           ./autogen.sh
-          ./configure --enable-lz4
+          # configure caps the block size at the BUILD host's page size
+          # (bumped to 16K only when the build CPU is aarch64), so the
+          # same source yields a different mkfs per runner. Pin it: the
+          # 16384 leg of TestReadReferenceImage skips itself otherwise.
+          MAX_BLOCK_SIZE=16384 ./configure --enable-lz4
           make -j"$(nproc)"
           sudo make install
           mkfs.erofs -V
 
+      # The generated corpus is what makes fuzzing cumulative: each run
+      # starts from every interesting input earlier runs discovered rather
+      # than from the seeds. Key on the fuzz test sources so a changed
+      # target restarts its own corpus; restore-keys keep the rest.
+      - id: fuzzdir
+        run: echo "dir=$(go env GOCACHE)/fuzz" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.fuzzdir.outputs.dir }}
+          key: fuzz-corpus-${{ runner.os }}-${{ hashFiles('**/*_fuzz_test.go') }}
+          restore-keys: |
+            fuzz-corpus-${{ runner.os }}-
+
       - name: Fuzz
         run: |
           fuzz_time=10s
-          # Build the test binary once to avoid repeated compilation per target.
-          go test -c -o fuzz.test .
-          cache_dir=$(go env GOCACHE)/fuzz
-          for target in $(./fuzz.test -test.list 'Fuzz.*' 2>/dev/null | grep '^Fuzz'); do
+          # Each target is driven by `go test -fuzz` itself, not a
+          # prebuilt binary: only the go tool's fuzz build compiles in the
+          # coverage counters, and without them the engine mutates blind
+          # ("not built with coverage instrumentation ... may be
+          # inefficient" — it was random byte-flipping, not fuzzing). The
+          # per-target rebuild is a cached second or two; the first run
+          # below warms it.
+          #
+          # A real fuzz failure always writes the failing input under
+          # testdata/fuzz/<Target>/. The coordinator can also report
+          # "context deadline exceeded" when a worker is mid-iteration as
+          # fuzztime expires — that is a shutdown hiccup, not a finding,
+          # and Wide targets (200-entry ReadDir per iteration) hit it
+          # most. So the verdict comes from the crasher, not the exit
+          # code: exit 1 without a new testdata file is retried once
+          # (a second hiccup in a row is treated as real).
+          targets=$(go test -list 'Fuzz.*' . 2>/dev/null | grep '^Fuzz')
+          echo "targets: $(echo "$targets" | wc -w)"
+          fail=0
+          for target in $targets; do
             echo "::group::$target"
-            ./fuzz.test -test.fuzz="^${target}\$" -test.fuzztime=$fuzz_time -test.timeout=180s -test.fuzzcachedir="$cache_dir" && echo "PASS: $target" || exit 1
+            before=$(find "testdata/fuzz/$target" -type f 2>/dev/null | wc -l)
+            ok=0
+            for attempt in 1 2; do
+              if go test -fuzz="^${target}\$" -run='^$' -fuzztime=$fuzz_time -timeout=180s . ; then
+                ok=1; break
+              fi
+              after=$(find "testdata/fuzz/$target" -type f 2>/dev/null | wc -l)
+              if [ "$after" -gt "$before" ]; then
+                echo "::error::$target: new crasher written to testdata/fuzz/$target"
+                break
+              fi
+              echo "$target: exit without a crasher (attempt $attempt) — coordinator shutdown hiccup, retrying"
+            done
+            if [ "$ok" = 1 ]; then echo "PASS: $target"; else fail=1; fi
             echo "::endgroup::"
           done
+          exit $fail
+
+      # Surface crashers as artifacts: the log names the target, but the
+      # input itself is what reproduces the bug locally.
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        if: failure()
+        with:
+          name: fuzz-crashers
+          path: testdata/fuzz/
+          if-no-files-found: ignore
 
   cross-compile-mkfs-windows:
     name: Cross-compile mkfs.erofs for Windows
@@ -153,7 +218,15 @@ jobs:
           done
 
           ./autogen.sh
-          PKG_CONFIG_PATH=/usr/${MINGW_HOST}/lib/pkgconfig \
+          # PKG_CONFIG_LIBDIR (not _PATH): _PATH prepends to the host's
+          # search dirs, so host .pc files leak into the cross build —
+          # v1.9.3's libxml2 auto-probe found the runner's libxml-2.0.pc
+          # and put -lxml2 on a link line no mingw library can satisfy.
+          # _LIBDIR replaces the search path outright: only the mingw
+          # sysroot (where the cross-compiled lz4 installs its .pc) is
+          # visible, and every other auto-probe fails closed.
+          PKG_CONFIG_LIBDIR=/usr/${MINGW_HOST}/lib/pkgconfig \
+          MAX_BLOCK_SIZE=16384 \
           ./configure \
             --host=${MINGW_HOST} \
             --disable-shared \
@@ -164,6 +237,7 @@ jobs:
             --without-selinux \
             --without-uuid \
             --without-openssl \
+            --without-libxml2 \
             --disable-fuse \
             --disable-debug \
             --disable-dependency-tracking \
@@ -171,8 +245,8 @@ jobs:
             LDFLAGS="-Wl,-Bstatic -static-libgcc -L/usr/${MINGW_HOST}/lib" \
             liblz4_LIBS="/usr/${MINGW_HOST}/lib/liblz4.a"
 
-          make -j"$(nproc)" -C lib CPPFLAGS="-include posix_compat.h"
-          make -j"$(nproc)" -C mkfs CPPFLAGS="-include posix_compat.h" LIBS="-llz4"
+          make -j"$(nproc)" -C lib CPPFLAGS="-D_GNU_SOURCE -include posix_compat.h"
+          make -j"$(nproc)" -C mkfs CPPFLAGS="-D_GNU_SOURCE -include posix_compat.h" LIBS="-llz4"
 
           ${MINGW_HOST}-strip mkfs/mkfs.erofs.exe
 

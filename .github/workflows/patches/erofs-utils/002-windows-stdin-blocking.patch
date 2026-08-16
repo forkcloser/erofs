@@ -1,27 +1,39 @@
 diff --git a/lib/tar.c b/lib/tar.c
-index 72c12ed..8e9a1e5 100644
+index fa8fee3..637c686 100644
 --- a/lib/tar.c
 +++ b/lib/tar.c
-@@ -7,6 +7,10 @@
- #include <stdlib.h>
- #include <string.h>
- #include <sys/stat.h>
+@@ -11,6 +11,10 @@
+-#include <stdlib.h>
+-#include <string.h>
+-#include <sys/stat.h>
+-#include "erofs/print.h"
+-#include "erofs/diskbuf.h"
+-#include "erofs/inode.h"
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
 +#ifdef _WIN32
 +#include <fcntl.h>
 +#include <io.h>
 +#endif
- #include "erofs/print.h"
- #include "erofs/diskbuf.h"
- #include "erofs/inode.h"
-@@ -71,6 +75,11 @@ int erofs_iostream_open(struct erofs_iostream *ios, int fd, int decoder)
- {
- 	s64 fsz;
- 
++#include "erofs/print.h"
++#include "erofs/diskbuf.h"
++#include "erofs/inode.h"
+@@ -89,6 +93,11 @@
+-{
+-	s64 fsz;
+-
+-	ios->feof = false;
+-	ios->tail = ios->head = 0;
+-	ios->decoder = decoder;
++{
++	s64 fsz;
++
 +#ifdef _WIN32
 +	/* On Windows, ensure stdin is in blocking binary mode */
 +	_setmode(fd, _O_BINARY);
 +#endif
 +
- 	ios->feof = false;
- 	ios->tail = ios->head = 0;
- 	ios->decoder = decoder;
++	ios->feof = false;
++	ios->tail = ios->head = 0;
++	ios->decoder = decoder;
