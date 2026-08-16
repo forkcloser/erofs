@@ -117,11 +117,34 @@ jobs:
           # Build the test binary once to avoid repeated compilation per target.
           go test -c -o fuzz.test .
           cache_dir=$(go env GOCACHE)/fuzz
+          # A real fuzz failure always writes the failing input under
+          # testdata/fuzz/<Target>/. The coordinator can also report
+          # "context deadline exceeded" when a worker is mid-iteration as
+          # fuzztime expires — that is a shutdown hiccup, not a finding,
+          # and Wide targets (200-entry ReadDir per iteration) hit it
+          # most. So the verdict comes from the crasher, not the exit
+          # code: exit 1 without a new testdata file is retried once
+          # (a second hiccup in a row is treated as real).
+          fail=0
           for target in $(./fuzz.test -test.list 'Fuzz.*' 2>/dev/null | grep '^Fuzz'); do
             echo "::group::$target"
-            ./fuzz.test -test.fuzz="^${target}\$" -test.fuzztime=$fuzz_time -test.timeout=180s -test.fuzzcachedir="$cache_dir" && echo "PASS: $target" || exit 1
+            before=$(find "testdata/fuzz/$target" -type f 2>/dev/null | wc -l)
+            ok=0
+            for attempt in 1 2; do
+              if ./fuzz.test -test.fuzz="^${target}\$" -test.fuzztime=$fuzz_time -test.timeout=180s -test.fuzzcachedir="$cache_dir"; then
+                ok=1; break
+              fi
+              after=$(find "testdata/fuzz/$target" -type f 2>/dev/null | wc -l)
+              if [ "$after" -gt "$before" ]; then
+                echo "::error::$target: new crasher written to testdata/fuzz/$target"
+                break
+              fi
+              echo "$target: exit without a crasher (attempt $attempt) — coordinator shutdown hiccup, retrying"
+            done
+            if [ "$ok" = 1 ]; then echo "PASS: $target"; else fail=1; fi
             echo "::endgroup::"
           done
+          exit $fail
 
   cross-compile-mkfs-windows:
     name: Cross-compile mkfs.erofs for Windows
