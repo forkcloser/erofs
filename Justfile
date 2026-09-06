@@ -12,7 +12,7 @@ import '.limen/just/main.just'
 export PATH := if os() == 'windows' { justfile_directory() / 'build' / 'erofs-utils' / 'bin' + ';' + aqua_bin + ';' + env_var('PATH') } else { justfile_directory() / 'build' / 'erofs-utils' / 'bin' + ':' + aqua_bin + ':/usr/bin:/bin:/usr/sbin:/sbin' }
 
 # The FIRST recipe defined here becomes `just`'s default.
-lint: do::lint::go::default do::lint::default
+lint: do::lint::go::default do::lint::go::bce do::lint::go::escape do::lint::go::deadcode do::lint::default
 fix: do::fix::go::default do::fix::default
 test: mkfs-info do::test::go::unit do::test::go::race
 bench: do::test::go::bench
