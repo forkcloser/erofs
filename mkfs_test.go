@@ -223,7 +223,7 @@ func TestCreateFSMknod(t *testing.T) {
 	if err := fsys.Mknod("/null", disk.StatTypeChrdev|0o666, 1<<8|3); err != nil {
 		t.Fatal(err)
 	}
-	if err := fsys.Mknod("/sda", disk.StatTypeBlkdev|0o660, 8<<8); err != nil { //nolint:staticcheck // minor=0
+	if err := fsys.Mknod("/sda", disk.StatTypeBlkdev|0o660, 8<<8); err != nil {
 		t.Fatal(err)
 	}
 
@@ -238,7 +238,7 @@ func TestCreateFSMknod(t *testing.T) {
 	}
 
 	erofstest.CheckDevice(t, efs, "null", fs.ModeDevice|fs.ModeCharDevice, 1<<8|3)
-	erofstest.CheckDevice(t, efs, "sda", fs.ModeDevice, 8<<8) //nolint:staticcheck // minor=0
+	erofstest.CheckDevice(t, efs, "sda", fs.ModeDevice, 8<<8)
 }
 
 // TestCreateFSLargeFile tests a file that spans many blocks and exercises
