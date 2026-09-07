@@ -6,7 +6,7 @@ All notable changes to this fork are recorded here. The format follows
 fork point, upstream [`erofs/go-erofs`](https://github.com/erofs/go-erofs)
 commit `44d5e74`.
 
-## [Unreleased]
+## [1.0.0-rc.1] - 2026-09-07
 
 ### Removed
 
