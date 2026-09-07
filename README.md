@@ -92,6 +92,12 @@ The read count is `ReadAt` calls per whole-file `fs.ReadFile`, covering the
 lookup and the inode as well as the data. Writing is bounded by serialization
 rather than by allocation, so fewer allocations there buy little wall time.
 
+**Ported from upstream since the fork.** The `system.posix_acl_access` and
+`system.posix_acl_default` xattr prefixes, which were spelled with a trailing
+dot so a stored ACL could never be matched by name (upstream `03d68d8`).
+Upstream's `Link`, `Remove`, `RemoveAll` and hardlink detection in `CopyFrom`
+arrived here independently and are not ports.
+
 Requires Go 1.25.
 
 ## Features
@@ -176,3 +182,52 @@ outFile.Close()
 Close each file before creating the next one. File data is appended to a single
 stream, so two open writers would interleave their bytes; `Create` returns an
 error rather than let that corrupt the image silently.
+
+### The writer's surface
+
+Beyond `Create`, `Mkdir`, `Symlink` and `CopyFrom`:
+
+- `Link` adds a name for an existing inode; `Mknod` creates a device, FIFO or
+  socket from an `fs.FileMode`.
+- `Remove` and `RemoveAll` drop entries, with `unlink(2)` semantics for
+  hard-linked names; together with `CopyFrom(..., Merge())` this is how
+  layers are merged programmatically.
+- `Chmod`, `Chown`, `Chtimes`, `Setxattr` and `SetNlink` edit metadata by
+  path; `File.Chmod` and `File.Chown` do the same on an open file.
+- `Stat` and `Open` read entries back before `Close`.
+- `Create` options: `WithBlockSize`, `WithBuildTime`, `WithDataFile` (an
+  external data file for metadata-only images) and `WithTempDir` (where the
+  spool lives otherwise). `CopyFrom` options: `MetadataOnly` and `Merge`.
+
+Paths given to the writer are cleaned: `x`, `/x` and `./x` name the same
+entry. The reader is stricter and follows the `fs.FS` convention exactly.
+
+`CopyFrom` takes ownership, times and link identity from `Sys()` when it is a
+`*syscall.Stat_t` (linux, darwin, the BSDs, solaris and illumos) or a
+`*builder.Entry`; a source with neither still contributes mode, size and
+`ModTime`. Two names that share a source inode become one inode with two
+names in the image, and a file's link count is computed from the names the
+image holds.
+
+## Limits
+
+The reader accepts block sizes from 512 bytes to 64 KiB. Compressed inodes,
+48-bit chunk addressing and extended inode slots are rejected with
+`ErrNotImplemented`. The bounds that protect a caller from a hostile image
+report `ErrInvalid`: symlink targets and paths of at most 4096 bytes, 255
+symlink hops per resolution, a chunk-index map of at most 64 MiB per file,
+and `fs.ReadFile` refusing files over 128 MiB (open and `io.Copy` those).
+The writer stores xattr names of at most 255 bytes after their prefix and
+values of at most 65535 bytes. `Chown` refuses negative ids.
+
+The `fs.FS` from `Open` is safe for concurrent use; the files it opens and a
+`Writer` are not.
+
+## Releasing
+
+Versions are signed annotated tags following semantic versioning, cut from
+`main`; the library has no build artefacts. Before tagging: `just lint` and
+`just test` green on CI, `CHANGELOG.md` moved from *Unreleased* to the
+version with the date, and the tag message naming the headline changes.
+Changes to exported names or documented behaviour after 1.0 are a major
+version.
