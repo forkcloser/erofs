@@ -1,9 +1,6 @@
-# Seeded from limen's canonical ci.yaml and the project's own from there:
-# `verify` and `gate` are the canonical shape, verbatim; the erofs-utils
-# pieces (a build step in `verify`, plus `mkfs-windows`, `verify-windows-image`
-# and `fuzz`) are this project's, and are INTERIM — see
-# .github/scripts/build-erofs-utils.sh for why they exist and what retires
-# them. Everything they add still answers to the canonical `gate`.
+# `verify` and `gate` follow limen's canonical ci.yaml — keep them in sync.
+# The erofs-utils step and the mkfs-windows / verify-windows-image jobs are
+# INTERIM: see .github/scripts/build-erofs-utils.sh for what retires them.
 #
 # Design: minimal GitHub glue around the same tooling every developer runs
 # locally. The only marketplace action is GitHub's own checkout, pinned by
@@ -83,31 +80,22 @@ jobs:
       - name: Lint
         run: just lint
 
-      # INTERIM: the image-backed tests shell out to mkfs.erofs, which the
-      # pinned toolchain cannot carry (no release binary to pin), so it is
-      # built from source here — checksum-verified, patched, one script for
-      # every job — into build/erofs-utils/bin, the one directory the root
-      # Justfile adds to limen's hermetic PATH (a /usr/local install would be
-      # invisible to `just test`). Not on windows: no native build there; the
-      # windows-2025 leg WITH an image is `verify-windows-image` below, fed by
-      # a cross-compile. The windows legs of this matrix run `just test`
-      # as-is and their image tests skip themselves — `mkfs-info` says so.
+      # Not on windows (no native build): `verify-windows-image` below is the
+      # windows leg with an image; here the windows legs' image tests skip.
       - name: Build erofs-utils (interim)
         if: runner.os != 'Windows'
         run: .github/scripts/build-erofs-utils.sh native
 
       - name: Test
         env:
-          # The legs that just built mkfs.erofs must FAIL if `just test`
-          # cannot see it — a silent fall-back to "every image test skipped"
-          # is a coverage regression, not a pass. Windows legs: not required.
+          # Legs that built mkfs.erofs must fail if `just test` cannot see it;
+          # windows legs did not build it.
           EROFS_REQUIRE_MKFS: ${{ runner.os != 'Windows' && '1' || '' }}
         run: just test
 
   # INTERIM: cross-compile a static mkfs.erofs.exe so the windows leg below
   # can run the image-backed tests. Artifact upload/download are GitHub's own
-  # actions, SHA-pinned — the same trust class as checkout — and go away with
-  # the rest of the erofs-utils machinery.
+  # actions, SHA-pinned — the same trust class as checkout.
   mkfs-windows:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -127,11 +115,8 @@ jobs:
           path: build/erofs-utils/bin/mkfs.erofs.exe
           if-no-files-found: error
 
-  # INTERIM: the windows-2025 leg WITH an image. Same recipe as every other
-  # leg — `just test` — with mkfs.erofs on PATH; the difference from the
-  # canonical windows legs of `verify` is only that the image tests do not
-  # skip. Windows-arm is not covered with an image (the cross build is
-  # x86_64 and would run under emulation; not worth a leg for an interim).
+  # INTERIM: the windows-2025 leg with mkfs.erofs on PATH, so the image tests
+  # run. No windows-arm counterpart: the cross build is x86_64 only.
   verify-windows-image:
     needs: [mkfs-windows]
     runs-on: windows-2025
@@ -159,16 +144,13 @@ jobs:
 
       - name: Test
         env:
-          # This leg exists for the image tests: fail if mkfs.erofs is not seen.
           EROFS_REQUIRE_MKFS: "1"
           # mkfs.erofs uses TMPDIR for its temporaries; windows does not set it.
           TMPDIR: ${{ runner.temp }}
         run: just test
 
-  # INTERIM in its plumbing, permanent in intent: a short fuzz of every Fuzz*
-  # target, once, on linux, with mkfs.erofs available (several targets round-
-  # trip through it). The recipe is limen's `do::test::go::fuzz` (verdict by
-  # crasher, hiccup retried once); only the erofs-utils build step is interim.
+  # The canonical fuzz job plus the interim erofs-utils build step (several
+  # targets round-trip through mkfs.erofs).
   fuzz:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -189,10 +171,11 @@ jobs:
         run: .github/scripts/build-erofs-utils.sh native
 
       # The generated corpus is what makes fuzzing cumulative: each run
-      # starts from every interesting input earlier runs discovered rather
-      # than from the seeds. Key on the fuzz test sources so a changed
-      # target restarts its own corpus; restore-keys keep the rest. GitHub's
-      # own action, SHA-pinned.
+      # starts from every input earlier runs found interesting rather than
+      # from the seeds, so a short budget per run compounds into depth over
+      # months. Keyed on the fuzz sources so a changed target restarts its
+      # own corpus; restore-keys keep the rest. GitHub's own action, pinned
+      # by SHA like checkout.
       - id: fuzzdir
         run: echo "dir=$(go env GOCACHE)/fuzz" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -202,8 +185,6 @@ jobs:
           restore-keys: |
             fuzz-corpus-${{ runner.os }}-
 
-      # Several targets round-trip through mkfs.erofs; without it they skip
-      # and the fuzz run is quietly worth less. Same guard as the test legs.
       - name: Fuzz
         env:
           EROFS_REQUIRE_MKFS: "1"
@@ -211,8 +192,9 @@ jobs:
           just mkfs-info
           just do test go fuzz
 
-      # Surface crashers as artifacts: the log names the target, but the
-      # input itself is what reproduces the bug locally.
+      # A crasher is a bug with a reproducer attached; the log names the
+      # target, the input file is what reproduces it locally. Uploaded only
+      # on failure, and only if any was written.
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         if: failure()
         with:

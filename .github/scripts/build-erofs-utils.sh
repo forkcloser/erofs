@@ -1,29 +1,10 @@
 #!/usr/bin/env bash
 # Build erofs-utils from source, patched, for the image-backed tests.
 #
-# INTERIM. This script exists because erofs-utils has no release binary aqua
-# could pin: it is a C project distributed as source, so the pinned toolchain
-# cannot carry an mkfs.erofs and every image-backed test skips itself without
-# one. The end state is a forkcloser release of erofs-utils (the patches this
-# script applies are already ours) pinned in aqua.yaml like any other tool, at
-# which point this script and its CI steps go away and `just test` alone is
-# the whole story.
-#
-# Until then, the doctrine ci.yaml states is honored as far as source builds
-# allow: exact versions, sha256-verified downloads, and one implementation
-# shared by every job that needs it (a divergence between two copies of this
-# was the classic failure of the workflow this replaced). What stays
-# unpinned, knowingly: the build-dependency packages from the runner's own
-# apt/brew repositories.
-#
-# Where it lands — and why that matters: `just` runs every recipe under limen's
-# HERMETIC PATH (aqua's bin plus the base system dirs; see .limen/just/main.just),
-# so a `make install` into /usr/local is invisible to `just test` and every
-# image-backed test skips itself while the log says the build succeeded. The
-# binary therefore installs into the project's own tool dir, build/erofs-utils/,
-# whose bin/ the root Justfile prepends to PATH — the one declared exception to
-# the hermetic list, and the same location on every OS (the windows cross-build
-# is copied there by CI). No sudo, no system prefix.
+# Installs into build/erofs-utils/ — the root Justfile prepends its bin/ to
+# limen's hermetic PATH; a /usr/local install is invisible to `just test`. The
+# apt/brew build-dependency packages are the one unpinned input. INTERIM until
+# a forkcloser erofs-utils release is pinned in aqua.yaml.
 #
 # Usage:
 #   build-erofs-utils.sh native    build and install for this host (linux or
