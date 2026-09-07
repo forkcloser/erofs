@@ -65,7 +65,7 @@ func CheckDevice(t testing.TB, fsys fs.FS, name string, ftype fs.FileMode, rdev 
 	if st.Mode&fs.ModeType != ftype {
 		t.Errorf("%s: type %v, want %v", name, st.Mode&fs.ModeType, ftype)
 	}
-	if st.Rdev != rdev {
+	if st.Rdev != uint64(rdev) {
 		t.Errorf("%s: rdev %d, want %d", name, st.Rdev, rdev)
 	}
 }

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	erofs "github.com/forkcloser/erofs"
-	"github.com/forkcloser/erofs/internal/disk"
 	"github.com/forkcloser/erofs/internal/erofstest"
 )
 
@@ -106,7 +105,7 @@ func TestWriterLink(t *testing.T) {
 	}
 
 	base := linkStat(t, efs, "data.txt")
-	if base.Nlink != len(names) {
+	if base.Nlink != uint64(len(names)) {
 		t.Errorf("nlink = %d, want %d", base.Nlink, len(names))
 	}
 	if base.UID != 56 || base.GID != 78 {
@@ -140,7 +139,7 @@ func TestWriterLinkSpecial(t *testing.T) {
 	if err := fsys.Link("/sym", "/sym2"); err != nil {
 		t.Fatal(err)
 	}
-	if err := fsys.Mknod("/null", disk.StatTypeChrdev|0o666, 1<<8|3); err != nil {
+	if err := fsys.Mknod("/null", fs.ModeDevice|fs.ModeCharDevice|0o666, 1<<8|3); err != nil {
 		t.Fatal(err)
 	}
 	if err := fsys.Link("/null", "/null2"); err != nil {

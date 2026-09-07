@@ -57,7 +57,7 @@ func TestParentMustBeADirectory(t *testing.T) {
 
 	t.Run("Mknod", func(t *testing.T) {
 		w := newWriterWithFile(t)
-		if err := w.Mknod("/a/b", 0o020666, 0); !errors.Is(err, ErrNotDirectory) {
+		if err := w.Mknod("/a/b", fs.ModeDevice|fs.ModeCharDevice|0o666, 0); !errors.Is(err, ErrNotDirectory) {
 			t.Errorf("err = %v; want ErrNotDirectory", err)
 		}
 	})
@@ -363,7 +363,7 @@ func TestChunkedFeatureFlagDeclared(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if layout := fi.Sys().(*Stat).InodeLayout; layout != disk.LayoutChunkBased {
+	if layout := fi.(*fileInfo).layout; layout != disk.LayoutChunkBased {
 		t.Fatalf("test premise broken: layout = %d, want chunk-based", layout)
 	}
 	if i.sb.FeatureIncompat&disk.FeatureIncompatChunkedFile == 0 {
