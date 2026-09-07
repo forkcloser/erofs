@@ -1,6 +1,7 @@
 package erofs
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -141,6 +142,29 @@ func (fsys *Writer) copyFromImage(img *image) error {
 	// and loads flat-plain data blocks on demand.
 	at := newMetaReader(img.meta, metaStart, totalBytes, blockSize)
 
+	// span returns exactly n bytes at off, or an error. at() serves whatever
+	// it has from the current buffer or block, which is enough for the
+	// common case; anything that runs past what at() holds — a shared xattr
+	// entry straddling a block, say — is read directly, and anything that
+	// runs past the image is refused rather than reported as absent. Every
+	// place this function used to skip an entry it could not fully read now
+	// fails the copy through this helper, as the reader would.
+	span := func(off, n int64) ([]byte, error) {
+		if off < 0 || n < 0 || n > totalBytes || off > totalBytes-n {
+			return nil, fmt.Errorf("%d bytes at offset %d lie outside the %d byte image: %w",
+				n, off, totalBytes, ErrInvalid)
+		}
+		if b := at(off); int64(len(b)) >= n {
+			return b[:n], nil
+		}
+		buf := make([]byte, n)
+		if _, err := img.meta.ReadAt(buf, off); err != nil {
+			return nil, err
+		}
+
+		return buf, nil
+	}
+
 	// Shared xattr block address (if present). The at() function
 	// will load the block on demand when xattrs are parsed.
 	var sharedXattrOff int64
@@ -169,18 +193,10 @@ func (fsys *Writer) copyFromImage(img *image) error {
 	// directory hardlinks, so a directory reachable by two paths means the
 	// dirent graph is not a tree. Following it would revisit the same
 	// subtree forever, growing both the queue and the path strings without
-	// bound. Non-directory nids are deliberately not tracked: a file nid
+	// bound. Non-directory nids are handled separately: a file nid
 	// legitimately appears under several names when the source has
-	// hardlinks, and each name needs its own entry here.
+	// hardlinks, and each name after the first becomes an alias of it.
 	expanded := make(map[int64]struct{})
-
-	// A chunk map is parsed once per inode, not once per name. Non-directory
-	// nids are deliberately not de-duped above, so a file with hardlinks is
-	// visited once per name, and each visit would otherwise parse and retain
-	// its own copy of an identical slice. The entries share the result: the
-	// remap below is the only thing that ever writes to it, and it runs on
-	// the parse that fills the cache.
-	chunkCache := make(map[uint64][]builder.Chunk)
 
 	for len(queue) > 0 {
 		cur := queue[0]
@@ -276,19 +292,32 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		}
 		var xattrs map[string]string
 		if xattrSize > 0 {
-			xattrAddr := inodeAddr + int64(icSize)
-			xb := at(xattrAddr)
-			if len(xb) >= xattrSize {
-				var err error
-				xattrs, err = parseXattrsFromBuf(xb[:xattrSize], at, sharedXattrOff, img.getLongPrefix)
-				if err != nil {
-					return fmt.Errorf("xattrs for nid %d: %w", cur.nid, err)
-				}
+			xb, err := span(inodeAddr+int64(icSize), int64(xattrSize))
+			if err != nil {
+				return fmt.Errorf("xattrs for nid %d: %w", cur.nid, err)
+			}
+			xattrs, err = parseXattrsFromBuf(xb, span, sharedXattrOff, img.getLongPrefix)
+			if err != nil {
+				return fmt.Errorf("xattrs for nid %d: %w", cur.nid, err)
 			}
 		}
 
 		trailingAddr := inodeAddr + int64(icSize) + int64(xattrSize)
 		typ := mode & disk.StatTypeMask
+
+		// A nid already registered under an earlier name in this copy is
+		// the same inode: give it another name, as Link would, rather than
+		// a second copy of its metadata and chunks. Directories are never
+		// shared (BFS expands each once), and a link count of 1 says there
+		// is nothing to share.
+		if typ != disk.StatTypeDir && nlink > 1 {
+			if prior, ok := fsys.copyLinks[hardlinkKey{0, cur.nid}]; ok && !prior.removed {
+				if err := fsys.addAlias(cur.path, prior); err != nil {
+					return err
+				}
+				continue
+			}
+		}
 
 		// Build fsEntry directly, bypassing builder.Entry + add() overhead.
 		fe := &fsEntry{
@@ -301,7 +330,9 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			size:    size,
 			xattrs:  xattrs,
 		}
-		if nlink > 0 {
+		// Directories keep the source's count; a file's count is computed
+		// from its names in the output (see add).
+		if nlink > 0 && typ == disk.StatTypeDir {
 			fe.nlink = nlink
 			fe.nlinkSet = true
 		}
@@ -320,6 +351,13 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				return fmt.Errorf("nid %d declares %d bytes, larger than the %d byte image: %w",
 					cur.nid, size, totalBytes, ErrInvalid)
 			}
+			// Inline data lives in the inode's own block and cannot run past
+			// it — the reader's loadBlock refuses that outright, and without
+			// the same rule here the copy would take whatever follows the
+			// block as the directory's entries or the link's target.
+			if layout == disk.LayoutFlatInline && trailingAddr%int64(blockSize)+int64(size) > int64(blockSize) {
+				return fmt.Errorf("inline data crosses block boundary for nid %d: %w", cur.nid, ErrInvalid)
+			}
 		}
 
 		switch typ {
@@ -336,46 +374,30 @@ func (fsys *Writer) copyFromImage(img *image) error {
 
 			dirSize := int(size)
 			if dirSize > 0 {
-				var dirData []byte
-				switch layout {
-				case disk.LayoutFlatPlain:
-					dataAddr := int64(idata) << blkBits
-					d := at(dataAddr)
-					if d != nil && len(d) >= dirSize {
-						dirData = d[:dirSize]
-					} else {
-						dirData = make([]byte, dirSize)
-						if _, err := img.meta.ReadAt(dirData, dataAddr); err != nil {
-							return fmt.Errorf("read dir data for nid %d: %w", cur.nid, err)
-						}
-					}
-				case disk.LayoutFlatInline:
-					d := at(trailingAddr)
-					if d != nil && len(d) >= dirSize {
-						dirData = d[:dirSize]
-					}
+				dataAddr := trailingAddr
+				if layout == disk.LayoutFlatPlain {
+					dataAddr = int64(idata) << blkBits
 				}
-				if dirData != nil {
-					if err := fsys.parseDirBlock(dirData, dirSize, blockSize, cur.path, &queue); err != nil {
-						return fmt.Errorf("dir nid %d: %w", cur.nid, err)
-					}
+				dirData, err := span(dataAddr, int64(dirSize))
+				if err != nil {
+					return fmt.Errorf("read dir data for nid %d: %w", cur.nid, err)
+				}
+				if err := fsys.parseDirBlock(dirData, dirSize, blockSize, cur.path, &queue); err != nil {
+					return fmt.Errorf("dir nid %d: %w", cur.nid, err)
 				}
 			}
 
 		case disk.StatTypeSymlink:
 			if size > 0 {
-				var linkData []byte
+				dataAddr := trailingAddr
 				if layout == disk.LayoutFlatPlain {
-					linkData = make([]byte, size)
-					if _, err := img.meta.ReadAt(linkData, int64(idata)<<blkBits); err != nil {
-						return fmt.Errorf("read symlink data for nid %d: %w", cur.nid, err)
-					}
-				} else {
-					linkData = at(trailingAddr)
+					dataAddr = int64(idata) << blkBits
 				}
-				if linkData != nil && int(size) <= len(linkData) {
-					fe.linkTarget = string(linkData[:size])
+				linkData, err := span(dataAddr, int64(size))
+				if err != nil {
+					return fmt.Errorf("read symlink data for nid %d: %w", cur.nid, err)
 				}
+				fe.linkTarget = string(linkData)
 			}
 
 		case disk.StatTypeReg:
@@ -408,17 +430,14 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				}
 
 				if indexed {
-					chunks, cached := chunkCache[cur.nid]
-					if !cached {
-						var err error
-						chunks, err = fsys.parseChunks(at(chunkAddr), chunkFmt, size, blkBits, img.deviceIDMask)
-						if err != nil {
-							return fmt.Errorf("chunk index for nid %d: %w", cur.nid, err)
-						}
-						if err := fsys.remapChunkDevices(cur.path, chunks); err != nil {
-							return err
-						}
-						chunkCache[cur.nid] = chunks
+					// Parsed once per inode: a later name for this nid
+					// becomes an alias above and never reaches here.
+					chunks, err := fsys.parseChunks(at(chunkAddr), chunkFmt, size, blkBits, img.deviceIDMask)
+					if err != nil {
+						return fmt.Errorf("chunk index for nid %d: %w", cur.nid, err)
+					}
+					if err := fsys.remapChunkDevices(cur.path, chunks); err != nil {
+						return err
 					}
 					fe.chunks = chunks
 					// Only a single non-hole extent is contiguous. Claiming
@@ -445,15 +464,11 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			fsys.root.nlink = fe.nlink
 			fsys.root.nlinkSet = fe.nlinkSet
 			fsys.root.xattrs = fe.xattrs
-		} else if existing, ok := fsys.byPath[cur.path]; ok {
-			// Merge overwrites: preserve tree linkage.
-			savedParent := existing.parent
-			savedChildren := existing.children
-			*existing = *fe
-			existing.parent = savedParent
-			existing.children = savedChildren
 		} else {
-			fsys.addChild(fe)
+			fe = fsys.placeEntry(fe)
+			if typ != disk.StatTypeDir && nlink > 1 {
+				fsys.copyLinks[hardlinkKey{0, cur.nid}] = fe
+			}
 		}
 	}
 	return nil
@@ -470,10 +485,16 @@ func (fsys *Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPat
 			break
 		}
 
-		firstNameOff := binary.LittleEndian.Uint16(blk[8:10])
-		nEntries := int(firstNameOff / disk.SizeDirent)
-		if nEntries == 0 || nEntries*disk.SizeDirent > len(blk) {
-			break
+		// The same rules as the reader's ReadDir: the first entry's name
+		// offset fixes the entry count and must lie inside the block, every
+		// name range must ascend and stay inside the block, and only the
+		// last name in a block may be NUL-padded. A dirent that fails is an
+		// error, not an entry to step over — the reader would refuse it.
+		firstNameOff := int(binary.LittleEndian.Uint16(blk[8:10]))
+		nEntries := firstNameOff / disk.SizeDirent
+		if nEntries == 0 || firstNameOff > len(blk) {
+			return fmt.Errorf("in %s: invalid dirent name offset %d (block size %d): %w",
+				parentPath, firstNameOff, len(blk), ErrInvalid)
 		}
 
 		for i := range nEntries {
@@ -481,20 +502,20 @@ func (fsys *Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPat
 			nid := binary.LittleEndian.Uint64(blk[off : off+8])
 			nameOff := int(binary.LittleEndian.Uint16(blk[off+8 : off+10]))
 
-			var nameEnd int
+			nameEnd := len(blk)
 			if i < nEntries-1 {
 				nameEnd = int(binary.LittleEndian.Uint16(blk[(i+1)*disk.SizeDirent+8 : (i+1)*disk.SizeDirent+10]))
-			} else {
-				nameEnd = len(blk)
 			}
-			if nameOff >= len(blk) || nameEnd > len(blk) || nameOff >= nameEnd {
-				continue
+			if nameOff < firstNameOff || nameOff > nameEnd || nameEnd > len(blk) {
+				return fmt.Errorf("in %s: dirent %d name range [%d:%d] out of bounds (block size %d): %w",
+					parentPath, i, nameOff, nameEnd, len(blk), ErrInvalid)
 			}
 
-			// Extract name, trimming trailing NUL padding.
 			nameBytes := blk[nameOff:nameEnd]
-			for len(nameBytes) > 0 && nameBytes[len(nameBytes)-1] == 0 {
-				nameBytes = nameBytes[:len(nameBytes)-1]
+			if i == nEntries-1 {
+				if j := bytes.IndexByte(nameBytes, 0); j >= 0 {
+					nameBytes = nameBytes[:j]
+				}
 			}
 			name := string(nameBytes)
 			// A name is one path element. Without this a nested dirent named
@@ -661,9 +682,13 @@ func (fsys *Writer) parseChunks(data []byte, chunkFmt uint16, fileSize uint64, b
 // the properly prefixed entry), and a name listed twice is an error rather
 // than last-wins (which let the parser's iteration order pick which copy a
 // policy decision saw).
-func parseXattrsFromBuf(buf []byte, at func(int64) []byte, sharedOff int64, longPrefix func(uint8) (string, error)) (map[string]string, error) {
+//
+// span reads n bytes at an absolute image offset (see copyFromImage) and is
+// how shared entries are reached; sharedOff is the shared xattr area's byte
+// offset, which the reader computes the same way, 0 included.
+func parseXattrsFromBuf(buf []byte, span func(off, n int64) ([]byte, error), sharedOff int64, longPrefix func(uint8) (string, error)) (map[string]string, error) {
 	if len(buf) < disk.SizeXattrBodyHeader {
-		return nil, nil
+		return nil, fmt.Errorf("xattr body of %d bytes too small: %w", len(buf), ErrInvalid)
 	}
 
 	var xh disk.XattrHeader
@@ -681,43 +706,47 @@ func parseXattrsFromBuf(buf []byte, at func(int64) []byte, sharedOff int64, long
 	}
 
 	// Resolve shared xattr references.
-	for i := 0; i < int(xh.SharedCount) && pos+4 <= len(buf); i++ {
+	for i := 0; i < int(xh.SharedCount); i++ {
+		if pos+4 > len(buf) {
+			return nil, fmt.Errorf("xattr shared block too small: %w", ErrInvalid)
+		}
 		idx := binary.LittleEndian.Uint32(buf[pos : pos+4])
 		pos += 4
 
-		if sharedOff == 0 {
-			continue
-		}
-		sharedBlock := at(sharedOff + int64(idx)*4)
-		if sharedBlock == nil || len(sharedBlock) < disk.SizeXattrEntry {
-			continue
-		}
-		var xe disk.XattrEntry
-		xe.Unmarshal(sharedBlock)
-		entryLen := int(xe.NameLen) + int(xe.ValueLen)
-		if disk.SizeXattrEntry+entryLen > len(sharedBlock) {
-			continue
-		}
-		sb := sharedBlock[disk.SizeXattrEntry:]
-		name, err := xattrName(xe, sb[:xe.NameLen], longPrefix)
+		// idx counts 4-byte units from the shared area; widened before
+		// scaling so the multiply cannot wrap.
+		sharedAddr := sharedOff + int64(idx)*4
+		head, err := span(sharedAddr, disk.SizeXattrEntry)
 		if err != nil {
 			return nil, fmt.Errorf("shared xattr %d: %w", idx, err)
 		}
-		value := string(sb[xe.NameLen : int(xe.NameLen)+int(xe.ValueLen)])
-		if err := set(name, value); err != nil {
+		var xe disk.XattrEntry
+		xe.Unmarshal(head)
+		body, err := span(sharedAddr+disk.SizeXattrEntry, int64(xe.NameLen)+int64(xe.ValueLen))
+		if err != nil {
+			return nil, fmt.Errorf("shared xattr %d: %w", idx, err)
+		}
+		name, err := xattrName(xe, body[:xe.NameLen], longPrefix)
+		if err != nil {
+			return nil, fmt.Errorf("shared xattr %d: %w", idx, err)
+		}
+		if err := set(name, string(body[xe.NameLen:])); err != nil {
 			return nil, err
 		}
 	}
 
 	// Parse inline xattr entries.
-	for pos+disk.SizeXattrEntry <= len(buf) {
+	for pos < len(buf) {
+		if pos+disk.SizeXattrEntry > len(buf) {
+			return nil, fmt.Errorf("xattr block too small for entry at pos %d: %w", pos, ErrInvalid)
+		}
 		var xe disk.XattrEntry
 		xe.Unmarshal(buf[pos:])
 		pos += disk.SizeXattrEntry
 
 		entryLen := int(xe.NameLen) + int(xe.ValueLen)
 		if pos+entryLen > len(buf) {
-			break
+			return nil, fmt.Errorf("inline xattr at pos %d too long: %w", pos, ErrInvalid)
 		}
 
 		name, err := xattrName(xe, buf[pos:pos+int(xe.NameLen)], longPrefix)

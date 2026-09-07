@@ -220,10 +220,10 @@ func TestCreateFSMknod(t *testing.T) {
 	var buf testBuffer
 	fsys := erofs.Create(&buf)
 
-	if err := fsys.Mknod("/null", disk.StatTypeChrdev|0o666, 1<<8|3); err != nil {
+	if err := fsys.Mknod("/null", fs.ModeDevice|fs.ModeCharDevice|0o666, 1<<8|3); err != nil {
 		t.Fatal(err)
 	}
-	if err := fsys.Mknod("/sda", disk.StatTypeBlkdev|0o660, 8<<8); err != nil {
+	if err := fsys.Mknod("/sda", fs.ModeDevice|0o660, 8<<8); err != nil {
 		t.Fatal(err)
 	}
 
@@ -487,7 +487,7 @@ func TestCreateFSSpecialModeBits(t *testing.T) {
 	if err := fsys.Symlink("/su", "/su-link"); err != nil {
 		t.Fatal(err)
 	}
-	if err := fsys.Mknod("/null", disk.StatTypeChrdev|0666, 0x0103); err != nil {
+	if err := fsys.Mknod("/null", fs.ModeDevice|fs.ModeCharDevice|0o666, 0x0103); err != nil {
 		t.Fatal(err)
 	}
 	if err := fsys.Close(); err != nil {
@@ -1007,7 +1007,7 @@ func TestWriterStat(t *testing.T) {
 	if err := fsys.Symlink("file.txt", "/link"); err != nil {
 		t.Fatal(err)
 	}
-	if err := fsys.Mknod("/null", disk.StatTypeChrdev|0o666, 1<<8|3); err != nil {
+	if err := fsys.Mknod("/null", fs.ModeDevice|fs.ModeCharDevice|0o666, 1<<8|3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1750,7 +1750,7 @@ func TestCopyFromStatSource(t *testing.T) {
 	}
 
 	// Add a character device with custom ownership.
-	if err := w.Mknod("/mydir/null", disk.StatTypeChrdev|0o666, 1<<8|3); err != nil {
+	if err := w.Mknod("/mydir/null", fs.ModeDevice|fs.ModeCharDevice|0o666, 1<<8|3); err != nil {
 		t.Fatal(err)
 	}
 	if err := w.Chown("/mydir/null", 3000, 3000); err != nil {

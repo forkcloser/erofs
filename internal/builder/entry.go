@@ -6,11 +6,22 @@ import "io"
 // Entry carries extended metadata for a filesystem entry.
 // Mode and Size come from fs.FileInfo; everything else lives here.
 type Entry struct {
-	UID, GID     uint32
-	Mtime        uint64
-	MtimeNs      uint32
-	Nlink        uint32
-	Rdev         uint32
+	UID, GID uint32
+	Mtime    uint64
+	MtimeNs  uint32
+	// Nlink is the source's link count. For a directory it is carried into
+	// the image as-is; for anything else it is only a hint that the source
+	// may name the inode more than once, and the image's count is computed
+	// from the names it actually holds.
+	Nlink uint32
+	Rdev  uint32
+	// Dev and Ino identify the source inode (syscall.Stat_t.Dev/Ino, or an
+	// EROFS nid with Dev 0). Within one CopyFrom call, further names that
+	// share a (Dev, Ino) with Nlink > 1 become hardlinks of the first one
+	// seen, mirroring an explicit Link. Ino == 0 means unknown; such entries
+	// never take part. Inode numbers are only unique per device, so Dev must
+	// accompany Ino whenever the source spans more than one.
+	Dev, Ino     uint64
 	Xattrs       map[string]string
 	LinkTarget   string
 	Data         io.Reader // file content (full-image mode)

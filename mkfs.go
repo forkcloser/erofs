@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"math/bits"
 	"os"
 	"path"
@@ -22,6 +23,14 @@ import (
 // Writer is a writable filesystem that produces an EROFS image on Close.
 // Files are added via Create, Mkdir, Symlink, and Mknod, then finalized
 // by calling Close which serializes the complete EROFS image.
+//
+// Every method that takes a path cleans it the same way: "x", "/x" and
+// "./x" name the same entry, a trailing slash is dropped, and "", "." and
+// "/" all name the root. This is deliberately more forgiving than the
+// [fs.FS] convention the reader enforces.
+//
+// A Writer is not safe for concurrent use: every method, including those on
+// the [File] it hands out, must be called from one goroutine at a time.
 type Writer struct {
 	out          io.WriteSeeker
 	closed       bool
@@ -39,13 +48,18 @@ type Writer struct {
 	copyMetadataOnly bool   // metadata-only for current CopyFrom
 	copyMerge        bool   // merge mode: apply whiteouts
 	copyDeviceID     uint16 // device ID assigned to current MetadataOnly CopyFrom
+	// copyLinks maps a source inode identity to the entry that first
+	// carried it, so later names for the same source inode become hardlinks
+	// of that entry. It is created fresh per CopyFrom: a source's inode
+	// numbers mean nothing outside that source.
+	copyLinks map[hardlinkKey]*fsEntry
 
 	// openFile is the file returned by the most recent Create that has not
 	// been closed. Data is appended to one shared stream, so at most one
 	// writer may be open at a time.
 	openFile *File
 
-	dataFile *os.File // external data file (nil = spool mode)
+	dataFile DataFile // external data file (nil = spool mode)
 	dataOff  int64    // current byte offset in data file
 	spool    *os.File // temp spool (created lazily)
 	spoolOff int64    // current byte offset in spool
@@ -74,6 +88,9 @@ type CopyOpt func(*Writer)
 
 // Create returns a Writer that produces an EROFS image on Close.
 // Options configure build time, data file, and temp directory.
+//
+// The Writer and the files it creates must be used from a single goroutine;
+// see [Writer].
 func Create(out io.WriteSeeker, opts ...CreateOpt) *Writer {
 	var o createOptions
 	for _, opt := range opts {
@@ -166,10 +183,24 @@ func WithBuildTime(sec uint64, nsec uint32) CreateOpt {
 	}
 }
 
+// DataFile is what [WithDataFile] accepts: something that can be appended
+// to, can seek to its end, and can be read back at an offset (which is how
+// [Writer.Open] serves a file's data before Close). An *os.File satisfies
+// it.
+type DataFile interface {
+	io.Writer
+	io.Seeker
+	io.ReaderAt
+}
+
 // WithDataFile sets an external data file for metadata-only mode.
 // File.Write appends to this file at block-aligned offsets; chunk
 // indexes reference those blocks with DeviceID=1.
-func WithDataFile(f *os.File) CreateOpt {
+//
+// Writing starts at the file's current end, so an existing file is
+// appended to, and the image records its final length as the device's
+// block count.
+func WithDataFile(f DataFile) CreateOpt {
 	return func(o *createOptions) {
 		o.dataFile = f
 	}
@@ -359,9 +390,14 @@ func (fsys *Writer) Link(oldname, newname string) error {
 	return nil
 }
 
-// Mknod creates a device, FIFO, or socket. mode must include type bits
-// (e.g. disk.StatTypeChrdev | 0o666).
-func (fsys *Writer) Mknod(name string, mode uint16, rdev uint32) error {
+// Mknod creates a device, FIFO, or socket. mode carries the type in its
+// [fs.FileMode] type bits — [fs.ModeDevice] | [fs.ModeCharDevice] for a
+// character device, [fs.ModeDevice] for a block device, [fs.ModeNamedPipe]
+// or [fs.ModeSocket] — plus the permission and setuid/setgid/sticky bits.
+// Any other type, including a regular file, is rejected with [ErrInvalid].
+// rdev is the device number for the two device types and is ignored
+// otherwise.
+func (fsys *Writer) Mknod(name string, mode fs.FileMode, rdev uint32) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
 	}
@@ -372,6 +408,14 @@ func (fsys *Writer) Mknod(name string, mode uint16, rdev uint32) error {
 	if err := fsys.checkPath(name); err != nil {
 		return err
 	}
+	unixMode := goModeToUnixMode(mode)
+	switch unixMode & disk.StatTypeMask {
+	case disk.StatTypeChrdev, disk.StatTypeBlkdev:
+	case disk.StatTypeFifo, disk.StatTypeSock:
+		rdev = 0
+	default:
+		return fmt.Errorf("mkfs: %s: mknod of a %v: %w", name, mode.Type(), ErrInvalid)
+	}
 
 	if err := fsys.ensureParent(name); err != nil {
 		return err
@@ -379,7 +423,7 @@ func (fsys *Writer) Mknod(name string, mode uint16, rdev uint32) error {
 
 	e := &fsEntry{
 		path: name,
-		mode: mode,
+		mode: unixMode,
 		rdev: rdev,
 	}
 	fsys.addChild(e)
@@ -403,7 +447,10 @@ func (fsys *Writer) Chmod(name string, mode fs.FileMode) error {
 	return nil
 }
 
-// Chown sets the owner UID and GID on the named path.
+// Chown sets the owner UID and GID on the named path. Both must fit the
+// 32-bit unsigned fields EROFS stores; a negative value is rejected with
+// [ErrInvalid] rather than wrapped, since os.Chown's "-1 leaves it
+// unchanged" convention has no on-disk meaning here.
 func (fsys *Writer) Chown(name string, uid, gid int) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
@@ -412,9 +459,25 @@ func (fsys *Writer) Chown(name string, uid, gid int) error {
 	if err != nil {
 		return err
 	}
-	e.uid = uint32(uid)
-	e.gid = uint32(gid)
+	u, g, err := checkOwner(uid, gid)
+	if err != nil {
+		return fmt.Errorf("mkfs: %s: %w", cleanPath(name), err)
+	}
+	e.uid = u
+	e.gid = g
 	return nil
+}
+
+// checkOwner converts a uid:gid pair to the on-disk widths, refusing values
+// that do not fit.
+func checkOwner(uid, gid int) (uint32, uint32, error) {
+	if uid < 0 || int64(uid) > math.MaxUint32 {
+		return 0, 0, fmt.Errorf("uid %d out of range: %w", uid, ErrInvalid)
+	}
+	if gid < 0 || int64(gid) > math.MaxUint32 {
+		return 0, 0, fmt.Errorf("gid %d out of range: %w", gid, ErrInvalid)
+	}
+	return uint32(uid), uint32(gid), nil
 }
 
 // Chtimes sets the access and modification times on the named path.
@@ -561,6 +624,71 @@ func (fsys *Writer) checkNotOpen(e *fsEntry, action string) error {
 	return nil
 }
 
+// hardlinkKey identifies a source inode during one CopyFrom call: the
+// device and inode number a stat reported, or an EROFS nid with device 0.
+// The map it keys is created fresh per call, so an identity that only
+// means something within its own source is safe to use on its own.
+type hardlinkKey struct {
+	dev, ino uint64
+}
+
+// addAlias registers p as another name for target's inode — what Link does,
+// minus the argument checks the caller has already made. A previous entry
+// at p is dropped the way Remove drops it, so that if it was itself one
+// name of a hardlink group the group's count stays right.
+func (fsys *Writer) addAlias(p string, target *fsEntry) error {
+	if target.linkTo != nil {
+		target = target.linkTo
+	}
+	if existing, ok := fsys.byPath[p]; ok {
+		if existing == target {
+			return nil
+		}
+		if existing.mode&disk.StatTypeMask == disk.StatTypeDir {
+			return fmt.Errorf("mkfs: %s: cannot replace a directory with a hardlink: %w", p, ErrIsDirectory)
+		}
+		fsys.unlinkEntry(existing)
+	}
+	e := &fsEntry{
+		path:   p,
+		mode:   target.mode,
+		linkTo: target,
+	}
+	fsys.addChild(e)
+	target.extraLinks++
+
+	return nil
+}
+
+// placeEntry attaches a freshly built entry to the tree, replacing any
+// entry already at its path (overwrite semantics, as when a later layer
+// re-adds a name). It returns the pointer that now lives in the tree, which
+// is not always fe: an ordinary overwrite copies fe over the old entry so
+// its place among its parent's children is kept. An old entry that was one
+// name of a hardlink group is instead dropped the way Remove drops it, so
+// the group's inode and link count stay right.
+func (fsys *Writer) placeEntry(fe *fsEntry) *fsEntry {
+	existing, ok := fsys.byPath[fe.path]
+	if !ok {
+		fsys.addChild(fe)
+
+		return fe
+	}
+	if existing.linkTo != nil || existing.extraLinks > 0 {
+		fsys.unlinkEntry(existing)
+		fsys.addChild(fe)
+
+		return fe
+	}
+	savedParent := existing.parent
+	savedChildren := existing.children
+	*existing = *fe
+	existing.parent = savedParent
+	existing.children = savedChildren
+
+	return existing
+}
+
 // inSubtreeOf reports whether e is d or lies beneath it.
 func (e *fsEntry) inSubtreeOf(d *fsEntry) bool {
 	for cur := e; cur != nil; cur = cur.parent {
@@ -591,6 +719,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 	fsys.copyMetadataOnly = false
 	fsys.copyMerge = false
 	fsys.copyDeviceID = 0
+	fsys.copyLinks = make(map[hardlinkKey]*fsEntry)
 	for _, opt := range opts {
 		opt(fsys)
 	}
@@ -676,15 +805,19 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 		case *builder.Entry:
 			be = sys
 		case *Stat:
-			// EROFS image source: convert *Stat to *builder.Entry.
+			// EROFS image source: convert *Stat to *builder.Entry. The nid
+			// is unique within the source image, and the hardlink map is
+			// scoped to this CopyFrom call, so it serves as the inode
+			// identity with a device of 0.
 			be = &builder.Entry{
 				UID:     sys.UID,
 				GID:     sys.GID,
 				Mtime:   sys.Mtime,
 				MtimeNs: sys.MtimeNs,
-				Nlink:   uint32(sys.Nlink),
-				Rdev:    sys.Rdev,
+				Nlink:   uint32(min(sys.Nlink, math.MaxUint32)),
+				Rdev:    uint32(sys.Rdev),
 				Xattrs:  sys.Xattrs,
+				Ino:     sys.Ino,
 			}
 		}
 
@@ -721,7 +854,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 			// block-at-a-time reader for contiguous flat-plain data).
 			if srcImg, ok := src.(*image); ok {
 				if st, ok := info.Sys().(*Stat); ok {
-					f := file{img: srcImg, nid: uint64(st.Ino)}
+					f := file{img: srcImg, nid: st.Ino}
 					if ino, err := f.readInfo(); err == nil {
 						if dr := srcImg.openDirect(ino); dr != nil {
 							if be == nil {
@@ -938,7 +1071,7 @@ func (f *File) ReadFrom(r io.Reader) (int64, error) {
 			}
 		}
 		if er != nil {
-			if er == io.EOF {
+			if errors.Is(er, io.EOF) {
 				return written, nil
 			}
 			return written, er
@@ -972,10 +1105,15 @@ func (f *File) Chmod(mode fs.FileMode) error {
 	return nil
 }
 
-// Chown sets the owner UID and GID on the file, matching os.File.Chown.
+// Chown sets the owner UID and GID on the file, matching os.File.Chown
+// except that a negative value is an error (see [Writer.Chown]).
 func (f *File) Chown(uid, gid int) error {
-	f.entry.uid = uint32(uid)
-	f.entry.gid = uint32(gid)
+	u, g, err := checkOwner(uid, gid)
+	if err != nil {
+		return fmt.Errorf("mkfs: %s: %w", f.entry.path, err)
+	}
+	f.entry.uid = u
+	f.entry.gid = g
 	return nil
 }
 
@@ -1026,7 +1164,7 @@ type createOptions struct {
 	buildTimeNs  uint32
 	hasBuildTime bool
 	blockSize    int      // 0 = use default
-	dataFile     *os.File // external data file for metadata-only mode
+	dataFile     DataFile // external data file for metadata-only mode
 	tempDir      string   // temp directory for spool file
 }
 
@@ -1301,6 +1439,16 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 	if be == nil {
 		be = &builder.Entry{}
 	}
+	// Sys() is the only route for ownership, but a modification time has a
+	// portable home in fs.FileInfo itself. A source that carries no
+	// platform stat — embed.FS, fstest.MapFS, os.DirFS anywhere entryFromSys
+	// has no case for — would otherwise stamp every entry with the epoch.
+	if be.Mtime == 0 && be.MtimeNs == 0 {
+		if t := info.ModTime(); !t.IsZero() && t.Unix() >= 0 {
+			be.Mtime = uint64(t.Unix())
+			be.MtimeNs = uint32(t.Nanosecond())
+		}
+	}
 
 	if p == "/" {
 		root := fsys.root
@@ -1321,6 +1469,20 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 		return err
 	}
 
+	// A source that names one inode twice — a host directory with hard
+	// links, an image copied whole — is reproduced as one inode with two
+	// names, exactly as an explicit Link would build it. Directories never
+	// take part: their link count reflects child directories, not names.
+	if typ != disk.StatTypeDir && be.Ino != 0 && be.Nlink > 1 && fsys.copyLinks != nil {
+		key := hardlinkKey{be.Dev, be.Ino}
+		if prior, ok := fsys.copyLinks[key]; ok && !prior.removed {
+			if c, ok := be.Data.(io.Closer); ok {
+				_ = c.Close()
+			}
+			return fsys.addAlias(p, prior)
+		}
+	}
+
 	fe := &fsEntry{
 		path:       p,
 		mode:       mode,
@@ -1335,22 +1497,18 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 		chunks:     be.Chunks,
 		contiguous: be.Contiguous,
 	}
-	if be.Nlink > 0 {
+	// A directory's count is the source's word (it may describe children
+	// this copy never sees). A file's count is not carried over: it is
+	// computed from the names the image actually holds, so a file whose
+	// other names were not copied does not claim links that do not exist.
+	// SetNlink remains the override.
+	if typ == disk.StatTypeDir && be.Nlink > 0 {
 		fe.nlink = be.Nlink
 		fe.nlinkSet = true
 	}
-
-	// Handle duplicate paths (overwrite semantics).
-	if existing, ok := fsys.byPath[p]; ok {
-		// Preserve tree linkage when overwriting.
-		savedParent := existing.parent
-		savedChildren := existing.children
-		*existing = *fe
-		existing.parent = savedParent
-		existing.children = savedChildren
-		fe = existing
-	} else {
-		fsys.addChild(fe)
+	fe = fsys.placeEntry(fe)
+	if typ != disk.StatTypeDir && be.Ino != 0 && be.Nlink > 1 && fsys.copyLinks != nil {
+		fsys.copyLinks[hardlinkKey{be.Dev, be.Ino}] = fe
 	}
 
 	if fsys.copyMetadataOnly {
@@ -1581,6 +1739,12 @@ func (fsys *Writer) promoteAlias(target *fsEntry) {
 	// nothing. Zero the link count so a stale reference cannot double-count.
 	target.extraLinks = 0
 	target.children = nil
+	// A CopyFrom in progress may still meet further names for this inode.
+	for k, v := range fsys.copyLinks {
+		if v == target {
+			fsys.copyLinks[k] = heir
+		}
+	}
 }
 
 // buildErofsTree converts the fsEntry tree into an erofsEntry tree via BFS.
