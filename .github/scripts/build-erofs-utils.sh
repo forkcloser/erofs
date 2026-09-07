@@ -33,10 +33,12 @@ die() {
     exit 1
 }
 
-# fetch <url> <sha256> <dest>: download and verify, or fail closed.
+# fetch <url> <sha256> <dest>: download and verify, or fail closed. The
+# download is the org's canonical curl shape: https only, TLS 1.2 floor,
+# retries on transient failures; the sha256 below is the real guard.
 fetch() {
     local url=$1 sum=$2 dest=$3 actual
-    curl -fsSL -o "$dest" "$url"
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 3 --retry-all-errors -o "$dest" "$url"
     if command -v sha256sum > /dev/null 2>&1; then
         actual=$(sha256sum "$dest" | awk '{print $1}')
     else
