@@ -268,33 +268,29 @@ func TestDataRangeMultiBlockCoverage(t *testing.T) {
 }
 
 // TestDataRangeSparseChunkBased verifies that DataRange() correctly represents
-// sparse (hole-containing) chunk-based EROFS files.  It uses the existing
-// testdata fixture which contains known sparse files.
+// sparse (hole-containing) chunk-based EROFS files, on an image mkfs.erofs
+// builds at test time with --blobdev and --chunksize: zero runs in the source
+// become null chunks, which must surface as hole entries.
 //
 // Invariants checked:
 //   - sum(Size) == info.Size() for every regular file.
 //   - Hole entries have Offset == -1.
-//   - At least one file in the fixture has a hole so we are actually
-//     exercising the hole-emission path in buildChunkDataRanges.
+//   - At least one file has a hole so the hole-emission path in
+//     buildChunkDataRanges is actually exercised.
 func TestDataRangeSparseChunkBased(t *testing.T) {
-	// basic-chunk-index.erofs stores file data on a separate blob device.
-	metaData, err := os.ReadFile("testdata/basic-chunk-index.erofs")
-	if err != nil {
-		t.Skipf("skipping: testdata not available: %v", err)
+	if _, err := erofstest.CheckMkfsVersion("1.0"); err != nil {
+		t.Skipf("skipping: %v", err)
 	}
-	blobData, err := os.ReadFile("testdata/basic-chunk-index-data.erofs")
-	if err != nil {
-		t.Skipf("skipping: testdata blob not available: %v", err)
-	}
-
-	fsys, err := erofs.Open(bytes.NewReader(metaData),
-		erofs.WithExtraDevices(bytes.NewReader(blobData)))
-	if err != nil {
-		t.Fatal("Open:", err)
-	}
+	tc := erofstest.TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	marker := []byte("hello sparse world!\n")
+	fsys := erofstest.MkfsErofsBlobDev(os.Getpagesize())(t, erofstest.TarAll(
+		tc.SparseFile("/sparse.bin", 2*1024*1024, marker, 1024*1024, 0o644),
+		tc.SparseFile("/zeros.bin", 1024*1024, nil, 0, 0o644),
+		tc.File("/dense.bin", bytes.Repeat([]byte("d"), 3*4096), 0o644),
+	))
 
 	foundHole := false
-	err = fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}

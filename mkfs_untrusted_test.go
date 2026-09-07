@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/forkcloser/erofs/internal/builder"
 	"github.com/forkcloser/erofs/internal/disk"
 )
 
@@ -81,7 +80,7 @@ func buildTamperableImage(t *testing.T) ([]byte, uint64) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	nid := uint64(fi.Sys().(*Stat).Ino)
+	nid := fi.Sys().(*Stat).Ino
 
 	inodeOff := img.(*image).metaStartPos() + int64(nid)*disk.SizeInodeCompact
 	if format := binary.LittleEndian.Uint16(out.buf[inodeOff:]); format&0x01 == 0 {
@@ -510,7 +509,7 @@ func TestEmptySymlinkTargetRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	nid := uint64(fi.Sys().(*Stat).Ino)
+	nid := fi.Sys().(*Stat).Ino
 
 	// Zero the symlink's i_size in place. The field is 32 bits wide in a
 	// compact inode and 64 in an extended one; both start at offset 8.
@@ -904,7 +903,7 @@ func TestUntrustedChunkAddrStaysInBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	nid := uint64(fi.Sys().(*Stat).Ino)
+	nid := fi.Sys().(*Stat).Ino
 	inodeOff := img0.(*image).metaStartPos() + int64(nid)*disk.SizeInodeCompact
 
 	// Extended inode, chunk-based with an index map, one block-sized chunk.
@@ -1040,29 +1039,32 @@ func TestCopyFromImageSharesChunkMaps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var first *builder.Chunk
-	entries := 0
+	// The source names one inode 2001 times. The copy reproduces that as
+	// one inode — one entry carrying the chunk map — and 2000 aliases of
+	// it, so the map is parsed and held exactly once.
+	owner := dst.byPath["/f0"]
+	if owner == nil || owner.linkTo != nil || len(owner.chunks) == 0 {
+		t.Fatalf("/f0 = %+v, want the entry that owns the chunk map", owner)
+	}
+	if cap(owner.chunks) != len(owner.chunks) {
+		t.Errorf("chunk slice holds %d entries with capacity for %d", len(owner.chunks), cap(owner.chunks))
+	}
+	entries, aliases := 0, 0
 	for _, e := range dst.byPath {
-		if len(e.chunks) == 0 {
-			continue
-		}
-		entries++
-		if cap(e.chunks) != len(e.chunks) {
-			t.Errorf("%s: chunk slice holds %d entries with capacity for %d",
-				e.path, len(e.chunks), cap(e.chunks))
-		}
-		// Every name of one inode describes the same extents, so they must
-		// all be looking at the same slice rather than a copy each.
-		if first == nil {
-			first = &e.chunks[0]
-		} else if &e.chunks[0] != first {
-			t.Errorf("%s: chunk map was parsed again instead of shared", e.path)
+		switch {
+		case len(e.chunks) > 0:
+			entries++
+		case e.linkTo == owner:
+			aliases++
 		}
 	}
-	if entries != links+1 {
-		t.Fatalf("%d entries carry chunks, want %d", entries, links+1)
+	if entries != 1 || aliases != links {
+		t.Fatalf("%d entries carry chunks and %d alias /f0, want 1 and %d", entries, aliases, links)
 	}
-	t.Logf("%d names share one %d-entry chunk map", entries, len(dst.byPath["/f0"].chunks))
+	if owner.extraLinks != links {
+		t.Errorf("/f0 has %d extra links, want %d", owner.extraLinks, links)
+	}
+	t.Logf("%d names share one %d-entry chunk map", aliases+1, len(owner.chunks))
 }
 
 // TestUnalignedDataFileStart covers a data file that does not begin on a block
@@ -1361,6 +1363,171 @@ func TestEmptyDirentNameIsRejected(t *testing.T) {
 	err = Create(&seekBuf{}).CopyFrom(img, MetadataOnly())
 	if err == nil {
 		t.Error("CopyFrom accepted an empty dirent name")
+	} else if !errors.Is(err, ErrInvalid) {
+		t.Errorf("CopyFrom err = %v, want it to wrap ErrInvalid", err)
+	}
+}
+
+// buildFlatPlainImage writes an image with one file large enough to be laid
+// out flat-plain (its data in whole blocks at a block address), and returns
+// the image plus the byte offset of that file's inode.
+func buildFlatPlainImage(t *testing.T) ([]byte, int64) {
+	t.Helper()
+	out := &seekBuf{}
+	w := Create(out, WithBuildTime(1000, 0))
+	f, err := w.Create("/big")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(bytes.Repeat([]byte("x"), 2*4096)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	img, err := Open(bytes.NewReader(out.buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := fs.Stat(img, "big")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.(*fileInfo).layout != disk.LayoutFlatPlain {
+		t.Fatalf("test premise broken: layout = %d, want flat-plain", fi.(*fileInfo).layout)
+	}
+	nid := fi.Sys().(*Stat).Ino
+	return out.buf, img.(*image).metaStartPos() + int64(nid)*disk.SizeInodeCompact
+}
+
+// TestFlatPlainAddressIsBounded patches a flat-plain inode's data block
+// address to lie past the image. Chunk addresses were already bounded; the
+// flat address was handed to the reader as-is — and published as
+// DataRange.Offset — so a slice-backed io.ReaderAt indexed with it.
+func TestFlatPlainAddressIsBounded(t *testing.T) {
+	buf, inodeOff := buildFlatPlainImage(t)
+	// i_u (the data block address for a flat-plain inode) sits at byte 16 of
+	// both inode formats.
+	binary.LittleEndian.PutUint32(buf[inodeOff+16:], 0xFFFFFFF0)
+
+	for _, tc := range []struct {
+		name string
+		ra   io.ReaderAt
+	}{
+		{"sized", bytes.NewReader(buf)},
+		{"strict", &strictReaderAt{t: t, buf: buf}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			img, err := Open(tc.ra)
+			if err != nil {
+				t.Fatalf("tampered image failed to open: %v", err)
+			}
+			if _, err := fs.Stat(img, "big"); !errors.Is(err, ErrInvalid) {
+				t.Errorf("Stat err = %v, want ErrInvalid (the address is published as DataRange.Offset)", err)
+			}
+			if _, err := fs.ReadFile(img, "big"); !errors.Is(err, ErrInvalid) {
+				t.Errorf("ReadFile err = %v, want ErrInvalid", err)
+			}
+			if err := Create(&seekBuf{}).CopyFrom(img); err == nil {
+				t.Error("CopyFrom copied a file whose data lies outside the image")
+			}
+		})
+	}
+}
+
+// TestCopyFromImageInlineCrossingBlock bumps an inline symlink's size so its
+// target would run past the inode's block. The reader refuses that; the
+// metadata-only copy used to take the bytes that followed as the target, or
+// an empty one when nothing followed.
+func TestCopyFromImageInlineCrossingBlock(t *testing.T) {
+	out := &seekBuf{}
+	w := Create(out, WithBuildTime(1000, 0))
+	if err := w.Symlink("target", "/l"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	buf := out.buf
+	img0, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nid, _, _, err := img0.(*image).resolve("l", "l", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inodeOff := img0.(*image).metaStartPos() + int64(nid)*disk.SizeInodeCompact
+	format := binary.LittleEndian.Uint16(buf[inodeOff:])
+	if (format&0x0E)>>1 != disk.LayoutFlatInline {
+		t.Fatalf("test premise broken: format %#x, want a flat-inline inode", format)
+	}
+	// i_size starts at byte 8 of both inode formats: a uint32 in a compact
+	// inode, a uint64 in an extended one. Claim a whole block.
+	if format&0x01 == 0 {
+		binary.LittleEndian.PutUint32(buf[inodeOff+8:], 4096)
+	} else {
+		binary.LittleEndian.PutUint64(buf[inodeOff+8:], 4096)
+	}
+
+	img, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("tampered image failed to open: %v", err)
+	}
+	if target, err := img.(interface {
+		ReadLink(string) (string, error)
+	}).ReadLink("l"); err == nil {
+		t.Errorf("ReadLink returned %q, want an error", target)
+	}
+	err = Create(&seekBuf{}).CopyFrom(img, MetadataOnly())
+	if err == nil {
+		t.Error("CopyFrom accepted inline data crossing its block")
+	} else if !errors.Is(err, ErrInvalid) {
+		t.Errorf("CopyFrom err = %v, want it to wrap ErrInvalid", err)
+	}
+}
+
+// TestCopyFromImageTruncatedXattr overstates an inline xattr's value length
+// so the entry runs past the inode's xattr area. The reader errors; the
+// metadata-only copy used to stop parsing and drop the attribute silently.
+func TestCopyFromImageTruncatedXattr(t *testing.T) {
+	out := &seekBuf{}
+	w := Create(out, WithBuildTime(1000, 0))
+	f, err := w.Create("/f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Setxattr("/f", "security.capability", "real"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	buf := out.buf
+	// The 4-byte entry precedes the stored name: name length, name index,
+	// then the little-endian value length.
+	i := bytes.Index(buf, []byte("capability"))
+	if i < 0 || buf[i-3] != 6 {
+		t.Fatalf("could not locate the stored xattr entry")
+	}
+	binary.LittleEndian.PutUint16(buf[i-2:], 4000)
+
+	img, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("tampered image failed to open: %v", err)
+	}
+	if _, err := fs.Stat(img, "f"); err == nil {
+		t.Error("Stat accepted an xattr running past its area")
+	}
+	err = Create(&seekBuf{}).CopyFrom(img, MetadataOnly())
+	if err == nil {
+		t.Error("CopyFrom accepted an xattr running past its area")
 	} else if !errors.Is(err, ErrInvalid) {
 		t.Errorf("CopyFrom err = %v, want it to wrap ErrInvalid", err)
 	}

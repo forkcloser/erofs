@@ -23,6 +23,24 @@
 //	w := erofs.Create(outFile)
 //	w.CopyFrom(srcFS, erofs.MetadataOnly())
 //	w.Close()
+//
+// # Concurrency
+//
+// The [fs.FS] returned by [Open] is safe for concurrent use; the individual
+// [fs.File] values it opens are not. A [Writer] and its files are
+// single-goroutine.
+//
+// # Limits
+//
+// The reader accepts block sizes from 512 bytes to 64 KiB and rejects
+// compressed inodes, 48-bit chunk addressing and extended inode slots with
+// [ErrNotImplemented]. Bounds that protect a caller from a hostile image,
+// each reported as [ErrInvalid]: a symlink target of at most 4096 bytes, a
+// path of at most 4096 bytes, at most 255 symlink hops per resolution, a
+// chunk-index map of at most 64 MiB per file, and [io/fs.ReadFile] refusing
+// files over 128 MiB (use [io/fs.FS.Open] and io.Copy for larger ones). The
+// writer stores xattr names of at most 255 bytes after their prefix and
+// values of at most 65535 bytes, the on-disk field widths.
 package erofs
 
 import (
@@ -78,27 +96,30 @@ var (
 // For cross-platform fs.FS compatibility, callers should prefer
 // type-asserting the [fs.FileInfo] to accessor interfaces rather
 // than inspecting Stat fields directly. The returned [fs.FileInfo]
-// implements the following single-method interfaces:
+// implements the following single-method interfaces, and each field below
+// has the same type as the accessor that returns it:
 //
 //	Ownership:  UID() uint32, GID() uint32
 //	InodeInfo:  Ino() uint64, Nlink() uint64
 //	DeviceInfo: Rdev() uint64
 //	Xattrs:     GetAllXattr() map[string]string, GetXattr(string) (string, bool)
+//	DataRange:  DataRange() []DataRange
 //
 // Mode has no accessor interface: use [fs.FileInfo.Mode], which returns the
-// same value, including the setuid, setgid and sticky bits.
+// same value, including the setuid, setgid and sticky bits. Mtime and
+// MtimeNs are the raw seconds and nanoseconds; [fs.FileInfo.ModTime]
+// returns them as a [time.Time].
 type Stat struct {
-	Mode        fs.FileMode
-	Size        int64
-	InodeLayout uint8
-	Rdev        uint32
-	Ino         int64
-	UID         uint32
-	GID         uint32
-	Mtime       uint64
-	MtimeNs     uint32
-	Nlink       int
-	Xattrs      map[string]string
+	Mode    fs.FileMode
+	Size    int64
+	Rdev    uint64
+	Ino     uint64
+	UID     uint32
+	GID     uint32
+	Mtime   uint64
+	MtimeNs uint32
+	Nlink   uint64
+	Xattrs  map[string]string
 }
 
 // holeOffset is the sentinel value for DataRange.Offset that marks a hole
@@ -106,9 +127,13 @@ type Stat struct {
 const holeOffset int64 = -1
 
 // DataRange describes one entry in the complete logical layout of a file's
-// content. A slice of DataRange values returned by [fileInfo.DataRange]
-// covers the file from logical byte 0 to logical byte [fs.FileInfo.Size]-1
-// in order, with no gaps or overlaps.
+// content. The [fs.FileInfo] values this package returns implement
+//
+//	DataRange() []DataRange
+//
+// and the slice covers the file from logical byte 0 to logical byte
+// [fs.FileInfo.Size]-1 in order, with no gaps or overlaps. See [Stat] for
+// the other accessor interfaces.
 //
 // The sum of all Size values in the slice must equal the file size exactly.
 // A slice whose sizes do not sum to the file size is invalid.
@@ -141,9 +166,6 @@ type options struct {
 // OpenOpt is an option for configuring the EROFS reader
 type OpenOpt func(*options)
 
-// Deprecated: Use [OpenOpt] instead, will be removed in 0.3
-type Opt = OpenOpt
-
 // WithExtraDevices specifies additional devices to read
 // chunk data from
 func WithExtraDevices(devices ...io.ReaderAt) OpenOpt {
@@ -163,6 +185,10 @@ func WithExtraDevices(devices ...io.ReaderAt) OpenOpt {
 // One deliberate relaxation of [io/fs.ValidPath]: names need not be valid
 // UTF-8, because EROFS stores names as byte strings and an image may contain
 // entries that would otherwise be unreachable.
+//
+// The returned FS is safe for concurrent use by multiple goroutines. Each
+// [fs.File] it opens is not: a file carries its own read offset and cached
+// inode, so share the FS, not the file.
 //
 // Individual operations bound their own work, but the directory structure of
 // an image is not validated to be a tree. A corrupt or hostile image may
@@ -291,11 +317,6 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 	return &i, nil
 }
 
-// Deprecated: Use [Open] instead, will be removed in 0.3
-func EroFS(r io.ReaderAt, opts ...Opt) (fs.FS, error) {
-	return Open(r, opts...)
-}
-
 // roundupPowerOfTwo rounds v up to the next power of two.
 func roundupPowerOfTwo(v uint32) uint32 {
 	v--
@@ -397,6 +418,27 @@ func (img *image) chunkAddr(phys uint64) (int64, error) {
 	return int64(phys) << img.sb.BlkSizeBits, nil
 }
 
+// checkImageRange rejects a byte range of the primary image that cannot lie
+// inside it.
+//
+// A flat-plain inode's data address is a block number taken straight off
+// disk, with no bound of its own beyond what the shift can represent. The
+// chunk-based path routes every address through chunkAddr and mapDev, which
+// apply this check; the flat paths used to hand the offset to the caller's
+// io.ReaderAt as-is, and expose it publicly as DataRange.Offset. Same
+// exposure as checkNid, same answer: a slice-backed reader would index with
+// it and panic.
+func (img *image) checkImageRange(off, n int64) error {
+	if off < 0 || n < 0 || off > math.MaxInt64-n {
+		return fmt.Errorf("data range [%d, +%d) is out of range: %w", off, n, ErrInvalid)
+	}
+	if img.size > 0 && off+n > img.size {
+		return fmt.Errorf("data range [%d, +%d) lies past the end of the %d byte image: %w", off, n, img.size, ErrInvalid)
+	}
+
+	return nil
+}
+
 // maxReadFileSize is the maximum file size that ReadFile will allocate.
 // ReadFile is intended for small files; for larger files, callers should
 // use Open and io.Copy. 128 MiB is generous for typical use (configs,
@@ -473,8 +515,12 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 	blockSize := int64(1 << img.sb.BlkSizeBits)
 	switch ino.inodeLayout {
 	case disk.LayoutFlatPlain:
-		// Data is contiguous starting at dataBlkAddr.
+		// Data is contiguous starting at dataBlkAddr. An address outside the
+		// image is left to the block reader, which reports it.
 		dataOffset := int64(ino.inodeData) << img.sb.BlkSizeBits
+		if img.checkImageRange(dataOffset, ino.size) != nil {
+			return nil
+		}
 		return io.NewSectionReader(img.meta, dataOffset, ino.size)
 	case disk.LayoutFlatInline:
 		// Last block is inline after the inode; earlier blocks at dataBlkAddr.
@@ -489,6 +535,9 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 		// which i_xattr_icount drives up to 262148, so without the same check
 		// here a file's contents alias whatever follows its block.
 		if trailingAddr&(blockSize-1)+ino.size > blockSize {
+			return nil
+		}
+		if img.checkImageRange(trailingAddr, ino.size) != nil {
 			return nil
 		}
 		return io.NewSectionReader(img.meta, trailingAddr, ino.size)
@@ -879,6 +928,9 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 	}
 	if blockOffset < 0 || blockEnd > blockSize || blockOffset >= blockEnd {
 		return nil, fmt.Errorf("invalid block bounds [%d:%d] for nid %d: %w", blockOffset, blockEnd, fi.nid, ErrInvalid)
+	}
+	if err := img.checkImageRange(addr+int64(blockOffset), int64(blockEnd-blockOffset)); err != nil {
+		return nil, fmt.Errorf("nid %d: %w", fi.nid, err)
 	}
 
 	b := img.getBlock()
@@ -1441,17 +1493,17 @@ func (b *file) statInfo() (*fileInfo, error) {
 		mtime:   ino.mtime,
 		mtimeNs: ino.mtimeNs,
 		stat: Stat{
-			Mode:        disk.EroFSModeToGoFileMode(ino.rawMode),
-			Size:        ino.size,
-			InodeLayout: ino.inodeLayout,
-			Ino:         int64(ino.nid),
-			Rdev:        disk.RdevFromMode(ino.rawMode, ino.inodeData),
-			UID:         ino.uid,
-			GID:         ino.gid,
-			Nlink:       ino.nlink,
-			Mtime:       ino.mtime,
-			MtimeNs:     ino.mtimeNs,
+			Mode:    disk.EroFSModeToGoFileMode(ino.rawMode),
+			Size:    ino.size,
+			Ino:     ino.nid,
+			Rdev:    uint64(disk.RdevFromMode(ino.rawMode, ino.inodeData)),
+			UID:     ino.uid,
+			GID:     ino.gid,
+			Nlink:   uint64(ino.nlink),
+			Mtime:   ino.mtime,
+			MtimeNs: ino.mtimeNs,
 		},
+		layout: ino.inodeLayout,
 	}
 	if ino.xsize > 0 {
 		if err := loadXattrs(b, &fi.stat); err != nil {
@@ -1472,7 +1524,11 @@ func (b *file) statInfo() (*fileInfo, error) {
 				return f.buildChunkDataRanges(&inoCopy)
 			}
 		} else {
-			fi.dataRanges = b.buildDataRanges(ino, fi.rangeBuf[:0])
+			ranges, err := b.buildDataRanges(ino, fi.rangeBuf[:0])
+			if err != nil {
+				return nil, fmt.Errorf("nid %d: %w", ino.nid, err)
+			}
+			fi.dataRanges = ranges
 		}
 	}
 	return fi, nil
@@ -1481,17 +1537,26 @@ func (b *file) statInfo() (*fileInfo, error) {
 // buildDataRanges computes the physical data ranges for a regular file.
 // buildDataRanges appends the file's ranges to dst, which lets a flat layout —
 // at most two ranges — be backed by the caller's own storage.
-func (b *file) buildDataRanges(ino *inode, dst []DataRange) []DataRange {
+//
+// Flat addresses are bounded here, at stat time: DataRange.Offset is public,
+// and an offset past the image must not reach a caller who preads with it.
+func (b *file) buildDataRanges(ino *inode, dst []DataRange) ([]DataRange, error) {
 	blockSize := int64(1 << b.img.sb.BlkSizeBits)
 	switch ino.inodeLayout {
 	case disk.LayoutFlatPlain:
 		dataOffset := int64(ino.inodeData) << b.img.sb.BlkSizeBits
-		return append(dst, DataRange{Device: 0, Offset: dataOffset, Size: ino.size})
+		if err := b.img.checkImageRange(dataOffset, ino.size); err != nil {
+			return nil, err
+		}
+		return append(dst, DataRange{Device: 0, Offset: dataOffset, Size: ino.size}), nil
 	case disk.LayoutFlatInline:
 		inodeAddr := b.img.metaStartPos() + int64(ino.nid)*disk.SizeInodeCompact
 		trailingAddr := inodeAddr + ino.flatDataOffset()
 		if ino.size <= blockSize {
-			return append(dst, DataRange{Device: 0, Offset: trailingAddr, Size: ino.size})
+			if err := b.img.checkImageRange(trailingAddr, ino.size); err != nil {
+				return nil, err
+			}
+			return append(dst, DataRange{Device: 0, Offset: trailingAddr, Size: ino.size}), nil
 		}
 		// Multi-block inline: earlier full blocks at dataBlkAddr, last block inline.
 		// headSize is the number of complete blocks before the inline tail, in bytes.
@@ -1500,13 +1565,19 @@ func (b *file) buildDataRanges(ino *inode, dst []DataRange) []DataRange {
 		tailSize := ino.size - headSize
 		if headSize > 0 {
 			dataOffset := int64(ino.inodeData) << b.img.sb.BlkSizeBits
+			if err := b.img.checkImageRange(dataOffset, headSize); err != nil {
+				return nil, err
+			}
 			dst = append(dst, DataRange{Device: 0, Offset: dataOffset, Size: headSize})
 		}
-		return append(dst, DataRange{Device: 0, Offset: trailingAddr, Size: tailSize})
+		if err := b.img.checkImageRange(trailingAddr, tailSize); err != nil {
+			return nil, err
+		}
+		return append(dst, DataRange{Device: 0, Offset: trailingAddr, Size: tailSize}), nil
 	case disk.LayoutChunkBased:
-		return b.buildChunkDataRanges(ino)
+		return b.buildChunkDataRanges(ino), nil
 	}
-	return nil
+	return nil, nil
 }
 
 // maxChunkIndexBytes is an upper bound on the chunk-index table we will
@@ -2092,6 +2163,7 @@ type fileInfo struct {
 	// Held by value, with Sys returning its address: one allocation for the
 	// fileInfo instead of two, and Stat is never shared with anything else.
 	stat       Stat
+	layout     uint8 // on-disk inode layout, kept for tests and diagnostics
 	dataRanges []DataRange
 	// A flat layout produces at most two ranges, so they are backed here
 	// rather than by a separate heap slice.
@@ -2114,9 +2186,9 @@ func (fi *fileInfo) Sys() any           { return &fi.stat }
 func (fi *fileInfo) ModTime() time.Time { return time.Unix(int64(fi.mtime), int64(fi.mtimeNs)) }
 func (fi *fileInfo) UID() uint32        { return fi.stat.UID }
 func (fi *fileInfo) GID() uint32        { return fi.stat.GID }
-func (fi *fileInfo) Ino() uint64        { return uint64(fi.stat.Ino) }
-func (fi *fileInfo) Nlink() uint64      { return uint64(fi.stat.Nlink) }
-func (fi *fileInfo) Rdev() uint64       { return uint64(fi.stat.Rdev) }
+func (fi *fileInfo) Ino() uint64        { return fi.stat.Ino }
+func (fi *fileInfo) Nlink() uint64      { return fi.stat.Nlink }
+func (fi *fileInfo) Rdev() uint64       { return fi.stat.Rdev }
 
 // DataRange returns the physical data ranges for this file's uncompressed
 // content. Returns nil for compressed files, directories, symlinks, and
