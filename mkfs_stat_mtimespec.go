@@ -1,4 +1,4 @@
-//go:build darwin || freebsd || netbsd
+//go:build darwin || freebsd
 
 package erofs
 

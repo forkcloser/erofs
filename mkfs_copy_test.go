@@ -122,7 +122,7 @@ func checkHardlinkPair(t *testing.T, efs fs.FS, a, b, other string) {
 // the two names must share one inode in the image, as they do on the host.
 func TestCopyFromHostHardlinks(t *testing.T) {
 	switch runtime.GOOS {
-	case "linux", "darwin", "freebsd", "netbsd", "openbsd", "dragonfly", "solaris", "illumos":
+	case "linux", "darwin", "freebsd":
 	default:
 		t.Skipf("no syscall.Stat_t support on %s", runtime.GOOS)
 	}

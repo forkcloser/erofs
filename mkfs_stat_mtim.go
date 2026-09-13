@@ -1,4 +1,4 @@
-//go:build dragonfly || illumos || linux || openbsd || solaris
+//go:build linux
 
 package erofs
 
