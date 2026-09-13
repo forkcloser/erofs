@@ -1,4 +1,4 @@
-//go:build darwin || dragonfly || freebsd || illumos || linux || netbsd || openbsd || solaris
+//go:build darwin || freebsd || linux
 
 package erofs
 

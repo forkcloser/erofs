@@ -6,6 +6,15 @@ All notable changes to this fork are recorded here. The format follows
 fork point, upstream [`erofs/go-erofs`](https://github.com/erofs/go-erofs)
 commit `44d5e74`.
 
+## [Unreleased]
+
+### Removed
+
+- Host metadata from `*syscall.Stat_t` on DragonFly BSD, NetBSD, OpenBSD,
+  Solaris and illumos. `CopyFrom` on those systems now takes only mode, size
+  and `ModTime`, as on Windows. Supported platforms are Linux, macOS, Windows
+  and FreeBSD.
+
 ## [1.0.0-rc.1] - 2026-09-07
 
 ### Removed
