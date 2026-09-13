@@ -98,7 +98,7 @@ dot so a stored ACL could never be matched by name (upstream `03d68d8`).
 Upstream's `Link`, `Remove`, `RemoveAll` and hardlink detection in `CopyFrom`
 arrived here independently and are not ports.
 
-Requires Go 1.25.
+Requires Go 1.26.
 
 ## Features
 
