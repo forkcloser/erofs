@@ -230,17 +230,24 @@ func patchDirentNid(buf []byte, from, to uint64) int {
 	return n
 }
 
+// direntNameMax is EROFS_NAME_LEN: the kernel refuses to look up a longer
+// name, though the format itself carries any length.
+const direntNameMax = 255
+
 // buildCyclicImage returns an image whose directory /d contains a dirent
-// named "e" that points back at /d itself.
-func buildCyclicImage(t *testing.T) []byte {
+// named "e" that points back at /d itself, both names nameLen bytes long.
+func buildCyclicImage(t *testing.T, nameLen int) []byte {
 	t.Helper()
+
+	d := strings.Repeat("d", nameLen)
+	e := strings.Repeat("e", nameLen)
 
 	out := &seekBuf{}
 	w := Create(out, WithBuildTime(1000, 0))
-	if err := w.Mkdir("/d", 0o755); err != nil {
+	if err := w.Mkdir("/"+d, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Mkdir("/d/e", 0o755); err != nil {
+	if err := w.Mkdir("/"+d+"/"+e, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := w.Close(); err != nil {
@@ -253,11 +260,11 @@ func buildCyclicImage(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	i := img.(*image)
-	dNid, _, _, err := i.resolve("x", "d", false)
+	dNid, _, _, err := i.resolve("x", d, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	eNid, _, _, err := i.resolve("x", "d/e", false)
+	eNid, _, _, err := i.resolve("x", d+"/"+e, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +279,7 @@ func buildCyclicImage(t *testing.T) []byte {
 // tree. Without a visited set the BFS revisits the same subtree forever,
 // growing the queue and the path strings without bound.
 func TestUntrustedDirectoryCycleTerminates(t *testing.T) {
-	buf := buildCyclicImage(t)
+	buf := buildCyclicImage(t, 1)
 
 	img, err := Open(bytes.NewReader(buf))
 	if err != nil {
@@ -313,15 +320,16 @@ func TestUntrustedDirectoryCycleTerminates(t *testing.T) {
 // visited set that bounds the metadata-only path does not help. What stops it
 // is the path length bound, since a cycle yields ever-deeper paths.
 func TestUntrustedDirectoryCycleFullImageTerminates(t *testing.T) {
-	buf := buildCyclicImage(t)
+	// Names at the dirent maximum hit the path bound seventeen levels down.
+	// Shorter ones reach it thousands of levels down, and since every step
+	// re-resolves its path from the root the walk turns quadratic — slow
+	// enough under the race detector to blow the deadline below.
+	buf := buildCyclicImage(t, direntNameMax)
 
 	img, err := Open(bytes.NewReader(buf))
 	if err != nil {
 		t.Fatalf("cyclic image failed to open: %v", err)
 	}
-
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
 
 	done := make(chan error, 1)
 	go func() {
@@ -331,17 +339,18 @@ func TestUntrustedDirectoryCycleFullImageTerminates(t *testing.T) {
 
 	select {
 	case err := <-done:
+		var after runtime.MemStats
 		runtime.GC()
 		runtime.ReadMemStats(&after)
 		if err == nil {
 			t.Fatal("full-image CopyFrom accepted an image with a directory cycle")
 		}
-		// Cumulative allocation is high because resolving each path walks it
-		// from the root, so a deep chain costs O(depth^2) lookups. What has to
-		// stay bounded is resident memory, which is what an OOM is made of.
-		t.Logf("rejected with %v", err)
-		t.Logf("cumulative alloc %d bytes, heap in use after GC %d bytes",
-			after.TotalAlloc-before.TotalAlloc, after.HeapInuse)
+		if !errors.Is(err, ErrInvalid) {
+			t.Errorf("err = %v, want it to wrap ErrInvalid", err)
+		}
+		// What has to stay bounded is resident memory, which is what an OOM
+		// is made of.
+		t.Logf("rejected with %v (heap in use after GC %d bytes)", err, after.HeapInuse)
 		if after.HeapInuse > 256<<20 {
 			t.Errorf("heap in use is %d bytes after a cyclic image; want well under 256 MiB", after.HeapInuse)
 		}
@@ -355,7 +364,7 @@ func TestUntrustedDirectoryCycleFullImageTerminates(t *testing.T) {
 // expected to keep descending; the callback bounds it so this test can
 // assert the exposure without running away.
 func TestReaderWalkOnCyclicImage(t *testing.T) {
-	buf := buildCyclicImage(t)
+	buf := buildCyclicImage(t, 1)
 
 	img, err := Open(bytes.NewReader(buf))
 	if err != nil {
