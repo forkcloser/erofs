@@ -8,19 +8,16 @@ commit `44d5e74`.
 
 ## [Unreleased]
 
-### Removed
-
-- Host metadata from `*syscall.Stat_t` on DragonFly BSD, NetBSD, OpenBSD,
-  Solaris and illumos. `CopyFrom` on those systems now takes only mode, size
-  and `ModTime`, as on Windows. Supported platforms are Linux, macOS, Windows
-  and FreeBSD.
-
-## [1.0.0-rc.1] - 2026-09-07
+## [1.0.0] - 2026-09-12
 
 ### Removed
 
 - `Opt` and `EroFS`, deprecated upstream; use `OpenOpt` and `Open`.
 - `Stat.InodeLayout`, an on-disk enum with no exported constants.
+- Host metadata from `*syscall.Stat_t` on DragonFly BSD, NetBSD, OpenBSD,
+  Solaris and illumos. `CopyFrom` on those systems now takes only mode, size
+  and `ModTime`, as on Windows. Supported platforms are Linux, macOS, Windows
+  and FreeBSD.
 
 ### Changed
 
@@ -43,6 +40,8 @@ commit `44d5e74`.
   skipped.
 - `ReadDir`, `Stat` and `DataRange()` reject a flat-plain data address that
   lies outside the image, as chunk addresses already were.
+- Requires Go 1.26: the `go` directive is 1.26.0, in step with the sibling
+  libraries.
 
 ### Added
 
