@@ -92,6 +92,19 @@ type TarContext struct {
 	Xattrs map[string]string
 }
 
+// paxXattrs spells xattrs the way archive/tar writes them: the deprecated
+// Header.Xattrs field produced exactly these SCHILY.xattr. PAX records.
+func paxXattrs(xattrs map[string]string) map[string]string {
+	if len(xattrs) == 0 {
+		return nil
+	}
+	records := make(map[string]string, len(xattrs))
+	for k, v := range xattrs {
+		records["SCHILY.xattr."+k] = v
+	}
+	return records
+}
+
 func (tc TarContext) newHeader(mode os.FileMode, name, link string, size int64) *tar.Header {
 	ti := tarInfo{
 		name: name,
@@ -99,9 +112,9 @@ func (tc TarContext) newHeader(mode os.FileMode, name, link string, size int64) 
 		size: size,
 		modt: tc.ModTime,
 		hdr: &tar.Header{
-			Uid:    tc.UID,
-			Gid:    tc.GID,
-			Xattrs: tc.Xattrs,
+			Uid:        tc.UID,
+			Gid:        tc.GID,
+			PAXRecords: paxXattrs(tc.Xattrs),
 		},
 	}
 
