@@ -16,10 +16,6 @@
 # machine that already has autotools and lz4).
 set -euo pipefail
 
-EROFS_UTILS_VERSION="1.9.3"
-EROFS_UTILS_SHA256="17bfa54f4d370838c61081fce44022815a0366e282d777389589184414d5adc5"
-LZ4_VERSION="1.10.0"
-LZ4_SHA256="537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b"
 MINGW_HOST="x86_64-w64-mingw32"
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -27,6 +23,18 @@ patches="$repo/.github/workflows/patches/erofs-utils"
 headers="$repo/.github/workflows/mingw-compat-headers"
 work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/erofs-utils-build"
 prefix="$repo/build/erofs-utils"
+
+# Both tarballs are pinned in pins.yaml at the repository root: Renovate moves
+# the version, limen refreshes the digest, and this script only reads them back.
+pin() {
+    (cd "$repo" && limen pins get "$@")
+}
+EROFS_UTILS_VERSION="$(pin erofs-utils version)"
+EROFS_UTILS_URL="$(pin erofs-utils url)"
+EROFS_UTILS_SHA256="$(pin erofs-utils sha256)"
+LZ4_VERSION="$(pin lz4 version)"
+LZ4_URL="$(pin lz4 url)"
+LZ4_SHA256="$(pin lz4 sha256)"
 
 die() {
     echo "build-erofs-utils: $*" >&2
@@ -54,8 +62,7 @@ unpack_erofs_utils() {
     local src="$work/erofs-utils-${EROFS_UTILS_VERSION}"
     mkdir -p "$work"
     rm -rf "$src"
-    fetch "https://github.com/erofs/erofs-utils/archive/refs/tags/v${EROFS_UTILS_VERSION}.tar.gz" \
-        "$EROFS_UTILS_SHA256" "$tarball"
+    fetch "$EROFS_UTILS_URL" "$EROFS_UTILS_SHA256" "$tarball"
     tar -xzf "$tarball" -C "$work"
     local p
     for p in "$patches"/*.patch; do
@@ -109,7 +116,7 @@ build_windows() {
     # lz4, static, into the mingw sysroot — the only library the cross build
     # links; everything else is configured out below.
     local lz4_tarball="$work/lz4-${LZ4_VERSION}.tar.gz"
-    fetch "https://github.com/lz4/lz4/archive/refs/tags/v${LZ4_VERSION}.tar.gz" "$LZ4_SHA256" "$lz4_tarball"
+    fetch "$LZ4_URL" "$LZ4_SHA256" "$lz4_tarball"
     rm -rf "$work/lz4-${LZ4_VERSION}"
     tar -xzf "$lz4_tarball" -C "$work"
     (
