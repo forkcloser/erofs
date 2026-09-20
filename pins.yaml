@@ -1,0 +1,24 @@
+# The two source tarballs .github/scripts/build-erofs-utils.sh compiles, pinned by
+# digest; the script reads them back with `limen pins get` (book/tooling.md, "Pinned
+# artifacts beyond aqua"). GitHub publishes no digest for an archive tarball, so the
+# method is the download itself: TLS is the guarantee at refresh time, the digest is the
+# guard at every fetch after.
+pins:
+  - name: erofs-utils
+    renovate: github-tags erofs/erofs-utils
+    extract-version: ^v(?<version>[0-9]+\.[0-9]+\.[0-9]+)$
+    version: 1.9.3
+    url: https://github.com/erofs/erofs-utils/archive/refs/tags/v${version}.tar.gz
+    verify: download
+    digest:
+      version: 1.9.3
+      sha256: 17bfa54f4d370838c61081fce44022815a0366e282d777389589184414d5adc5
+  - name: lz4
+    renovate: github-tags lz4/lz4
+    extract-version: ^v(?<version>[0-9]+\.[0-9]+\.[0-9]+)$
+    version: 1.10.0
+    url: https://github.com/lz4/lz4/archive/refs/tags/v${version}.tar.gz
+    verify: download
+    digest:
+      version: 1.10.0
+      sha256: 537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b

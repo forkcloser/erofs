@@ -106,6 +106,14 @@ jobs:
         with:
           persist-credentials: false
 
+      # The script reads its tarball pins through `limen pins get`, so the
+      # pinned limen must be on PATH here as in every other job that runs it.
+      - name: Install aqua (pinned, checksum-verified)
+        uses: ./.github/actions/setup-aqua
+
+      - name: Install pinned tools
+        run: aqua install --only-link
+
       - name: Cross-compile mkfs.erofs for windows
         run: .github/scripts/build-erofs-utils.sh windows
 
