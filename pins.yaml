@@ -11,8 +11,8 @@ pins:
     url: https://github.com/erofs/erofs-utils/archive/refs/tags/v${version}.tar.gz
     verify: download
     digest:
-      version: 1.9.3
-      sha256: 17bfa54f4d370838c61081fce44022815a0366e282d777389589184414d5adc5
+      version: 1.9.4
+      sha256: 7d135aa2550326a5acf20f53c518aea5a8900015ce50700044e40f818c31dd80
   - name: lz4
     renovate: github-tags lz4/lz4
     extract-version: ^v(?<version>[0-9]+\.[0-9]+\.[0-9]+)$
