@@ -21,6 +21,7 @@ func ExampleOpen() {
 	img, err := erofs.Open(f)
 	if err != nil {
 		_ = f.Close()
+
 		log.Fatal(err)
 	}
 
@@ -28,10 +29,13 @@ func ExampleOpen() {
 		if err != nil {
 			return err
 		}
+
 		fmt.Println(path)
+
 		return nil
 	})
 	_ = f.Close()
+
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -46,6 +50,7 @@ func ExampleOpen() {
 // its path.
 func buildExampleImage() string {
 	path := filepath.Join(os.TempDir(), fmt.Sprintf("erofs-example-%d.img", os.Getpid()))
+
 	out, err := os.Create(path)
 	if err != nil {
 		log.Fatal(err)
@@ -55,36 +60,45 @@ func buildExampleImage() string {
 	if err := w.Mkdir("/usr", 0o755); err != nil {
 		log.Fatal(err)
 	}
+
 	h, err := w.Create("/etc/hostname")
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	if _, err := h.Write([]byte("example\n")); err != nil {
 		log.Fatal(err)
 	}
+
 	if err := h.Close(); err != nil {
 		log.Fatal(err)
 	}
+
 	if err := w.Close(); err != nil {
 		log.Fatal(err)
 	}
+
 	if err := out.Close(); err != nil {
 		log.Fatal(err)
 	}
+
 	return path
 }
 
 func ExampleCreate() {
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 
 	f, err := w.Create("/hello.txt")
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("hello world\n")); err != nil {
 		log.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		log.Fatal(err)
 	}
@@ -107,6 +121,7 @@ func ExampleCreate() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	fmt.Print(string(data))
 	// Output: hello world
 }

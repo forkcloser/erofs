@@ -123,6 +123,7 @@ func Create(out io.WriteSeeker, opts ...CreateOpt) *Writer {
 		// MetadataOnly CopyFrom device IDs will start at slot 1+.
 		// The reserved slot is filled in with the actual block count at Close.
 		fsys.devices = append(fsys.devices, 0)
+
 		off, err := o.dataFile.Seek(0, io.SeekEnd)
 		if err != nil {
 			// Leaving dataOff at 0 would make the first file's chunk indexes
@@ -130,6 +131,7 @@ func Create(out io.WriteSeeker, opts ...CreateOpt) *Writer {
 			// position actually is.
 			fsys.wErr = fmt.Errorf("mkfs: seek data file: %w", err)
 		}
+
 		fsys.dataOff = off
 	}
 
@@ -227,13 +229,16 @@ func (fsys *Writer) Create(name string) (*File, error) {
 	if fsys.wErr != nil {
 		return nil, fsys.wErr
 	}
+
 	if err := fsys.checkNoOpenFile("create another file"); err != nil {
 		return nil, err
 	}
+
 	name = cleanPath(name)
 	if name == "/" {
 		return nil, fmt.Errorf("mkfs: cannot create file at root")
 	}
+
 	if err := fsys.checkPath(name); err != nil {
 		return nil, err
 	}
@@ -257,12 +262,14 @@ func (fsys *Writer) Create(name string) (*File, error) {
 		if err := fsys.alignDataOff(); err != nil {
 			return nil, err
 		}
+
 		f.dataStartOff = fsys.dataOff
 		e.dataStartOff = fsys.dataOff
 	} else {
 		if err := fsys.ensureSpool(); err != nil {
 			return nil, err
 		}
+
 		f.dataStartOff = fsys.spoolOff
 		e.spoolOff = fsys.spoolOff
 		e.dataStartOff = fsys.spoolOff
@@ -291,12 +298,15 @@ func (fsys *Writer) Mkdir(name string, perm fs.FileMode) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
 	}
+
 	dirMode := disk.StatTypeDir | goModeToUnixMode(perm)&0o7777
+
 	name = cleanPath(name)
 	if name == "/" {
 		fsys.root.mode = dirMode
 		return nil
 	}
+
 	if err := fsys.checkPath(name); err != nil {
 		return err
 	}
@@ -319,13 +329,16 @@ func (fsys *Writer) Symlink(oldname, newname string) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
 	}
+
 	newname = cleanPath(newname)
 	if newname == "/" {
 		return fmt.Errorf("mkfs: cannot create symlink at root")
 	}
+
 	if oldname == "" {
 		return fmt.Errorf("mkfs: %s: empty symlink target: %w", newname, ErrInvalid)
 	}
+
 	if err := fsys.checkPath(newname); err != nil {
 		return err
 	}
@@ -355,11 +368,14 @@ func (fsys *Writer) Link(oldname, newname string) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
 	}
+
 	oldname = cleanPath(oldname)
+
 	newname = cleanPath(newname)
 	if newname == "/" {
 		return fmt.Errorf("mkfs: cannot link at root")
 	}
+
 	target, ok := fsys.byPath[oldname]
 	if !ok {
 		return &fs.PathError{Op: "link", Path: oldname, Err: fs.ErrNotExist}
@@ -368,9 +384,11 @@ func (fsys *Writer) Link(oldname, newname string) error {
 	if target.linkTo != nil {
 		target = target.linkTo
 	}
+
 	if target.mode&disk.StatTypeMask == disk.StatTypeDir {
 		return fmt.Errorf("mkfs: cannot hardlink directory %q", oldname)
 	}
+
 	if err := fsys.checkPath(newname); err != nil {
 		return err
 	}
@@ -385,6 +403,7 @@ func (fsys *Writer) Link(oldname, newname string) error {
 		linkTo: target,
 	}
 	fsys.addChild(e)
+
 	target.extraLinks++
 
 	return nil
@@ -401,13 +420,16 @@ func (fsys *Writer) Mknod(name string, mode fs.FileMode, rdev uint32) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
 	}
+
 	name = cleanPath(name)
 	if name == "/" {
 		return fmt.Errorf("mkfs: cannot mknod at root")
 	}
+
 	if err := fsys.checkPath(name); err != nil {
 		return err
 	}
+
 	unixMode := goModeToUnixMode(mode)
 	switch unixMode & disk.StatTypeMask {
 	case disk.StatTypeChrdev, disk.StatTypeBlkdev:
@@ -438,12 +460,15 @@ func (fsys *Writer) Chmod(name string, mode fs.FileMode) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
 	}
+
 	e, err := fsys.lookup(name)
 	if err != nil {
 		return err
 	}
+
 	perm := goModeToUnixMode(mode) & 0o7777
 	e.mode = (e.mode & disk.StatTypeMask) | perm
+
 	return nil
 }
 
@@ -455,16 +480,20 @@ func (fsys *Writer) Chown(name string, uid, gid int) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
 	}
+
 	e, err := fsys.lookup(name)
 	if err != nil {
 		return err
 	}
+
 	u, g, err := checkOwner(uid, gid)
 	if err != nil {
 		return fmt.Errorf("mkfs: %s: %w", cleanPath(name), err)
 	}
+
 	e.uid = u
 	e.gid = g
+
 	return nil
 }
 
@@ -474,26 +503,31 @@ func checkOwner(uid, gid int) (uint32, uint32, error) {
 	if uid < 0 || int64(uid) > math.MaxUint32 {
 		return 0, 0, fmt.Errorf("uid %d out of range: %w", uid, ErrInvalid)
 	}
+
 	if gid < 0 || int64(gid) > math.MaxUint32 {
 		return 0, 0, fmt.Errorf("gid %d out of range: %w", gid, ErrInvalid)
 	}
+
 	return uint32(uid), uint32(gid), nil
 }
 
 // Chtimes sets the access and modification times on the named path.
 // EROFS only stores mtime; atime is retained for read-back before Close.
-func (fsys *Writer) Chtimes(name string, atime time.Time, mtime time.Time) error {
+func (fsys *Writer) Chtimes(name string, atime, mtime time.Time) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
 	}
+
 	e, err := fsys.lookup(name)
 	if err != nil {
 		return err
 	}
+
 	e.atime = uint64(atime.Unix())
 	e.atimeNs = uint32(atime.Nanosecond())
 	e.mtime = uint64(mtime.Unix())
 	e.mtimeNs = uint32(mtime.Nanosecond())
+
 	return nil
 }
 
@@ -506,17 +540,22 @@ func (fsys *Writer) Setxattr(name, attr, value string) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
 	}
+
 	if err := validateXattr(attr, value); err != nil {
 		return err
 	}
+
 	e, err := fsys.lookup(name)
 	if err != nil {
 		return err
 	}
+
 	if e.xattrs == nil {
 		e.xattrs = make(map[string]string)
 	}
+
 	e.xattrs[attr] = value
+
 	return nil
 }
 
@@ -525,12 +564,15 @@ func (fsys *Writer) SetNlink(name string, nlink uint32) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
 	}
+
 	e, err := fsys.lookup(name)
 	if err != nil {
 		return err
 	}
+
 	e.nlink = nlink
 	e.nlinkSet = true
+
 	return nil
 }
 
@@ -546,6 +588,7 @@ func (fsys *Writer) Remove(name string) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
 	}
+
 	name = cleanPath(name)
 	if name == "/" {
 		return &fs.PathError{Op: "remove", Path: name, Err: fs.ErrInvalid}
@@ -557,9 +600,11 @@ func (fsys *Writer) Remove(name string) error {
 	if !ok {
 		return &fs.PathError{Op: "remove", Path: name, Err: fs.ErrNotExist}
 	}
+
 	if err := fsys.checkNotOpen(e, "remove"); err != nil {
 		return err
 	}
+
 	if e.mode&disk.StatTypeMask == disk.StatTypeDir {
 		for _, c := range e.children {
 			if !c.removed {
@@ -567,6 +612,7 @@ func (fsys *Writer) Remove(name string) error {
 			}
 		}
 	}
+
 	fsys.unlinkEntry(e)
 
 	return nil
@@ -581,10 +627,12 @@ func (fsys *Writer) RemoveAll(name string) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
 	}
+
 	name = cleanPath(name)
 	if name == "/" {
 		return &fs.PathError{Op: "removeall", Path: name, Err: fs.ErrInvalid}
 	}
+
 	e, ok := fsys.byPath[name]
 	if !ok {
 		// Missing is fine, but only if every existing ancestor is a
@@ -601,9 +649,11 @@ func (fsys *Writer) RemoveAll(name string) error {
 
 		return nil
 	}
+
 	if fsys.openFile != nil && fsys.openFile.entry.inSubtreeOf(e) {
 		return fsys.checkNotOpen(fsys.openFile.entry, "remove")
 	}
+
 	fsys.remove(name)
 
 	return nil
@@ -640,21 +690,26 @@ func (fsys *Writer) addAlias(p string, target *fsEntry) error {
 	if target.linkTo != nil {
 		target = target.linkTo
 	}
+
 	if existing, ok := fsys.byPath[p]; ok {
 		if existing == target {
 			return nil
 		}
+
 		if existing.mode&disk.StatTypeMask == disk.StatTypeDir {
 			return fmt.Errorf("mkfs: %s: cannot replace a directory with a hardlink: %w", p, ErrIsDirectory)
 		}
+
 		fsys.unlinkEntry(existing)
 	}
+
 	e := &fsEntry{
 		path:   p,
 		mode:   target.mode,
 		linkTo: target,
 	}
 	fsys.addChild(e)
+
 	target.extraLinks++
 
 	return nil
@@ -674,12 +729,14 @@ func (fsys *Writer) placeEntry(fe *fsEntry) *fsEntry {
 
 		return fe
 	}
+
 	if existing.linkTo != nil || existing.extraLinks > 0 {
 		fsys.unlinkEntry(existing)
 		fsys.addChild(fe)
 
 		return fe
 	}
+
 	savedParent := existing.parent
 	savedChildren := existing.children
 	*existing = *fe
@@ -719,6 +776,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 	fsys.copyMetadataOnly = false
 	fsys.copyMerge = false
 	fsys.copyDeviceID = 0
+
 	fsys.copyLinks = make(map[hardlinkKey]*fsEntry)
 	for _, opt := range opts {
 		opt(fsys)
@@ -732,10 +790,12 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 		if err := fsys.setBlockSize(int(srcImg.blockSize())); err != nil {
 			return err
 		}
+
 		if !fsys.hasBuildTime {
 			fsys.buildTime = srcImg.buildTime()
 			fsys.hasBuildTime = true
 		}
+
 		if fsys.copyMetadataOnly {
 			devBlocks := srcImg.deviceBlocks()
 			// A device id is 16 bits on disk, so a table that would not fit
@@ -744,29 +804,36 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 			if err := fsys.checkDeviceCount(len(devBlocks)); err != nil {
 				return err
 			}
+
 			fsys.devices = append(fsys.devices, devBlocks...)
 			fsys.copyDeviceID = uint16(len(fsys.devices) - len(devBlocks) + 1)
+
 			return fsys.copyFromImage(srcImg)
 		}
 	}
+
 	if bs, ok := src.(blockSizer); ok {
 		if err := fsys.setBlockSize(int(bs.BlockSize())); err != nil {
 			return err
 		}
 	}
+
 	if fsys.copyMetadataOnly {
 		if db, ok := src.(deviceBlocker); ok {
 			if err := fsys.checkDeviceCount(1); err != nil {
 				return err
 			}
+
 			fsys.devices = append(fsys.devices, db.DeviceBlocks())
 			fsys.copyDeviceID = uint16(len(fsys.devices))
 		}
 	}
+
 	if bt, ok := src.(buildTimer); ok && !fsys.hasBuildTime {
 		fsys.buildTime = bt.BuildTime()
 		fsys.hasBuildTime = true
 	}
+
 	return fs.WalkDir(src, ".", func(fpath string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -795,12 +862,14 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 					target := path.Join(path.Dir(p), base[len(whiteoutPrefix):])
 					fsys.remove(target)
 				}
+
 				return nil
 			}
 		}
 
 		// Extract extended metadata from Sys().
 		var be *builder.Entry
+
 		switch sys := info.Sys().(type) {
 		case *builder.Entry:
 			be = sys
@@ -840,6 +909,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 							if err != nil {
 								return fmt.Errorf("chunksFromRanges %s: %w", p, err)
 							}
+
 							be.Chunks = chunks
 							// Contiguous: a single non-hole range whose total-size
 							// invariant is satisfied (guaranteed by chunksFromRanges)
@@ -848,6 +918,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 						}
 					}
 				}
+
 				return fsys.add(p, &entryFileInfo{info: info, sys: be})
 			}
 			// For EROFS sources, use direct SectionReader (bypasses
@@ -860,23 +931,29 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 							if be == nil {
 								be = &builder.Entry{}
 							}
+
 							be.Data = dr
+
 							return fsys.add(p, &entryFileInfo{info: info, sys: be})
 						}
 					}
 				}
 			}
+
 			f, err := src.Open(fpath)
 			if err != nil {
 				return fmt.Errorf("open %s: %w", fpath, err)
 			}
+
 			if be == nil {
 				be = entryFromSys(info)
 				if be == nil {
 					be = &builder.Entry{}
 				}
 			}
+
 			be.Data = f.(io.Reader)
+
 			return fsys.add(p, &entryFileInfo{info: info, sys: be})
 		}
 
@@ -887,13 +964,16 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 				if err != nil {
 					return fmt.Errorf("readlink %s: %w", fpath, err)
 				}
+
 				if be == nil {
 					be = entryFromSys(info)
 					if be == nil {
 						be = &builder.Entry{}
 					}
 				}
+
 				be.LinkTarget = target
+
 				return fsys.add(p, &entryFileInfo{info: info, sys: be})
 			}
 		}
@@ -906,9 +986,11 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 					be = &builder.Entry{Nlink: 2}
 				}
 			}
+
 			if be.Nlink < 2 {
 				be.Nlink = 2
 			}
+
 			return fsys.add(p, &entryFileInfo{info: info, sys: be})
 		}
 
@@ -918,6 +1000,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 		if be != nil {
 			return fsys.add(p, &entryFileInfo{info: info, sys: be})
 		}
+
 		return fsys.add(p, info)
 	})
 }
@@ -929,6 +1012,7 @@ func (fsys *Writer) Close() error {
 	if fsys.wErr != nil {
 		return fsys.wErr
 	}
+
 	if fsys.closed {
 		return fmt.Errorf("mkfs: FS already closed")
 	}
@@ -937,6 +1021,7 @@ func (fsys *Writer) Close() error {
 	if err := fsys.checkNoOpenFile("close the image"); err != nil {
 		return err
 	}
+
 	fsys.closed = true
 
 	if fsys.spool != nil {
@@ -989,13 +1074,16 @@ func (fsys *Writer) Close() error {
 // way as other Writer methods (leading slash, no trailing slash).
 func (fsys *Writer) Stat(name string) (fs.FileInfo, error) {
 	name = cleanPath(name)
+
 	e, ok := fsys.byPath[name]
 	if !ok {
 		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
 	}
+
 	if e.linkTo != nil {
 		e = e.linkTo // hardlink: stat the shared inode
 	}
+
 	return &writerFileInfo{entry: e}, nil
 }
 
@@ -1004,10 +1092,12 @@ func (fsys *Writer) Stat(name string) (fs.FileInfo, error) {
 // For directories, the returned file implements fs.ReadDirFile.
 func (fsys *Writer) Open(name string) (fs.File, error) {
 	name = cleanPath(name)
+
 	e, ok := fsys.byPath[name]
 	if !ok {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
 	}
+
 	if e.linkTo != nil {
 		e = e.linkTo // hardlink: open the shared inode's data
 	}
@@ -1021,12 +1111,14 @@ func (fsys *Writer) Open(name string) (fs.File, error) {
 		if !e.fileClosed {
 			return nil, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("file not yet closed for writing")}
 		}
+
 		var sr *io.SectionReader
 		if fsys.dataFile != nil {
 			sr = io.NewSectionReader(fsys.dataFile, e.dataStartOff, int64(e.size))
 		} else if fsys.spool != nil && e.size > 0 {
 			sr = io.NewSectionReader(fsys.spool, e.dataStartOff, int64(e.size))
 		}
+
 		return &readFile{entry: e, reader: sr}, nil
 
 	default:
@@ -1047,12 +1139,14 @@ func (f *File) Write(p []byte) (int, error) {
 		n, err := f.fs.dataFile.Write(p)
 		f.written += int64(n)
 		f.fs.dataOff += int64(n)
+
 		return n, err
 	}
 
 	n, err := f.fs.spool.Write(p)
 	f.written += int64(n)
 	f.fs.spoolOff += int64(n)
+
 	return n, err
 }
 
@@ -1060,20 +1154,25 @@ func (f *File) Write(p []byte) (int, error) {
 // a shared buffer instead of allocating a new 32KB buffer per call.
 func (f *File) ReadFrom(r io.Reader) (int64, error) {
 	buf := f.fs.copyBuf()
+
 	var written int64
+
 	for {
 		nr, er := r.Read(buf)
 		if nr > 0 {
 			nw, ew := f.Write(buf[:nr])
+
 			written += int64(nw)
 			if ew != nil {
 				return written, ew
 			}
 		}
+
 		if er != nil {
 			if errors.Is(er, io.EOF) {
 				return written, nil
 			}
+
 			return written, er
 		}
 	}
@@ -1085,8 +1184,10 @@ func (f *File) Close() error {
 	if f.closed {
 		return fmt.Errorf("mkfs: file already closed")
 	}
+
 	f.closed = true
 	f.entry.fileClosed = true
+
 	f.entry.size = uint64(f.written)
 	if f.fs.openFile == f {
 		f.fs.openFile = nil
@@ -1095,6 +1196,7 @@ func (f *File) Close() error {
 	if f.fs.dataFile != nil {
 		return f.closeDataFile()
 	}
+
 	return nil
 }
 
@@ -1102,6 +1204,7 @@ func (f *File) Close() error {
 func (f *File) Chmod(mode fs.FileMode) error {
 	perm := goModeToUnixMode(mode) & 0o7777
 	f.entry.mode = (f.entry.mode & disk.StatTypeMask) | perm
+
 	return nil
 }
 
@@ -1112,8 +1215,10 @@ func (f *File) Chown(uid, gid int) error {
 	if err != nil {
 		return fmt.Errorf("mkfs: %s: %w", f.entry.path, err)
 	}
+
 	f.entry.uid = u
 	f.entry.gid = g
+
 	return nil
 }
 
@@ -1265,16 +1370,18 @@ func cleanPath(p string) string {
 	if p == "" || p == "." || p == "/" {
 		return "/"
 	}
+
 	p = path.Clean(p)
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p
 	}
+
 	return p
 }
 
 // fixParentNids sets the parent NID in the ".." dirent for all directories.
 // This must be called after planLayout has assigned NIDs.
-func fixParentNids(e *erofsEntry, parent *erofsEntry) {
+func fixParentNids(e, parent *erofsEntry) {
 	e.parentNid = parent.nid
 	for _, c := range e.children {
 		if c.mode&disk.StatTypeMask == disk.StatTypeDir {
@@ -1307,6 +1414,7 @@ func (fi *writerFileInfo) Mode() fs.FileMode { return disk.EroFSModeToGoFileMode
 func (fi *writerFileInfo) ModTime() time.Time {
 	return time.Unix(int64(fi.entry.mtime), int64(fi.entry.mtimeNs))
 }
+
 func (fi *writerFileInfo) IsDir() bool { return fi.entry.mode&disk.StatTypeMask == disk.StatTypeDir }
 func (fi *writerFileInfo) Sys() any    { return nil }
 
@@ -1325,9 +1433,11 @@ func (f *readFile) Read(p []byte) (int, error) {
 	if f.closed {
 		return 0, fmt.Errorf("mkfs: read from closed file")
 	}
+
 	if f.reader == nil {
 		return 0, io.EOF
 	}
+
 	return f.reader.Read(p)
 }
 
@@ -1335,7 +1445,9 @@ func (f *readFile) Close() error {
 	if f.closed {
 		return fmt.Errorf("mkfs: file already closed")
 	}
+
 	f.closed = true
+
 	return nil
 }
 
@@ -1360,7 +1472,9 @@ func (d *readDir) Close() error {
 	if d.closed {
 		return fmt.Errorf("mkfs: dir already closed")
 	}
+
 	d.closed = true
+
 	return nil
 }
 
@@ -1368,6 +1482,7 @@ func (d *readDir) ReadDir(n int) ([]fs.DirEntry, error) {
 	if d.closed {
 		return nil, fmt.Errorf("mkfs: read from closed dir")
 	}
+
 	if d.children == nil {
 		d.children = d.collectChildren()
 	}
@@ -1375,6 +1490,7 @@ func (d *readDir) ReadDir(n int) ([]fs.DirEntry, error) {
 	if n <= 0 {
 		entries := d.children[d.offset:]
 		d.offset = len(d.children)
+
 		return entries, nil
 	}
 
@@ -1382,14 +1498,18 @@ func (d *readDir) ReadDir(n int) ([]fs.DirEntry, error) {
 	if len(remaining) == 0 {
 		return nil, io.EOF
 	}
+
 	if n > len(remaining) {
 		n = len(remaining)
 	}
+
 	entries := remaining[:n]
+
 	d.offset += n
 	if d.offset >= len(d.children) {
 		return entries, io.EOF
 	}
+
 	return entries, nil
 }
 
@@ -1399,11 +1519,14 @@ func (d *readDir) collectChildren() []fs.DirEntry {
 		if e.removed {
 			continue
 		}
+
 		children = append(children, &dirEntry{entry: e})
 	}
+
 	slices.SortFunc(children, func(a, b fs.DirEntry) int {
 		return cmp.Compare(a.Name(), b.Name())
 	})
+
 	return children
 }
 
@@ -1412,8 +1535,9 @@ type dirEntry struct {
 	entry *fsEntry
 }
 
-func (de *dirEntry) Name() string               { return path.Base(de.entry.path) }
-func (de *dirEntry) IsDir() bool                { return de.entry.mode&disk.StatTypeMask == disk.StatTypeDir }
+func (de *dirEntry) Name() string { return path.Base(de.entry.path) }
+func (de *dirEntry) IsDir() bool  { return de.entry.mode&disk.StatTypeMask == disk.StatTypeDir }
+
 func (de *dirEntry) Type() fs.FileMode          { return disk.EroFSModeToGoFileMode(de.entry.mode).Type() }
 func (de *dirEntry) Info() (fs.FileInfo, error) { return &writerFileInfo{entry: de.entry}, nil }
 
@@ -1425,6 +1549,7 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 	if err := checkPathLen(p); err != nil {
 		return err
 	}
+
 	mode := goModeToUnixMode(info.Mode())
 	// A source fs.FS is not trusted to report a sane size: a negative one
 	// converts to a near-2^64 e.size that the layout planner then sees as a
@@ -1432,6 +1557,7 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 	if info.Size() < 0 {
 		return fmt.Errorf("mkfs: %s: negative size %d", p, info.Size())
 	}
+
 	size := uint64(info.Size())
 	typ := mode & disk.StatTypeMask
 
@@ -1456,12 +1582,15 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 		root.uid = be.UID
 		root.gid = be.GID
 		root.mtime = be.Mtime
+
 		root.mtimeNs = be.MtimeNs
 		if be.Nlink > 0 {
 			root.nlink = be.Nlink
 			root.nlinkSet = true
 		}
+
 		root.xattrs = be.Xattrs
+
 		return nil
 	}
 
@@ -1479,6 +1608,7 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 			if c, ok := be.Data.(io.Closer); ok {
 				_ = c.Close()
 			}
+
 			return fsys.addAlias(p, prior)
 		}
 	}
@@ -1506,6 +1636,7 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 		fe.nlink = be.Nlink
 		fe.nlinkSet = true
 	}
+
 	fe = fsys.placeEntry(fe)
 	if typ != disk.StatTypeDir && be.Ino != 0 && be.Nlink > 1 && fsys.copyLinks != nil {
 		fsys.copyLinks[hardlinkKey{be.Dev, be.Ino}] = fe
@@ -1526,17 +1657,21 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 		// Data is stored locally; clear any source chunk mappings.
 		fe.chunks = nil
 		fe.contiguous = false
+
 		if fsys.dataFile != nil {
 			// Data file mode: copy through File for block-aligned padding and chunk recording.
 			if err := fsys.alignDataOff(); err != nil {
 				return err
 			}
+
 			f := &File{fs: fsys, entry: fe}
 			f.dataStartOff = fsys.dataOff
 			fe.dataStartOff = fsys.dataOff
+
 			if _, err := f.ReadFrom(be.Data); err != nil {
 				return err
 			}
+
 			if err := f.Close(); err != nil {
 				return err
 			}
@@ -1557,12 +1692,15 @@ func (fsys *Writer) checkPath(name string) error {
 	if fsys.closed {
 		return fmt.Errorf("mkfs: FS is closed")
 	}
+
 	if err := checkPathLen(name); err != nil {
 		return err
 	}
+
 	if _, ok := fsys.byPath[name]; ok {
 		return fmt.Errorf("mkfs: duplicate path %q", name)
 	}
+
 	return nil
 }
 
@@ -1576,8 +1714,12 @@ func (fsys *Writer) checkPath(name string) error {
 // instead of letting it run until memory is gone.
 func checkPathLen(name string) error {
 	if len(name) > maxPathLen {
-		return fmt.Errorf("mkfs: path is %d bytes, over the %d byte limit (a source whose directories form a cycle looks like this): %w",
-			len(name), maxPathLen, ErrInvalid)
+		return fmt.Errorf(
+			"mkfs: path is %d bytes, over the %d byte limit (a source whose directories form a cycle looks like this): %w",
+			len(name),
+			maxPathLen,
+			ErrInvalid,
+		)
 	}
 
 	return nil
@@ -1596,17 +1738,20 @@ func (fsys *Writer) ensureParent(name string) error {
 	}
 	// Walk up to find existing ancestors.
 	var missing []string
+
 	for d := dir; d != "/"; d = path.Dir(d) {
 		if e, ok := fsys.byPath[d]; ok {
 			if e.linkTo != nil {
 				e = e.linkTo
 			}
+
 			if e.mode&disk.StatTypeMask != disk.StatTypeDir {
 				return &fs.PathError{Op: "mkdir", Path: d, Err: ErrNotDirectory}
 			}
 
 			break
 		}
+
 		missing = append(missing, d)
 	}
 	// Create in top-down order.
@@ -1628,6 +1773,7 @@ func (fsys *Writer) addChild(e *fsEntry) {
 	if parent == nil {
 		parent = fsys.root
 	}
+
 	e.parent = parent
 	parent.children = append(parent.children, e)
 	fsys.byPath[e.path] = e
@@ -1637,11 +1783,14 @@ func (fsys *Writer) addChild(e *fsEntry) {
 // Used by Merge to process whiteout deletions.
 func (fsys *Writer) remove(p string) {
 	p = cleanPath(p)
+
 	e, ok := fsys.byPath[p]
 	if !ok {
 		return
 	}
+
 	fsys.unlinkEntry(e)
+
 	if e.mode&disk.StatTypeMask == disk.StatTypeDir {
 		fsys.removeSubtree(e)
 	}
@@ -1651,10 +1800,12 @@ func (fsys *Writer) remove(p string) {
 // The directory itself is not removed.
 func (fsys *Writer) removeChildren(dir string) {
 	dir = cleanPath(dir)
+
 	e, ok := fsys.byPath[dir]
 	if !ok {
 		return
 	}
+
 	fsys.removeSubtree(e)
 }
 
@@ -1663,6 +1814,7 @@ func (fsys *Writer) removeSubtree(e *fsEntry) {
 	for _, c := range e.children {
 		if !c.removed {
 			fsys.unlinkEntry(c)
+
 			if c.mode&disk.StatTypeMask == disk.StatTypeDir {
 				fsys.removeSubtree(c)
 			}
@@ -1682,11 +1834,13 @@ func (fsys *Writer) removeSubtree(e *fsEntry) {
 func (fsys *Writer) unlinkEntry(e *fsEntry) {
 	e.removed = true
 	delete(fsys.byPath, e.path)
+
 	if e.linkTo != nil {
 		e.linkTo.extraLinks--
 
 		return
 	}
+
 	if e.extraLinks > 0 {
 		fsys.promoteAlias(e)
 	}
@@ -1698,27 +1852,34 @@ func (fsys *Writer) unlinkEntry(e *fsEntry) {
 // The lowest path wins so the outcome — and thus the image — is
 // deterministic regardless of link creation order.
 func (fsys *Writer) promoteAlias(target *fsEntry) {
-	var aliases []*fsEntry
-	var walk func(*fsEntry)
+	var (
+		aliases []*fsEntry
+		walk    func(*fsEntry)
+	)
+
 	walk = func(d *fsEntry) {
 		for _, c := range d.children {
 			if c.removed {
 				continue
 			}
+
 			if c.linkTo == target {
 				aliases = append(aliases, c)
 			}
+
 			if c.mode&disk.StatTypeMask == disk.StatTypeDir {
 				walk(c)
 			}
 		}
 	}
 	walk(fsys.root)
+
 	if len(aliases) == 0 {
 		target.extraLinks = 0
 
 		return
 	}
+
 	slices.SortFunc(aliases, func(a, b *fsEntry) int {
 		return cmp.Compare(a.path, b.path)
 	})
@@ -1731,6 +1892,7 @@ func (fsys *Writer) promoteAlias(target *fsEntry) {
 	heir.path, heir.parent = path, parent
 	heir.linkTo = nil
 	heir.removed = false
+
 	heir.extraLinks = uint32(len(aliases) - 1)
 	for _, a := range aliases[1:] {
 		a.linkTo = heir
@@ -1766,6 +1928,7 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 
 			return &er
 		}
+
 		arena = append(arena, fsys.fsToErofs(e))
 
 		return &arena[len(arena)-1]
@@ -1793,11 +1956,13 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 
 		// Count child directories for nlink.
 		var childDirs uint32
+
 		for _, c := range cur.fs.children {
 			if !c.removed && c.mode&disk.StatTypeMask == disk.StatTypeDir {
 				childDirs++
 			}
 		}
+
 		if !cur.fs.nlinkSet && cur.fs.mode&disk.StatTypeMask == disk.StatTypeDir {
 			cur.er.nlink = 2 + childDirs
 		}
@@ -1806,10 +1971,12 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 		if len(cur.fs.children) > 0 {
 			cur.er.children = make([]*erofsEntry, 0, len(cur.fs.children))
 		}
+
 		for _, c := range cur.fs.children {
 			if c.removed {
 				continue
 			}
+
 			if c.linkTo != nil {
 				// Dirent-only alias: name here, inode on the target
 				// (nid/file type copied once the target has one).
@@ -1820,16 +1987,21 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 				}
 				cur.er.children = append(cur.er.children, ent)
 				aliases = append(aliases, aliasFixup{target: c.linkTo, er: ent})
+
 				continue
 			}
+
 			ent := alloc(c)
 			cur.er.children = append(cur.er.children, ent)
+
 			if c.extraLinks > 0 {
 				if converted == nil {
 					converted = map[*fsEntry]*erofsEntry{}
 				}
+
 				converted[c] = ent
 			}
+
 			if c.mode&disk.StatTypeMask == disk.StatTypeDir {
 				queue = append(queue, pair{c, ent})
 			}
@@ -1850,6 +2022,7 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 
 			continue
 		}
+
 		a.er.aliasOf = target
 	}
 
@@ -1859,6 +2032,7 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 // fsToErofs converts a single fsEntry to an erofsEntry, resolving data readers.
 func (fsys *Writer) fsToErofs(e *fsEntry) erofsEntry {
 	var nlink uint32
+
 	switch {
 	case e.nlinkSet:
 		nlink = e.nlink
@@ -1869,6 +2043,7 @@ func (fsys *Writer) fsToErofs(e *fsEntry) erofsEntry {
 	}
 
 	var data io.Reader
+
 	if fsys.dataFile == nil && len(e.chunks) == 0 && !e.metadataOnly &&
 		e.mode&disk.StatTypeMask == disk.StatTypeReg && e.size > 0 {
 		if e.directData != nil {
@@ -1905,16 +2080,20 @@ func (fsys *Writer) setBlockSize(n int) error {
 	if n < minBlockSize || n > maxBlockSize {
 		return fmt.Errorf("mkfs: invalid block size %d: must be between %d and %d", n, minBlockSize, maxBlockSize)
 	}
+
 	if bits.OnesCount(uint(n)) != 1 {
 		return fmt.Errorf("mkfs: invalid block size %d: must be a power of two", n)
 	}
+
 	if fsys.blockSize == 0 {
 		fsys.blockSize = n
 		return nil
 	}
+
 	if fsys.blockSize != n {
 		return fmt.Errorf("mkfs: block size conflict: already %d, requested %d", fsys.blockSize, n)
 	}
+
 	return nil
 }
 
@@ -1923,6 +2102,7 @@ func (fsys *Writer) resolveBlockSize() int {
 	if fsys.blockSize == 0 {
 		fsys.blockSize = defaultBlockSize
 	}
+
 	return fsys.blockSize
 }
 
@@ -1931,6 +2111,7 @@ func (fsys *Writer) copyBuf() []byte {
 	if fsys.cpBuf == nil {
 		fsys.cpBuf = make([]byte, 32*1024)
 	}
+
 	return fsys.cpBuf
 }
 
@@ -1939,6 +2120,7 @@ func (fsys *Writer) zeroPad() []byte {
 	if fsys.padBuf == nil {
 		fsys.padBuf = make([]byte, fsys.resolveBlockSize())
 	}
+
 	return fsys.padBuf
 }
 
@@ -1975,15 +2157,20 @@ func (fsys *Writer) remapChunkDevices(p string, chunks []builder.Chunk) error {
 	if fsys.copyDeviceID == 0 {
 		return nil
 	}
+
 	offset := uint64(fsys.copyDeviceID - 1)
+
 	for i := range chunks {
 		if chunks[i].PhysicalBlock == builder.NullPhysicalBlock {
 			continue
 		}
+
 		if chunks[i].DeviceID == 0 {
 			return fmt.Errorf(
 				"mkfs: %s: chunk references the source's own device (DeviceID 0), which is not registered in the destination: %w",
-				p, ErrInvalid)
+				p,
+				ErrInvalid,
+			)
 		}
 		// Device IDs are 1-based indexes into the device table, so the
 		// remapped value must still name a device the destination declares.
@@ -1992,6 +2179,7 @@ func (fsys *Writer) remapChunkDevices(p string, chunks []builder.Chunk) error {
 			return fmt.Errorf("mkfs: %s: chunk device %d maps to device %d, past the %d declared devices: %w",
 				p, chunks[i].DeviceID, id, len(fsys.devices), ErrInvalid)
 		}
+
 		chunks[i].DeviceID = uint16(id)
 	}
 
@@ -2024,12 +2212,15 @@ func (fsys *Writer) chunksFromRanges(ranges []DataRange, fileSize int64) ([]buil
 	for _, r := range ranges {
 		total += r.Size
 	}
+
 	if total != fileSize {
 		return nil, fmt.Errorf("DataRange total size %d does not match file size %d", total, fileSize)
 	}
 
 	last := len(ranges) - 1
+
 	var chunks []builder.Chunk
+
 	for i, r := range ranges {
 		if r.Size <= 0 {
 			return nil, fmt.Errorf("DataRange[%d]: non-positive Size %d", i, r.Size)
@@ -2037,8 +2228,14 @@ func (fsys *Writer) chunksFromRanges(ranges []DataRange, fileSize int64) ([]buil
 		// Non-final entries must be block-aligned in size; the final entry may
 		// end mid-block to match the file tail.
 		if i < last && uint64(r.Size)%blockSize != 0 {
-			return nil, fmt.Errorf("DataRange[%d]: non-final Size %d is not block-aligned (block size %d)", i, r.Size, blockSize)
+			return nil, fmt.Errorf(
+				"DataRange[%d]: non-final Size %d is not block-aligned (block size %d)",
+				i,
+				r.Size,
+				blockSize,
+			)
 		}
+
 		if r.Offset == holeOffset {
 			// Hole: emit NullPhysicalBlock chunks covering the hole span.
 			totalBlocks := (uint64(r.Size) + blockSize - 1) / blockSize
@@ -2050,22 +2247,36 @@ func (fsys *Writer) chunksFromRanges(ranges []DataRange, fileSize int64) ([]buil
 				})
 				totalBlocks -= count
 			}
+
 			continue
 		}
+
 		if r.Offset < 0 {
 			return nil, fmt.Errorf("DataRange[%d]: negative Offset %d", i, r.Offset)
 		}
+
 		if uint64(r.Offset)%blockSize != 0 {
-			return nil, fmt.Errorf("DataRange[%d]: Offset %d is not block-aligned (block size %d)", i, r.Offset, blockSize)
+			return nil, fmt.Errorf(
+				"DataRange[%d]: Offset %d is not block-aligned (block size %d)",
+				i,
+				r.Offset,
+				blockSize,
+			)
 		}
 		// Non-EROFS sources register exactly one device via DeviceBlocks();
 		// only Device=0 is valid. Device=0xFFFF would also wrap deviceID to 0
 		// (the primary image), producing an invalid mapping.
 		if r.Device != 0 {
-			return nil, fmt.Errorf("DataRange[%d]: Device %d out of range (source declared one device, only Device=0 is valid)", i, r.Device)
+			return nil, fmt.Errorf(
+				"DataRange[%d]: Device %d out of range (source declared one device, only Device=0 is valid)",
+				i,
+				r.Device,
+			)
 		}
+
 		deviceID := r.Device + 1
 		startBlock := uint64(r.Offset) / blockSize
+
 		totalBlocks := (uint64(r.Size) + blockSize - 1) / blockSize
 		for totalBlocks > 0 {
 			count := min(totalBlocks, 65535)
@@ -2078,6 +2289,7 @@ func (fsys *Writer) chunksFromRanges(ranges []DataRange, fileSize int64) ([]buil
 			totalBlocks -= count
 		}
 	}
+
 	return chunks, nil
 }
 
@@ -2086,17 +2298,21 @@ func (fsys *Writer) ensureSpool() error {
 	if fsys.spool != nil {
 		return nil
 	}
+
 	tmp, err := os.CreateTemp(fsys.tempDir, "erofs-mkfs-*")
 	if err != nil {
 		return fmt.Errorf("mkfs: create spool: %w", err)
 	}
+
 	_ = os.Remove(tmp.Name()) // unlink immediately; fd keeps data accessible
 	fsys.spool = tmp
+
 	return nil
 }
 
 func (fsys *Writer) lookup(name string) (*fsEntry, error) {
 	name = cleanPath(name)
+
 	e, ok := fsys.byPath[name]
 	if !ok {
 		return nil, fmt.Errorf("mkfs: path not found %q", name)
@@ -2106,6 +2322,7 @@ func (fsys *Writer) lookup(name string) (*fsEntry, error) {
 	if e.linkTo != nil {
 		e = e.linkTo
 	}
+
 	return e, nil
 }
 
@@ -2121,13 +2338,17 @@ func (fsys *Writer) alignDataOff() error {
 	if fsys.dataFile == nil {
 		return nil
 	}
+
 	bs := int64(fsys.resolveBlockSize())
+
 	rem := fsys.dataOff % bs
 	if rem == 0 {
 		return nil
 	}
+
 	n, err := fsys.dataFile.Write(fsys.zeroPad()[:bs-rem])
 	fsys.dataOff += int64(n)
+
 	if err != nil {
 		return fmt.Errorf("mkfs: pad data file: %w", err)
 	}
@@ -2143,11 +2364,13 @@ func (f *File) closeDataFile() error {
 
 	// Pad to block boundary.
 	bs := int64(f.fs.resolveBlockSize())
+
 	rem := f.fs.dataOff % bs
 	if rem != 0 {
 		padSize := bs - rem
 		n, err := f.fs.dataFile.Write(f.fs.zeroPad()[:padSize])
 		f.fs.dataOff += int64(n)
+
 		if err != nil {
 			return fmt.Errorf("mkfs: pad data file: %w", err)
 		}

@@ -45,20 +45,25 @@ func initFuzzFlat(t testing.TB) fuzzImage {
 		tc := erofstest.TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
 		// Flat: all files in root directory, no subdirectories.
-		var entries []erofstest.WriterToTar
-		var files []string
+		var (
+			entries []erofstest.WriterToTar
+			files   []string
+		)
+
 		for i := range 50 {
 			name := fmt.Sprintf("file%03d.txt", i)
 			content := bytes.Repeat([]byte{byte(i)}, (i+1)*100)
-			entries = append(entries, tc.File("/"+name, content, 0644))
+			entries = append(entries, tc.File("/"+name, content, 0o644))
 			files = append(files, name)
 		}
-		entries = append(entries, tc.File("/empty", []byte{}, 0644))
+
+		entries = append(entries, tc.File("/empty", []byte{}, 0o644))
 		files = append(files, "empty")
 
 		fuzzFlat = buildFuzzImage(t, entries, files, []string{"."})
 	})
 	skipIfFuzzImageUnavailable(t, fuzzFlat)
+
 	return fuzzFlat
 }
 
@@ -67,20 +72,22 @@ func initFuzzNested(t testing.TB) fuzzImage {
 		tc := erofstest.TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
 		// Nested: 2-level directory structure with files at each level.
-		var entries []erofstest.WriterToTar
-		var files, dirs []string
+		var (
+			entries     []erofstest.WriterToTar
+			files, dirs []string
+		)
 
-		entries = append(entries, tc.File("/root.txt", []byte("root"), 0644))
+		entries = append(entries, tc.File("/root.txt", []byte("root"), 0o644))
 		files = append(files, "root.txt")
 
 		for i := range 10 {
 			dirName := fmt.Sprintf("dir%d", i)
-			entries = append(entries, tc.Dir("/"+dirName, 0755))
+			entries = append(entries, tc.Dir("/"+dirName, 0o755))
 			dirs = append(dirs, dirName)
 
 			for j := range 5 {
 				name := fmt.Sprintf("%s/f%d.txt", dirName, j)
-				entries = append(entries, tc.File("/"+name, fmt.Appendf(nil, "content-%d-%d", i, j), 0644))
+				entries = append(entries, tc.File("/"+name, fmt.Appendf(nil, "content-%d-%d", i, j), 0o644))
 				files = append(files, name)
 			}
 		}
@@ -88,6 +95,7 @@ func initFuzzNested(t testing.TB) fuzzImage {
 		fuzzNested = buildFuzzImage(t, entries, files, append([]string{"."}, dirs...))
 	})
 	skipIfFuzzImageUnavailable(t, fuzzNested)
+
 	return fuzzNested
 }
 
@@ -96,10 +104,13 @@ func initFuzzDeep(t testing.TB) fuzzImage {
 		tc := erofstest.TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
 		// Deep: 10-level nested directory chain with files at each level.
-		var entries []erofstest.WriterToTar
-		var files, dirs []string
+		var (
+			entries     []erofstest.WriterToTar
+			files, dirs []string
+		)
 
 		path := ""
+
 		for depth := range 10 {
 			seg := fmt.Sprintf("d%d", depth)
 			if path == "" {
@@ -107,13 +118,14 @@ func initFuzzDeep(t testing.TB) fuzzImage {
 			} else {
 				path = path + "/" + seg
 			}
-			entries = append(entries, tc.Dir("/"+path, 0755))
+
+			entries = append(entries, tc.Dir("/"+path, 0o755))
 			dirs = append(dirs, path)
 
 			for i := range 3 {
 				fpath := fmt.Sprintf("%s/file%d.dat", path, i)
 				content := bytes.Repeat([]byte{byte(depth*3 + i)}, 512)
-				entries = append(entries, tc.File("/"+fpath, content, 0644))
+				entries = append(entries, tc.File("/"+fpath, content, 0o644))
 				files = append(files, fpath)
 			}
 		}
@@ -125,6 +137,7 @@ func initFuzzDeep(t testing.TB) fuzzImage {
 		fuzzDeep = buildFuzzImage(t, entries, files, append([]string{"."}, dirs...))
 	})
 	skipIfFuzzImageUnavailable(t, fuzzDeep)
+
 	return fuzzDeep
 }
 
@@ -133,22 +146,25 @@ func initFuzzWide(t testing.TB) fuzzImage {
 		tc := erofstest.TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
 		// Wide: many directories at the same level (stress directory lookup).
-		var entries []erofstest.WriterToTar
-		var files, dirs []string
+		var (
+			entries     []erofstest.WriterToTar
+			files, dirs []string
+		)
 
 		for i := range 200 {
 			dirName := fmt.Sprintf("pkg%03d", i)
-			entries = append(entries, tc.Dir("/"+dirName, 0755))
+			entries = append(entries, tc.Dir("/"+dirName, 0o755))
 			dirs = append(dirs, dirName)
 
 			fname := fmt.Sprintf("%s/main.go", dirName)
-			entries = append(entries, tc.File("/"+fname, fmt.Appendf(nil, "package pkg%03d\n", i), 0644))
+			entries = append(entries, tc.File("/"+fname, fmt.Appendf(nil, "package pkg%03d\n", i), 0o644))
 			files = append(files, fname)
 		}
 
 		fuzzWide = buildFuzzImage(t, entries, files, append([]string{"."}, dirs...))
 	})
 	skipIfFuzzImageUnavailable(t, fuzzWide)
+
 	return fuzzWide
 }
 
@@ -160,6 +176,7 @@ func initFuzzWide(t testing.TB) fuzzImage {
 // remaining caller skips here instead.
 func skipIfFuzzImageUnavailable(t testing.TB, img fuzzImage) {
 	t.Helper()
+
 	if img.fsys == nil {
 		t.Skipf("fuzz image unavailable (mkfs.erofs missing or earlier init skipped)")
 	}
@@ -173,6 +190,7 @@ func buildFuzzImage(t testing.TB, entries []erofstest.WriterToTar, files, dirs [
 	}
 
 	wt := erofstest.TarAll(entries...)
+
 	tarStream := erofstest.TarFromWriterTo(wt)
 	defer func() { _ = tarStream.Close() }()
 
@@ -184,14 +202,17 @@ func buildFuzzImage(t testing.TB, entries []erofstest.WriterToTar, files, dirs [
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	path := filepath.Join(dir, "fuzz.erofs")
 	if err := erofstest.ConvertTarErofs(context.Background(), tarStream, path, "", nil); err != nil {
 		t.Fatal(err)
 	}
+
 	f, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	fsys, err := erofs.Open(f)
 	if err != nil {
 		t.Fatal(err)
@@ -234,9 +255,11 @@ func fuzzOpen(f *testing.F, img fuzzImage) {
 	for _, p := range img.files {
 		f.Add(p)
 	}
+
 	for _, d := range img.dirs {
 		f.Add(d)
 	}
+
 	for _, s := range pathSeeds() {
 		f.Add(s)
 	}
@@ -260,6 +283,7 @@ func fuzzOpen(f *testing.F, img fuzzImage) {
 			if !ok {
 				return
 			}
+
 			_, _ = rdf.ReadDir(-1)
 		} else {
 			// Read must not panic.
@@ -279,6 +303,7 @@ func fuzzReadFile(f *testing.F, img fuzzImage) {
 	for _, p := range img.files {
 		f.Add(p)
 	}
+
 	for _, s := range pathSeeds() {
 		f.Add(s)
 	}
@@ -300,9 +325,11 @@ func fuzzStat(f *testing.F, img fuzzImage) {
 	for _, p := range img.files {
 		f.Add(p)
 	}
+
 	for _, d := range img.dirs {
 		f.Add(d)
 	}
+
 	for _, s := range pathSeeds() {
 		f.Add(s)
 	}
@@ -329,6 +356,7 @@ func fuzzReadDir(f *testing.F, img fuzzImage) {
 	for _, d := range img.dirs {
 		f.Add(d)
 	}
+
 	for _, s := range pathSeeds() {
 		f.Add(s)
 	}
@@ -349,13 +377,16 @@ func fuzzReadDir(f *testing.F, img fuzzImage) {
 			if e.Name() == "" {
 				t.Fatal("ReadDir entry with empty name")
 			}
+
 			info, err := e.Info()
 			if err != nil {
 				t.Fatalf("entry %q Info failed: %v", e.Name(), err)
 			}
+
 			if info.Name() != e.Name() {
 				t.Fatalf("entry name %q != info name %q", e.Name(), info.Name())
 			}
+
 			if e.IsDir() != info.IsDir() {
 				t.Fatalf("entry %q IsDir mismatch", e.Name())
 			}
@@ -368,6 +399,7 @@ func fuzzWalk(f *testing.F, img fuzzImage) {
 	for _, d := range img.dirs {
 		f.Add(d)
 	}
+
 	for _, s := range pathSeeds() {
 		f.Add(s)
 	}
@@ -378,6 +410,7 @@ func fuzzWalk(f *testing.F, img fuzzImage) {
 			if err != nil {
 				return err
 			}
+
 			count++
 			if count > 10000 {
 				return fs.SkipAll
@@ -387,9 +420,11 @@ func fuzzWalk(f *testing.F, img fuzzImage) {
 			if infoErr != nil {
 				return nil
 			}
+
 			if info.Name() != d.Name() {
 				t.Errorf("walk %q: entry name %q != info name %q", path, d.Name(), info.Name())
 			}
+
 			return nil
 		})
 	})
@@ -498,6 +533,7 @@ func fuzzPartialReadDir(f *testing.F, img fuzzImage) {
 		if n < 1 {
 			n = 1
 		}
+
 		if n > 1000 {
 			n = 1000
 		}
@@ -519,17 +555,22 @@ func fuzzPartialReadDir(f *testing.F, img fuzzImage) {
 		}
 
 		var all []fs.DirEntry
+
 		sawEOF := false
+
 		for {
 			entries, err := rdf.ReadDir(n)
 			all = append(all, entries...)
+
 			if err == io.EOF {
 				sawEOF = true
 				break
 			}
+
 			if err != nil {
 				return
 			}
+
 			if len(all) > 10000 {
 				return
 			}
@@ -546,6 +587,7 @@ func fuzzPartialReadDir(f *testing.F, img fuzzImage) {
 		if len(extra) != 0 {
 			t.Fatalf("ReadDir after EOF returned %d entries", len(extra))
 		}
+
 		if err != io.EOF {
 			t.Fatalf("ReadDir after EOF returned err=%v, want io.EOF", err)
 		}
@@ -556,13 +598,16 @@ func fuzzPartialReadDir(f *testing.F, img fuzzImage) {
 			t.Fatal(err)
 		}
 		defer func() { _ = fullFile.Close() }()
+
 		fullEntries, err := fullFile.(fs.ReadDirFile).ReadDir(-1)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if len(all) != len(fullEntries) {
 			t.Fatalf("partial ReadDir got %d entries, full ReadDir got %d", len(all), len(fullEntries))
 		}
+
 		for i := range all {
 			if all[i].Name() != fullEntries[i].Name() {
 				t.Fatalf("entry %d: partial=%q full=%q", i, all[i].Name(), fullEntries[i].Name())
@@ -600,9 +645,11 @@ func fuzzReadAfterClose(f *testing.F, img fuzzImage) {
 	for _, p := range img.files {
 		f.Add(p)
 	}
+
 	for _, d := range img.dirs {
 		f.Add(d)
 	}
+
 	for _, s := range pathSeeds() {
 		f.Add(s)
 	}
@@ -612,10 +659,12 @@ func fuzzReadAfterClose(f *testing.F, img fuzzImage) {
 		if err != nil {
 			return
 		}
+
 		_ = file.Close()
 
 		// These must not panic; errors are expected.
 		_, _ = file.Stat()
+
 		_, _ = file.Read(make([]byte, 1))
 		if rdf, ok := file.(fs.ReadDirFile); ok {
 			_, _ = rdf.ReadDir(-1)
@@ -637,9 +686,11 @@ func fuzzOpenStatConsistency(f *testing.F, img fuzzImage) {
 	for _, p := range img.files {
 		f.Add(p)
 	}
+
 	for _, d := range img.dirs {
 		f.Add(d)
 	}
+
 	for _, s := range pathSeeds() {
 		f.Add(s)
 	}
@@ -654,6 +705,7 @@ func fuzzOpenStatConsistency(f *testing.F, img fuzzImage) {
 			if fsErr == nil {
 				t.Fatalf("Open(%q) failed but fs.Stat succeeded", path)
 			}
+
 			return
 		}
 		defer func() { _ = file.Close() }()
@@ -663,9 +715,11 @@ func fuzzOpenStatConsistency(f *testing.F, img fuzzImage) {
 		if fsErr != nil && fileErr == nil {
 			t.Fatalf("fs.Stat(%q) failed but file.Stat() succeeded", path)
 		}
+
 		if fsErr == nil && fileErr != nil {
 			t.Fatalf("fs.Stat(%q) succeeded but file.Stat() failed: %v", path, fileErr)
 		}
+
 		if fsErr != nil {
 			return
 		}
@@ -674,9 +728,11 @@ func fuzzOpenStatConsistency(f *testing.F, img fuzzImage) {
 		if fsStat.Size() != fileStat.Size() {
 			t.Fatalf("size mismatch for %q: fs.Stat=%d file.Stat=%d", path, fsStat.Size(), fileStat.Size())
 		}
+
 		if fsStat.Mode() != fileStat.Mode() {
 			t.Fatalf("mode mismatch for %q: fs.Stat=%v file.Stat=%v", path, fsStat.Mode(), fileStat.Mode())
 		}
+
 		if fsStat.IsDir() != fileStat.IsDir() {
 			t.Fatalf("IsDir mismatch for %q", path)
 		}
@@ -697,6 +753,7 @@ func fuzzReadFileSize(f *testing.F, img fuzzImage) {
 	for _, p := range img.files {
 		f.Add(p)
 	}
+
 	for _, s := range pathSeeds() {
 		f.Add(s)
 	}
@@ -736,17 +793,19 @@ func FuzzDeepReadFileSize(f *testing.F) {
 // raw image fuzzing. Returns the raw bytes.
 func buildMinimalImage(t testing.TB) []byte {
 	t.Helper()
+
 	if _, err := erofstest.CheckMkfsVersion("1.0"); err != nil {
 		t.Skipf("skipping: %v", err)
 	}
 
 	tc := erofstest.TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 	wt := erofstest.TarAll(
-		tc.Dir("/dir", 0755),
-		tc.File("/dir/hello.txt", []byte("hello world\n"), 0644),
-		tc.File("/empty", []byte{}, 0644),
+		tc.Dir("/dir", 0o755),
+		tc.File("/dir/hello.txt", []byte("hello world\n"), 0o644),
+		tc.File("/empty", []byte{}, 0o644),
 		tc.Symlink("/dir/hello.txt", "/link"),
 	)
+
 	tarStream := erofstest.TarFromWriterTo(wt)
 	defer func() { _ = tarStream.Close() }()
 
@@ -754,10 +813,12 @@ func buildMinimalImage(t testing.TB) []byte {
 	if err := erofstest.ConvertTarErofs(context.Background(), tarStream, path, "", nil); err != nil {
 		t.Fatal(err)
 	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return data
 }
 
@@ -770,11 +831,13 @@ func exerciseFS(fsys fs.FS) {
 	if err != nil {
 		return
 	}
+
 	fi, err := f.Stat()
 	if err != nil {
 		_ = f.Close()
 		return
 	}
+
 	if fi.IsDir() {
 		if rdf, ok := f.(fs.ReadDirFile); ok {
 			entries, _ := rdf.ReadDir(-1)
@@ -786,20 +849,24 @@ func exerciseFS(fsys fs.FS) {
 				if err != nil {
 					continue
 				}
+
 				cfi, err := child.Stat()
 				if err != nil {
 					_ = child.Close()
 					continue
 				}
+
 				if !cfi.IsDir() && cfi.Size() > 0 && cfi.Size() < 1<<20 {
 					buf := make([]byte, 4096)
 					_, _ = child.Read(buf)
 				}
+
 				if cfi.IsDir() {
 					if rdf2, ok := child.(fs.ReadDirFile); ok {
 						_, _ = rdf2.ReadDir(-1)
 					}
 				}
+
 				_ = child.Close()
 			}
 		} else {
@@ -810,6 +877,7 @@ func exerciseFS(fsys fs.FS) {
 			buf := make([]byte, 4096)
 			_, _ = f.Read(buf)
 		}
+
 		_ = f.Close()
 	}
 
@@ -824,11 +892,14 @@ func exerciseFS(fsys fs.FS) {
 		if err != nil {
 			return err
 		}
+
 		count++
 		if count > 100 {
 			return fs.SkipAll
 		}
+
 		_, _ = d.Info()
+
 		return nil
 	})
 }
@@ -839,7 +910,9 @@ func tryOpen(fsys fs.FS, path string) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
+
 	_, _ = f.Stat()
+
 	return nil
 }
 
@@ -860,17 +933,21 @@ func FuzzImageOpen(f *testing.F) {
 	// Add image with zeroed superblock
 	zeroed := make([]byte, len(seed))
 	copy(zeroed, seed)
+
 	for i := 1024; i < 1024+128 && i < len(zeroed); i++ {
 		zeroed[i] = 0
 	}
+
 	f.Add(zeroed)
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		r := bytes.NewReader(data)
+
 		fsys, err := erofs.Open(r)
 		if err != nil {
 			return
 		}
+
 		exerciseFS(fsys)
 	})
 }
@@ -884,6 +961,7 @@ func FuzzImageCorruptSuperblock(f *testing.F) {
 	if len(seed) < 1024+128 {
 		f.Skip("seed image too small")
 	}
+
 	sb := make([]byte, 128)
 	copy(sb, seed[1024:1024+128])
 	f.Add(sb)
@@ -908,15 +986,18 @@ func FuzzImageCorruptSuperblock(f *testing.F) {
 		if len(sbBytes) != 128 {
 			return
 		}
+
 		img := make([]byte, len(seed))
 		copy(img, seed)
 		copy(img[1024:1024+128], sbBytes)
 
 		r := bytes.NewReader(img)
+
 		fsys, err := erofs.Open(r)
 		if err != nil {
 			return
 		}
+
 		exerciseFS(fsys)
 	})
 }
@@ -940,23 +1021,28 @@ func FuzzImageCorruptInode(f *testing.F) {
 		}
 		// Only corrupt data after the superblock to keep it parseable
 		metaStart := 1024 + 128
+
 		if corruptOffset < 0 {
 			corruptOffset = 0
 		}
+
 		pos := metaStart + (corruptOffset % (len(data) - metaStart))
 
 		// Flip some bytes around the corruption point
 		mutated := make([]byte, len(data))
 		copy(mutated, data)
+
 		for i := pos; i < pos+8 && i < len(mutated); i++ {
 			mutated[i] ^= 0xFF
 		}
 
 		r := bytes.NewReader(mutated)
+
 		fsys, err := erofs.Open(r)
 		if err != nil {
 			return
 		}
+
 		exerciseFS(fsys)
 	})
 }
@@ -981,6 +1067,7 @@ func exerciseCopyFrom(fsys fs.FS) {
 		if err := w.CopyFrom(fsys, opts...); err != nil {
 			continue
 		}
+
 		_ = w.Close()
 	}
 }
@@ -1009,6 +1096,7 @@ func FuzzImageCopyFrom(f *testing.F) {
 		if len(seed) < 1024+128 {
 			break
 		}
+
 		m := make([]byte, len(seed))
 		copy(m, seed)
 		tweak.set(m, 1024+tweak.off)
@@ -1020,6 +1108,7 @@ func FuzzImageCopyFrom(f *testing.F) {
 		if err != nil {
 			return
 		}
+
 		exerciseCopyFrom(fsys)
 	})
 }
@@ -1042,11 +1131,13 @@ func FuzzWriterXattrLimits(f *testing.F) {
 		if valueLen < 0 || valueLen > 1<<20 || !utf8.ValidString(attr) {
 			return
 		}
+
 		if strings.ContainsAny(attr, "\x00") || attr == "" {
 			return
 		}
 
 		buf := &erofstest.TestBuffer{}
+
 		w := erofs.Create(buf, erofs.WithBuildTime(1000, 0))
 		if err := w.Mkdir("/d", 0o755); err != nil {
 			t.Fatal(err)
@@ -1062,6 +1153,7 @@ func FuzzWriterXattrLimits(f *testing.F) {
 			// image either way.
 			return
 		}
+
 		if closeErr != nil {
 			return
 		}
@@ -1073,14 +1165,17 @@ func FuzzWriterXattrLimits(f *testing.F) {
 		if err != nil {
 			t.Fatalf("accepted xattr produced an unreadable image: %v", err)
 		}
+
 		fi, err := fs.Stat(img, "d")
 		if err != nil {
 			t.Fatalf("accepted xattr produced an unstattable dir: %v", err)
 		}
+
 		got, ok := fi.Sys().(*erofs.Stat).Xattrs[attr]
 		if !ok {
 			t.Fatalf("xattr %q accepted but missing after round-trip", attr)
 		}
+
 		if got != value {
 			t.Fatalf("xattr %q round-tripped %d bytes, wrote %d", attr, len(got), len(value))
 		}

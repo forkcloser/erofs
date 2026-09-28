@@ -17,6 +17,7 @@ func randBytes(t *testing.T, n int, seed int64) []byte {
 	t.Helper()
 
 	b := make([]byte, n)
+
 	r := rand.New(rand.NewSource(seed))
 	if _, err := r.Read(b); err != nil {
 		t.Fatal(err)
@@ -110,6 +111,7 @@ func TestUnmarshalMatchesBinaryDecode(t *testing.T) {
 				if err != nil {
 					t.Fatalf("binary.Decode(%x): %v", in, err)
 				}
+
 				if !reflect.DeepEqual(manual, want) {
 					t.Fatalf("input %x\n manual: %+v\nreflect: %+v", in, manual, want)
 				}
@@ -139,6 +141,7 @@ func mustNew(t *testing.T, tc struct {
 	case "XattrEntry":
 		return &XattrEntry{}
 	}
+
 	t.Fatalf("unknown case %q", tc.name)
 
 	return nil
@@ -146,6 +149,7 @@ func mustNew(t *testing.T, tc struct {
 
 func BenchmarkDecodeInodeCompact(b *testing.B) {
 	buf := make([]byte, SizeInodeCompact)
+
 	b.Run("manual", func(b *testing.B) {
 		var v InodeCompact
 		for range b.N {
@@ -164,6 +168,7 @@ func BenchmarkDecodeInodeCompact(b *testing.B) {
 
 func BenchmarkDecodeDirent(b *testing.B) {
 	buf := make([]byte, SizeDirent)
+
 	b.Run("manual", func(b *testing.B) {
 		var v Dirent
 		for range b.N {
@@ -204,14 +209,17 @@ func TestSuperBlockMarshalMatchesReflection(t *testing.T) {
 	if err := binary.Write(&want, binary.LittleEndian, &sb); err != nil {
 		t.Fatal(err)
 	}
+
 	got := make([]byte, SizeSuperBlock)
 	sb.Marshal(got)
+
 	if !bytes.Equal(got, want.Bytes()) {
 		t.Fatalf("Marshal disagrees with binary.Write:\n got %x\nwant %x", got, want.Bytes())
 	}
 
 	var back SuperBlock
 	back.Unmarshal(got)
+
 	if back != sb {
 		t.Errorf("Unmarshal(Marshal(sb)) = %+v, want %+v", back, sb)
 	}
@@ -222,7 +230,9 @@ func TestDeviceSlotMarshalMatchesReflection(t *testing.T) {
 	for i := range ds.Tag {
 		ds.Tag[i] = uint8(i)
 	}
+
 	ds.Blocks = 0x01020304
+
 	ds.MappedBlkAddr = 0x05060708
 	for i := range ds.Reserved {
 		ds.Reserved[i] = uint8(255 - i)
@@ -232,14 +242,17 @@ func TestDeviceSlotMarshalMatchesReflection(t *testing.T) {
 	if err := binary.Write(&want, binary.LittleEndian, &ds); err != nil {
 		t.Fatal(err)
 	}
+
 	got := make([]byte, SizeDeviceSlot)
 	ds.Marshal(got)
+
 	if !bytes.Equal(got, want.Bytes()) {
 		t.Fatalf("Marshal disagrees with binary.Write:\n got %x\nwant %x", got, want.Bytes())
 	}
 
 	var back DeviceSlot
 	back.Unmarshal(got)
+
 	if back != ds {
 		t.Error("Unmarshal(Marshal(ds)) did not round-trip")
 	}

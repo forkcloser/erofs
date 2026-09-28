@@ -11,17 +11,17 @@ const (
 	FileTypeSock    = 6
 	FileTypeSymlink = 7
 
-	StatTypeMask    = 0170000 // Mask for the type bits
-	StatTypeReg     = 0100000 // Regular file
-	StatTypeDir     = 0040000 // Directory
-	StatTypeChrdev  = 0020000 // Character device
-	StatTypeBlkdev  = 0060000 // Block device
-	StatTypeFifo    = 0010000 // FIFO
-	StatTypeSock    = 0140000 // Socket
-	StatTypeSymlink = 0120000 // Symlink
-	StatTypeIsUID   = 0004000 // Setuid on execution
-	StatTypeIsGID   = 0002000 // Setgid on execution
-	StatTypeIsVTX   = 0001000 // Sticky bit
+	StatTypeMask    = 0o170000 // Mask for the type bits
+	StatTypeReg     = 0o100000 // Regular file
+	StatTypeDir     = 0o040000 // Directory
+	StatTypeChrdev  = 0o020000 // Character device
+	StatTypeBlkdev  = 0o060000 // Block device
+	StatTypeFifo    = 0o010000 // FIFO
+	StatTypeSock    = 0o140000 // Socket
+	StatTypeSymlink = 0o120000 // Symlink
+	StatTypeIsUID   = 0o004000 // Setuid on execution
+	StatTypeIsGID   = 0o002000 // Setgid on execution
+	StatTypeIsVTX   = 0o001000 // Sticky bit
 )
 
 // Converts EroFS filetypes to Go FileMode
@@ -46,7 +46,8 @@ func EroFSFtypeToFileMode(ftype uint8) fs.FileMode {
 
 func EroFSModeToGoFileMode(mode uint16) fs.FileMode {
 	var m fs.FileMode
-	m |= fs.FileMode(mode & 0777)
+
+	m |= fs.FileMode(mode & 0o777)
 	switch mode & StatTypeMask {
 	case StatTypeReg:
 	case StatTypeDir:
@@ -64,12 +65,15 @@ func EroFSModeToGoFileMode(mode uint16) fs.FileMode {
 	default:
 		m |= fs.ModeIrregular // Unknown type, treat as irregular file
 	}
+
 	if mode&StatTypeIsUID != 0 {
 		m |= fs.ModeSetuid
 	}
+
 	if mode&StatTypeIsGID != 0 {
 		m |= fs.ModeSetgid
 	}
+
 	if mode&StatTypeIsVTX != 0 {
 		m |= fs.ModeSticky
 	}

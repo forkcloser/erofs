@@ -21,29 +21,39 @@ import (
 func buildAndVerify(t *testing.T, build func(w *erofs.Writer)) fs.FS {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.erofs")
+
 	f, err := os.Create(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	t.Cleanup(func() { _ = f.Close() })
+
 	w := erofs.Create(f)
 	build(w)
+
 	if err := w.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	erofstest.FsckErofs(t, path)
+
 	f, err = os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	t.Cleanup(func() { _ = f.Close() })
+
 	efs, err := erofs.Open(f)
 	if err != nil {
 		t.Fatal("Open:", err)
 	}
+
 	return efs
 }
 
@@ -68,9 +78,11 @@ func FuzzWriterFileContent(f *testing.F) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if _, err := file.Write(data); err != nil {
 				t.Fatal(err)
 			}
+
 			if err := file.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -86,14 +98,17 @@ func isValidName(name string) bool {
 	if name == "" || name == "." || name == ".." {
 		return false
 	}
+
 	if len(name) > 255 {
 		return false
 	}
+
 	for i := range len(name) {
 		if name[i] == '/' || name[i] == 0 {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -119,9 +134,11 @@ func FuzzWriterFileName(f *testing.F) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if _, err := file.Write([]byte(content)); err != nil {
 				t.Fatal(err)
 			}
+
 			if err := file.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -144,6 +161,7 @@ func FuzzWriterMultipleFiles(f *testing.F) {
 		if len(baseContent) > 512 {
 			baseContent = baseContent[:512]
 		}
+
 		n := int(count)
 		if n > 50 {
 			return
@@ -153,6 +171,7 @@ func FuzzWriterMultipleFiles(f *testing.F) {
 			name    string
 			content []byte
 		}
+
 		entries := make([]entry, n)
 		for i := range n {
 			suffix := fmt.Appendf(nil, "-%d", i)
@@ -171,9 +190,11 @@ func FuzzWriterMultipleFiles(f *testing.F) {
 				if err != nil {
 					t.Fatal(err)
 				}
+
 				if _, err := file.Write(e.content); err != nil {
 					t.Fatal(err)
 				}
+
 				if err := file.Close(); err != nil {
 					t.Fatal(err)
 				}
@@ -188,6 +209,7 @@ func FuzzWriterMultipleFiles(f *testing.F) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if len(dirEntries) != n {
 			t.Fatalf("got %d entries, want %d", len(dirEntries), n)
 		}
@@ -201,8 +223,9 @@ func FuzzWriterDirectoryTree(f *testing.F) {
 	f.Add(uint8(5), uint8(5), []byte(""))
 	f.Add(uint8(10), uint8(0), []byte("x"))
 
-	f.Fuzz(func(t *testing.T, depth uint8, filesPerDir uint8, content []byte) {
+	f.Fuzz(func(t *testing.T, depth, filesPerDir uint8, content []byte) {
 		d := int(depth)
+
 		fpd := int(filesPerDir)
 		if d > 10 || fpd > 10 || len(content) > 1024 {
 			return
@@ -212,10 +235,14 @@ func FuzzWriterDirectoryTree(f *testing.F) {
 			path    string
 			content string
 		}
-		var entries []entry
-		var dirs []string
+
+		var (
+			entries []entry
+			dirs    []string
+		)
 
 		dirPath := ""
+
 		for level := range d {
 			seg := fmt.Sprintf("d%d", level)
 			if dirPath == "" {
@@ -223,6 +250,7 @@ func FuzzWriterDirectoryTree(f *testing.F) {
 			} else {
 				dirPath = dirPath + "/" + seg
 			}
+
 			dirs = append(dirs, dirPath)
 
 			for fi := range fpd {
@@ -238,14 +266,17 @@ func FuzzWriterDirectoryTree(f *testing.F) {
 					t.Fatal(err)
 				}
 			}
+
 			for _, e := range entries {
 				file, err := w.Create("/" + e.path)
 				if err != nil {
 					t.Fatal(err)
 				}
+
 				if _, err := file.Write([]byte(e.content)); err != nil {
 					t.Fatal(err)
 				}
+
 				if err := file.Close(); err != nil {
 					t.Fatal(err)
 				}
@@ -261,6 +292,7 @@ func FuzzWriterDirectoryTree(f *testing.F) {
 			if err != nil {
 				t.Fatalf("stat %s: %v", dir, err)
 			}
+
 			if !fi.IsDir() {
 				t.Fatalf("%s: not a directory", dir)
 			}
@@ -307,6 +339,7 @@ func FuzzWriterMetadata(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, perm uint16, uid, gid uint32, mtimeSec uint64, mtimeNs uint32) {
 		perm &= 0o777 // only rwx bits; Perm() returns bottom 9 bits
+
 		if mtimeNs >= 1e9 {
 			mtimeNs %= 1e9
 		}
@@ -315,9 +348,11 @@ func FuzzWriterMetadata(f *testing.F) {
 		if uid > math.MaxInt32 {
 			uid = math.MaxInt32
 		}
+
 		if gid > math.MaxInt32 {
 			gid = math.MaxInt32
 		}
+
 		if mtimeSec > math.MaxInt64 {
 			mtimeSec = math.MaxInt64
 		}
@@ -327,18 +362,23 @@ func FuzzWriterMetadata(f *testing.F) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if _, err := file.Write([]byte("content")); err != nil {
 				t.Fatal(err)
 			}
+
 			if err := file.Chmod(fs.FileMode(perm)); err != nil {
 				t.Fatal(err)
 			}
+
 			if err := file.Chown(int(uid), int(gid)); err != nil {
 				t.Fatal(err)
 			}
+
 			if err := file.Close(); err != nil {
 				t.Fatal(err)
 			}
+
 			if err := w.Chtimes("/file.txt", time.Time{}, time.Unix(int64(mtimeSec), int64(mtimeNs))); err != nil {
 				t.Fatal(err)
 			}
@@ -348,9 +388,11 @@ func FuzzWriterMetadata(f *testing.F) {
 		if st.Mode.Perm() != fs.FileMode(perm) {
 			t.Errorf("perm: got %o, want %o", st.Mode.Perm(), perm)
 		}
+
 		if st.UID != uid {
 			t.Errorf("uid: got %d, want %d", st.UID, uid)
 		}
+
 		if st.GID != gid {
 			t.Errorf("gid: got %d, want %d", st.GID, gid)
 		}
@@ -375,6 +417,7 @@ func FuzzWriterXattr(f *testing.F) {
 				return
 			}
 		}
+
 		for i := range len(value) {
 			if value[i] == 0 {
 				return
@@ -386,12 +429,15 @@ func FuzzWriterXattr(f *testing.F) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if _, err := file.Write([]byte("content")); err != nil {
 				t.Fatal(err)
 			}
+
 			if err := file.Close(); err != nil {
 				t.Fatal(err)
 			}
+
 			if err := w.Setxattr("/file.txt", key, value); err != nil {
 				t.Fatal(err)
 			}
@@ -413,24 +459,30 @@ func FuzzWriterMixed(f *testing.F) {
 	f.Fuzz(func(t *testing.T, nFiles, nDirs, nSymlinks uint8, fileSize uint16, fill byte) {
 		nf := int(nFiles)
 		nd := int(nDirs)
+
 		ns := int(nSymlinks)
 		if nf > 100 || nd > 50 || ns > 50 || fileSize > 8192 {
 			return
 		}
+
 		fsize := int(fileSize)
 
 		type fileEntry struct {
 			name    string
 			content []byte
 		}
-		var files []fileEntry
-		var dirNames []string
-		var symlinks []struct{ name, target string }
+
+		var (
+			files    []fileEntry
+			dirNames []string
+			symlinks []struct{ name, target string }
+		)
 
 		efs := buildAndVerify(t, func(w *erofs.Writer) {
 			// Create directories.
 			for i := range nd {
 				name := fmt.Sprintf("dir%03d", i)
+
 				dirNames = append(dirNames, name)
 				if err := w.Mkdir("/"+name, 0o755); err != nil {
 					t.Fatal(err)
@@ -445,6 +497,7 @@ func FuzzWriterMixed(f *testing.F) {
 				} else {
 					name = fmt.Sprintf("file%03d.dat", i)
 				}
+
 				content := bytes.Repeat([]byte{fill ^ byte(i)}, fsize)
 				files = append(files, fileEntry{name: name, content: content})
 
@@ -452,9 +505,11 @@ func FuzzWriterMixed(f *testing.F) {
 				if err != nil {
 					t.Fatal(err)
 				}
+
 				if _, err := file.Write(content); err != nil {
 					t.Fatal(err)
 				}
+
 				if err := file.Close(); err != nil {
 					t.Fatal(err)
 				}
@@ -463,12 +518,14 @@ func FuzzWriterMixed(f *testing.F) {
 			// Create symlinks.
 			for i := range ns {
 				linkName := fmt.Sprintf("link%03d", i)
+
 				var target string
 				if len(files) > 0 {
 					target = files[i%len(files)].name
 				} else {
 					target = "nonexistent"
 				}
+
 				symlinks = append(symlinks, struct{ name, target string }{linkName, target})
 				if err := w.Symlink(target, "/"+linkName); err != nil {
 					t.Fatal(err)
@@ -487,6 +544,7 @@ func FuzzWriterMixed(f *testing.F) {
 			if err != nil {
 				t.Fatalf("stat dir %s: %v", d, err)
 			}
+
 			if !fi.IsDir() {
 				t.Fatalf("%s: not a directory", d)
 			}
@@ -499,14 +557,17 @@ func FuzzWriterMixed(f *testing.F) {
 
 		// Walk entire tree — must not panic or error.
 		count := 0
+
 		if err := fs.WalkDir(efs, ".", func(_ string, _ fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
+
 			count++
 			if count > 10000 {
 				return fs.SkipAll
 			}
+
 			return nil
 		}); err != nil {
 			t.Fatalf("WalkDir: %v", err)
@@ -522,16 +583,19 @@ func FuzzWriterCopyFrom(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, nFiles, nDirs uint8, fileSize uint16, fill byte) {
 		nf := int(nFiles)
+
 		nd := int(nDirs)
 		if nf > 50 || nd > 20 || fileSize > 8192 {
 			return
 		}
 
 		src := make(fstest.MapFS)
+
 		type entry struct {
 			name    string
 			content []byte
 		}
+
 		var entries []entry
 
 		for i := range nd {
@@ -546,6 +610,7 @@ func FuzzWriterCopyFrom(f *testing.F) {
 			} else {
 				name = fmt.Sprintf("f%03d.txt", i)
 			}
+
 			content := bytes.Repeat([]byte{fill ^ byte(i)}, int(fileSize))
 			src[name] = &fstest.MapFile{Data: content, Mode: 0o644}
 			entries = append(entries, entry{name: name, content: content})
@@ -578,7 +643,9 @@ func FuzzWriterImplicitDirs(f *testing.F) {
 
 		// Build a deeply nested path.
 		path := ""
+
 		var dirs []string
+
 		for i := range d {
 			seg := fmt.Sprintf("d%d", i)
 			if path == "" {
@@ -586,8 +653,10 @@ func FuzzWriterImplicitDirs(f *testing.F) {
 			} else {
 				path = path + "/" + seg
 			}
+
 			dirs = append(dirs, path)
 		}
+
 		var filePath string
 		if path == "" {
 			filePath = baseName
@@ -600,9 +669,11 @@ func FuzzWriterImplicitDirs(f *testing.F) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if _, err := file.Write(content); err != nil {
 				t.Fatal(err)
 			}
+
 			if err := file.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -615,6 +686,7 @@ func FuzzWriterImplicitDirs(f *testing.F) {
 			if err != nil {
 				t.Fatalf("stat implicit dir %s: %v", dir, err)
 			}
+
 			if !fi.IsDir() {
 				t.Fatalf("%s: not a directory", dir)
 			}
@@ -637,9 +709,11 @@ func FuzzWriterEmpty(f *testing.F) {
 		}
 
 		var dirNames []string
+
 		efs := buildAndVerify(t, func(w *erofs.Writer) {
 			for i := range nd {
 				name := fmt.Sprintf("dir%03d", i)
+
 				dirNames = append(dirNames, name)
 				if err := w.Mkdir("/"+name, 0o755); err != nil {
 					t.Fatal(err)
@@ -651,9 +725,11 @@ func FuzzWriterEmpty(f *testing.F) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if len(entries) != nd {
 			t.Fatalf("got %d entries, want %d", len(entries), nd)
 		}
+
 		for _, e := range entries {
 			if !e.IsDir() {
 				t.Fatalf("%s: expected directory", e.Name())

@@ -51,6 +51,7 @@ func inodeCoreSize(e *erofsEntry) int {
 	if e.compact {
 		return disk.SizeInodeCompact
 	}
+
 	return disk.SizeInodeExtended
 }
 
@@ -60,6 +61,7 @@ func (w *erofsWriter) entryChunkBits(e *erofsEntry) uint8 {
 	if e.chunkBits > 0 {
 		return e.chunkBits
 	}
+
 	return w.chunkBits
 }
 
@@ -91,10 +93,12 @@ func (w *erofsWriter) chunkCount(e *erofsEntry) int {
 	if cs == 0 {
 		return 0
 	}
+
 	n := e.size / cs
 	if e.size%cs != 0 {
 		n++
 	}
+
 	if n > maxChunkIndexEntries {
 		return maxChunkIndexEntries + 1
 	}
@@ -114,6 +118,7 @@ func (w *erofsWriter) checkLimits() error {
 		if e.mode&disk.StatTypeMask == disk.StatTypeSymlink && len(e.symTarget) == 0 {
 			return fmt.Errorf("mkfs: %s: empty symlink target: %w", e.path, ErrInvalid)
 		}
+
 		if e.layout == disk.LayoutChunkBased && w.chunkCount(e) > maxChunkIndexEntries {
 			return fmt.Errorf("mkfs: %s: chunk index for a %d byte file exceeds the %d entry limit: %w",
 				e.path, e.size, int64(maxChunkIndexEntries), ErrInvalid)
@@ -127,6 +132,7 @@ func (w *erofsWriter) checkLimits() error {
 			if c.PhysicalBlock == builder.NullPhysicalBlock {
 				continue
 			}
+
 			if end := c.PhysicalBlock + uint64(c.Count); end > math.MaxUint32 {
 				return fmt.Errorf("mkfs: %s: chunk covering blocks %d..%d needs 48-bit addressing: %w",
 					e.path, c.PhysicalBlock, end, ErrNotImplemented)
@@ -142,9 +148,15 @@ func (w *erofsWriter) checkLimits() error {
 				return fmt.Errorf("mkfs: %s: %w", e.path, err)
 			}
 		}
+
 		if e.xattrSize > 0 && xattrICount(e.xattrSize) > maxXattrICount {
-			return fmt.Errorf("mkfs: %s: xattr area of %d bytes needs more than the %d entries i_xattr_icount can hold: %w",
-				e.path, e.xattrSize, maxXattrICount, ErrInvalid)
+			return fmt.Errorf(
+				"mkfs: %s: xattr area of %d bytes needs more than the %d entries i_xattr_icount can hold: %w",
+				e.path,
+				e.xattrSize,
+				maxXattrICount,
+				ErrInvalid,
+			)
 		}
 	}
 
@@ -158,6 +170,7 @@ func (w *erofsWriter) minChunkBits(size uint64) uint8 {
 	for uint64(w.blockSize)<<bits < size && bits < 31 {
 		bits++
 	}
+
 	return bits
 }
 
@@ -165,7 +178,9 @@ func (w *erofsWriter) write(out io.WriteSeeker) error {
 	if err := w.checkLimits(); err != nil {
 		return err
 	}
+
 	w.copyBuf = make([]byte, 256*1024) // shared io.CopyBuffer buffer
+
 	return w.writeSeekable(out)
 }
 
@@ -194,6 +209,7 @@ func (w *erofsWriter) writeSeekable(out io.WriteSeeker) error {
 	if err := w.writeMetadataInodes(meta); err != nil {
 		return err
 	}
+
 	if _, err := meta.WriteTo(out); err != nil {
 		return err
 	}
@@ -202,6 +218,7 @@ func (w *erofsWriter) writeSeekable(out io.WriteSeeker) error {
 	if _, err := out.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
+
 	return w.writeBlock0(out)
 }
 
@@ -211,6 +228,7 @@ func (w *erofsWriter) direntBuf(n int) []byte {
 	if cap(w.dirBuf) < n {
 		w.dirBuf = make([]byte, n)
 	}
+
 	w.dirBuf = w.dirBuf[:n]
 	clear(w.dirBuf)
 
@@ -220,15 +238,18 @@ func (w *erofsWriter) direntBuf(n int) []byte {
 // newMetaBuffer returns a pre-sized bytes.Buffer for metadata serialization.
 func (w *erofsWriter) newMetaBuffer() *bytes.Buffer {
 	totalMetaBytes := 0
+
 	for _, e := range w.entries {
 		isz := disk.SizeInodeExtended
 		if e.compact {
 			isz = disk.SizeInodeCompact
 		}
+
 		sz := isz + e.xattrSize + e.chunkPad + e.trailingSize
 		if sz%32 != 0 {
 			sz = (sz + 31) & ^31
 		}
+
 		totalMetaBytes += sz
 	}
 	// SB area + metadata padded to block boundary. The capacity is only a
@@ -239,7 +260,9 @@ func (w *erofsWriter) newMetaBuffer() *bytes.Buffer {
 	if capacity < w.blockSize || capacity > maxMetaBufferPrealloc {
 		capacity = w.blockSize
 	}
+
 	buf := bytes.NewBuffer(make([]byte, 0, capacity))
+
 	return buf
 }
 
@@ -251,18 +274,23 @@ func (w *erofsWriter) assignDataBlocks() {
 	if w.metaBlkAddr == uint32(sbBlks) {
 		// Metadata-first: data blocks come after metadata.
 		totalMetaBytes := 0
+
 		for _, e := range w.entries {
 			expectedOff := int(e.nid) * 32
+
 			sz := inodeCoreSize(e) + e.xattrSize + e.chunkPad + e.trailingSize
 			if sz%32 != 0 {
 				sz = (sz + 31) & ^31
 			}
+
 			end := expectedOff + sz
 			if end > totalMetaBytes {
 				totalMetaBytes = end
 			}
 		}
+
 		metaBlocks := (totalMetaBytes + w.blockSize - 1) / w.blockSize
+
 		addr := uint32(w.sbAreaBlocks() + metaBlocks)
 		for _, e := range w.entries {
 			if ds := w.flatPlainDataSize(e); ds > 0 {
@@ -279,6 +307,7 @@ func (w *erofsWriter) assignDataBlocks() {
 				addr += uint32((ds + w.blockSize - 1) / w.blockSize)
 			}
 		}
+
 		w.metaBlkAddr = addr // metadata follows data
 	}
 }
@@ -291,6 +320,7 @@ func (w *erofsWriter) sbAreaSize() int {
 	if len(w.devices) > 0 {
 		n += len(w.devices) * disk.SizeDeviceSlot
 	}
+
 	return ((n + w.blockSize - 1) / w.blockSize) * w.blockSize
 }
 
@@ -304,17 +334,21 @@ func (w *erofsWriter) sbAreaBlocks() int {
 // and rounding each entry up to a 32-byte boundary.
 func (w *erofsWriter) metadataBytes() int {
 	curOff := 0
+
 	for _, e := range w.entries {
 		expectedOff := int(e.nid) * 32
 		if curOff < expectedOff {
 			curOff = expectedOff
 		}
+
 		sz := inodeCoreSize(e) + e.xattrSize + e.chunkPad + e.trailingSize
 		if rem := sz % 32; rem != 0 {
 			sz += 32 - rem
 		}
+
 		curOff += sz
 	}
+
 	return curOff
 }
 
@@ -326,16 +360,20 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 
 	// Count data blocks.
 	dataBlocks := 0
+
 	for _, e := range w.entries {
 		if ds := w.flatPlainDataSize(e); ds > 0 {
 			dataBlocks += (ds + w.blockSize - 1) / w.blockSize
 		}
 	}
+
 	totalBlocks := w.sbAreaBlocks() + metaBlocks + dataBlocks
 
-	var featureIncompat uint32
-	var extraDevices uint16
-	var devtSlotOff uint16
+	var (
+		featureIncompat uint32
+		extraDevices    uint16
+		devtSlotOff     uint16
+	)
 
 	if len(w.devices) > 0 {
 		featureIncompat |= disk.FeatureIncompatDeviceTable
@@ -378,6 +416,7 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 		if blocks > math.MaxUint32 {
 			return fmt.Errorf("device %d block count %d exceeds 32-bit limit", i+1, blocks)
 		}
+
 		devSlot := disk.DeviceSlot{
 			Blocks: uint32(blocks),
 		}
@@ -386,6 +425,7 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 	}
 
 	_, err := buf.Write(sbArea)
+
 	return err
 }
 
@@ -393,6 +433,7 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 // already be assigned on each entry before calling this method.
 func (w *erofsWriter) writeMetadataInodes(buf io.Writer) error {
 	metaStart := 0
+
 	for _, e := range w.entries {
 		expectedOff := int(e.nid) * 32
 		// planLayout hands out nids as byte offsets, so the bytes written so
@@ -403,16 +444,19 @@ func (w *erofsWriter) writeMetadataInodes(buf io.Writer) error {
 			return fmt.Errorf("write inode for %s: metadata overran nid slot %d by %d bytes",
 				e.path, e.nid, metaStart-expectedOff)
 		}
+
 		if expectedOff > metaStart {
 			if _, err := buf.Write(w.zeroBuf[:expectedOff-metaStart]); err != nil {
 				return err
 			}
+
 			metaStart = expectedOff
 		}
 
 		if err := w.writeInode(buf, e); err != nil {
 			return fmt.Errorf("write inode for %s: %w", e.path, err)
 		}
+
 		if e.compact {
 			metaStart += disk.SizeInodeCompact
 		} else {
@@ -424,6 +468,7 @@ func (w *erofsWriter) writeMetadataInodes(buf io.Writer) error {
 			if err := w.writeXattrs(buf, e); err != nil {
 				return fmt.Errorf("write xattrs for %s: %w", e.path, err)
 			}
+
 			metaStart += e.xattrSize
 		}
 
@@ -436,17 +481,21 @@ func (w *erofsWriter) writeMetadataInodes(buf io.Writer) error {
 					if _, err := buf.Write(w.zeroBuf[:e.chunkPad]); err != nil {
 						return err
 					}
+
 					metaStart += e.chunkPad
 				}
+
 				if err := w.writeChunkIndexes(buf, e); err != nil {
 					return fmt.Errorf("write chunks for %s: %w", e.path, err)
 				}
+
 				metaStart += e.trailingSize
 			} else if e.layout == disk.LayoutFlatInline && e.size > 0 && e.data != nil {
 				n, err := io.CopyBuffer(onlyWriter{buf}, io.LimitReader(e.data, int64(e.size)), w.copyBuf)
 				if c, ok := e.data.(io.Closer); ok {
 					_ = c.Close()
 				}
+
 				if err != nil {
 					return fmt.Errorf("write inline data for %s: %w", e.path, err)
 				}
@@ -459,6 +508,7 @@ func (w *erofsWriter) writeMetadataInodes(buf io.Writer) error {
 					return fmt.Errorf("write inline data for %s: short read: got %d bytes, expected %d",
 						e.path, n, e.size)
 				}
+
 				metaStart += int(n)
 			}
 		case disk.StatTypeDir:
@@ -467,6 +517,7 @@ func (w *erofsWriter) writeMetadataInodes(buf io.Writer) error {
 				if err != nil {
 					return fmt.Errorf("write dirents for %s: %w", e.path, err)
 				}
+
 				metaStart += n
 			}
 		case disk.StatTypeSymlink:
@@ -474,6 +525,7 @@ func (w *erofsWriter) writeMetadataInodes(buf io.Writer) error {
 				if _, err := io.WriteString(buf, e.symTarget); err != nil {
 					return fmt.Errorf("write symlink for %s: %w", e.path, err)
 				}
+
 				metaStart += len(e.symTarget)
 			}
 		}
@@ -483,12 +535,14 @@ func (w *erofsWriter) writeMetadataInodes(buf io.Writer) error {
 		if e.compact {
 			inodeSize = disk.SizeInodeCompact
 		}
+
 		totalWritten := inodeSize + e.xattrSize + e.chunkPad + e.trailingSize
 		if totalWritten%32 != 0 {
 			padSize := 32 - (totalWritten % 32)
 			if _, err := buf.Write(w.zeroBuf[:padSize]); err != nil {
 				return err
 			}
+
 			metaStart += padSize
 		}
 	}
@@ -537,6 +591,7 @@ func (w *erofsWriter) writeInode(buf io.Writer, e *erofsEntry) error {
 		binary.LittleEndian.PutUint16(b[24:26], uint16(e.uid))
 		binary.LittleEndian.PutUint16(b[26:28], uint16(e.gid))
 		_, err := buf.Write(b[:disk.SizeInodeCompact])
+
 		return err
 	}
 
@@ -551,6 +606,7 @@ func (w *erofsWriter) writeInode(buf io.Writer, e *erofsEntry) error {
 	binary.LittleEndian.PutUint32(b[40:44], e.mtimeNs)
 	binary.LittleEndian.PutUint32(b[44:48], e.nlink)
 	_, err := buf.Write(b[:disk.SizeInodeExtended])
+
 	return err
 }
 
@@ -558,6 +614,7 @@ func (w *erofsWriter) writeXattrs(buf io.Writer, e *erofsEntry) error {
 	// XattrHeader: 4-byte name filter + 1-byte shared count + 7 reserved = 12 bytes
 	var xhdr [12]byte
 	binary.LittleEndian.PutUint32(xhdr[0:4], 0xFFFFFFFF) // name filter unused
+
 	if _, err := buf.Write(xhdr[:]); err != nil {
 		return err
 	}
@@ -567,15 +624,19 @@ func (w *erofsWriter) writeXattrs(buf io.Writer, e *erofsEntry) error {
 		nameIndex, suffix := xattrSplit(name)
 
 		var xent [disk.SizeXattrEntry]byte
+
 		xent[0] = uint8(len(suffix))
 		xent[1] = nameIndex
 		binary.LittleEndian.PutUint16(xent[2:4], uint16(len(value)))
+
 		if _, err := buf.Write(xent[:]); err != nil {
 			return err
 		}
+
 		if _, err := io.WriteString(buf, suffix); err != nil {
 			return err
 		}
+
 		if _, err := io.WriteString(buf, value); err != nil {
 			return err
 		}
@@ -588,6 +649,7 @@ func (w *erofsWriter) writeXattrs(buf io.Writer, e *erofsEntry) error {
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -609,15 +671,19 @@ func (w *erofsWriter) writeChunkIndexes(buf io.Writer, e *erofsEntry) error {
 		// A chunk with PhysicalBlock == builder.NullPhysicalBlock is a hole:
 		// emit nullIdx entries for its block span.
 		var scratch [disk.SizeChunkIndex]byte
+
 		ci := 0   // index into source chunks
 		coff := 0 // block offset within current source chunk
+
 		for range nchunks {
 			if ci >= len(e.chunks) {
 				if _, err := buf.Write(nullIdx[:]); err != nil {
 					return err
 				}
+
 				continue
 			}
+
 			c := e.chunks[ci]
 			if c.PhysicalBlock == builder.NullPhysicalBlock {
 				// Hole chunk: emit a null index entry.
@@ -634,10 +700,12 @@ func (w *erofsWriter) writeChunkIndexes(buf io.Writer, e *erofsEntry) error {
 				// rejects anything that would need those bits.
 				binary.LittleEndian.PutUint16(scratch[2:4], c.DeviceID)
 				binary.LittleEndian.PutUint32(scratch[4:8], uint32(phys))
+
 				if _, err := buf.Write(scratch[:]); err != nil {
 					return err
 				}
 			}
+
 			coff += blocksPerChunk
 			for ci < len(e.chunks) && coff >= int(e.chunks[ci].Count) {
 				coff -= int(e.chunks[ci].Count)
@@ -668,6 +736,7 @@ func (w *erofsWriter) writeDirents(buf io.Writer, e *erofsEntry) (int, error) {
 	// each block; "." and ".." are not guaranteed to be first.
 	allEnts := make([]direntInfo, 0, len(e.children)+2)
 	allEnts = append(allEnts, direntInfo{".", e.nid, disk.FileTypeDir})
+
 	allEnts = append(allEnts, direntInfo{"..", e.parentNid, disk.FileTypeDir})
 	for _, c := range e.children {
 		allEnts = append(allEnts, direntInfo{
@@ -676,27 +745,33 @@ func (w *erofsWriter) writeDirents(buf io.Writer, e *erofsEntry) (int, error) {
 			fileType: c.erofsFileType,
 		})
 	}
+
 	slices.SortFunc(allEnts, func(a, b direntInfo) int {
 		return cmp.Compare(a.name, b.name)
 	})
 
 	totalWritten := 0
+
 	i := 0
 	for i < len(allEnts) {
 		// Determine how many entries fit in this block
 		start := i
 		blockUsed := 0
 		nameSize := 0
+
 		for j := i; j < len(allEnts); j++ {
 			headerSize := (j - start + 1) * disk.SizeDirent
 			nameSize += len(allEnts[j].name)
+
 			needed := headerSize + nameSize
 			if needed > w.blockSize {
 				break
 			}
+
 			blockUsed = needed
 			i = j + 1
 		}
+
 		if i == start {
 			// Single entry too large for a block (shouldn't happen)
 			blockUsed = disk.SizeDirent + len(allEnts[i].name)
@@ -712,6 +787,7 @@ func (w *erofsWriter) writeDirents(buf io.Writer, e *erofsEntry) (int, error) {
 		// benchmark, and the dominant cost when writing to disk.
 		blk := w.direntBuf(blockUsed)
 		nameOff := blockHeaderSize
+
 		for j, de := range blockEnts {
 			off := j * disk.SizeDirent
 			binary.LittleEndian.PutUint64(blk[off:off+8], de.nid)
@@ -720,7 +796,9 @@ func (w *erofsWriter) writeDirents(buf io.Writer, e *erofsEntry) (int, error) {
 			blk[off+11] = 0
 			nameOff += copy(blk[nameOff:], de.name)
 		}
+
 		n, err := buf.Write(blk)
+
 		totalWritten += n
 		if err != nil {
 			return totalWritten, err
@@ -732,6 +810,7 @@ func (w *erofsWriter) writeDirents(buf io.Writer, e *erofsEntry) (int, error) {
 			if _, err := buf.Write(w.zeroBuf[:padSize]); err != nil {
 				return totalWritten, err
 			}
+
 			totalWritten += padSize
 		}
 	}
@@ -748,11 +827,16 @@ func (w *erofsWriter) writeDataBlocks(out io.Writer) error {
 		}
 
 		var n int
+
 		switch e.mode & disk.StatTypeMask {
 		case disk.StatTypeReg:
 			expected := int64(ds)
-			var written int64
-			var err error
+
+			var (
+				written int64
+				err     error
+			)
+
 			limited := io.LimitReader(e.data, expected)
 			// Use io.Copy for *os.File sources to enable copy_file_range.
 			if _, ok := e.data.(*os.File); ok {
@@ -760,27 +844,33 @@ func (w *erofsWriter) writeDataBlocks(out io.Writer) error {
 			} else {
 				written, err = io.CopyBuffer(onlyWriter{out}, limited, w.copyBuf)
 			}
+
 			if c, ok := e.data.(io.Closer); ok {
 				_ = c.Close()
 			}
+
 			if err != nil {
 				return fmt.Errorf("write data for %s: %w", e.path, err)
 			}
+
 			if written != expected {
 				return fmt.Errorf("write data for %s: short read: got %d bytes, expected %d", e.path, written, expected)
 			}
+
 			n = int(written)
 		case disk.StatTypeDir:
 			written, err := w.writeDirents(out, e)
 			if err != nil {
 				return fmt.Errorf("write dirents for %s: %w", e.path, err)
 			}
+
 			n = written
 		case disk.StatTypeSymlink:
 			written, err := io.WriteString(out, e.symTarget)
 			if err != nil {
 				return fmt.Errorf("write symlink data for %s: %w", e.path, err)
 			}
+
 			n = written
 		}
 
@@ -791,6 +881,7 @@ func (w *erofsWriter) writeDataBlocks(out io.Writer) error {
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -799,6 +890,7 @@ func (w *erofsWriter) flatPlainDataSize(e *erofsEntry) int {
 	if e.layout != disk.LayoutFlatPlain {
 		return 0
 	}
+
 	switch e.mode & disk.StatTypeMask {
 	case disk.StatTypeReg:
 		if e.size > 0 && e.data != nil {
@@ -809,5 +901,6 @@ func (w *erofsWriter) flatPlainDataSize(e *erofsEntry) int {
 	case disk.StatTypeSymlink:
 		return len(e.symTarget)
 	}
+
 	return 0
 }

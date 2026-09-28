@@ -27,6 +27,7 @@ func (m *seekBuf) Write(p []byte) (int, error) {
 	if need := int(m.off) + len(p); need > len(m.buf) {
 		m.buf = append(m.buf, make([]byte, need-len(m.buf))...)
 	}
+
 	copy(m.buf[m.off:], p)
 	m.off += int64(len(p))
 
@@ -55,19 +56,24 @@ func buildTamperableImage(t *testing.T) ([]byte, uint64) {
 
 	out := &seekBuf{}
 	w := Create(out, WithBuildTime(1000, 0))
+
 	f, err := w.Create("/f")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("hello")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Chtimes("/f", time.Unix(2000, 0), time.Unix(2000, 0)); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -76,10 +82,12 @@ func buildTamperableImage(t *testing.T) ([]byte, uint64) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	fi, err := fs.Stat(img, "f")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	nid := fi.Sys().(*Stat).Ino
 
 	inodeOff := img.(*image).metaStartPos() + int64(nid)*disk.SizeInodeCompact
@@ -109,6 +117,7 @@ func TestUntrustedChunkSizeIsBounded(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			inodeOff := img0.(*image).metaStartPos() + int64(nid)*disk.SizeInodeCompact
 
 			// Extended inode, chunk-based layout, claiming a 1 PiB file.
@@ -125,6 +134,7 @@ func TestUntrustedChunkSizeIsBounded(t *testing.T) {
 			runtime.ReadMemStats(&before)
 
 			dst := Create(&seekBuf{})
+
 			err = dst.CopyFrom(img, MetadataOnly())
 			if err == nil {
 				err = dst.Close()
@@ -136,9 +146,11 @@ func TestUntrustedChunkSizeIsBounded(t *testing.T) {
 			if err == nil {
 				t.Fatalf("CopyFrom accepted an inode claiming a 1 PiB chunk-based file")
 			}
+
 			if !errors.Is(err, ErrInvalid) {
 				t.Errorf("err = %v, want it to wrap ErrInvalid", err)
 			}
+
 			t.Logf("rejected with %v (allocated %d bytes)", err, grew)
 
 			// The whole point is that nothing proportional to the declared
@@ -162,6 +174,7 @@ func TestUntrustedInodeCountIsBounded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tampered image failed to open: %v", err)
 	}
+
 	if got := img.(*image).sb.Inos; got != 1<<62 {
 		t.Fatalf("patched the wrong superblock offset: sb.Inos = %d", got)
 	}
@@ -175,6 +188,7 @@ func TestUntrustedInodeCountIsBounded(t *testing.T) {
 	}
 
 	runtime.ReadMemStats(&after)
+
 	if grew := after.TotalAlloc - before.TotalAlloc; grew > 64<<20 {
 		t.Errorf("allocated %d bytes for an image claiming 2^62 inodes; want under 64 MiB", grew)
 	}
@@ -203,9 +217,11 @@ func TestUntrustedBlockCountIsRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("Open accepted a superblock declaring far more blocks than the image holds")
 	}
+
 	if !errors.Is(err, ErrInvalid) {
 		t.Errorf("err = %v, want it to wrap ErrInvalid", err)
 	}
+
 	t.Logf("rejected with %v (allocated %d bytes)", err, grew)
 
 	if grew > 64<<20 {
@@ -219,10 +235,13 @@ func patchDirentNid(buf []byte, from, to uint64) int {
 	var want, repl [8]byte
 	binary.LittleEndian.PutUint64(want[:], from)
 	binary.LittleEndian.PutUint64(repl[:], to)
+
 	n := 0
+
 	for off := 0; off+8 <= len(buf); off += 4 {
 		if bytes.Equal(buf[off:off+8], want[:]) {
 			copy(buf[off:off+8], repl[:])
+
 			n++
 		}
 	}
@@ -243,31 +262,39 @@ func buildCyclicImage(t *testing.T, nameLen int) []byte {
 	e := strings.Repeat("e", nameLen)
 
 	out := &seekBuf{}
+
 	w := Create(out, WithBuildTime(1000, 0))
 	if err := w.Mkdir("/"+d, 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Mkdir("/"+d+"/"+e, 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	buf := out.buf
 
 	img, err := Open(bytes.NewReader(buf))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	i := img.(*image)
+
 	dNid, _, _, err := i.resolve("x", d, false)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	eNid, _, _, err := i.resolve("x", d+"/"+e, false)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if patchDirentNid(buf, eNid, dNid) == 0 {
 		t.Fatal("could not construct a directory cycle")
 	}
@@ -290,6 +317,7 @@ func TestUntrustedDirectoryCycleTerminates(t *testing.T) {
 	runtime.ReadMemStats(&before)
 
 	done := make(chan error, 1)
+
 	go func() {
 		dst := Create(&seekBuf{})
 		done <- dst.CopyFrom(img, MetadataOnly())
@@ -299,13 +327,17 @@ func TestUntrustedDirectoryCycleTerminates(t *testing.T) {
 	case err := <-done:
 		runtime.ReadMemStats(&after)
 		grew := after.TotalAlloc - before.TotalAlloc
+
 		if err == nil {
 			t.Fatal("CopyFrom accepted an image with a directory cycle")
 		}
+
 		if !errors.Is(err, ErrInvalid) {
 			t.Errorf("err = %v, want it to wrap ErrInvalid", err)
 		}
+
 		t.Logf("rejected with %v (allocated %d bytes)", err, grew)
+
 		if grew > 64<<20 {
 			t.Errorf("allocated %d bytes on a cyclic image; want under 64 MiB", grew)
 		}
@@ -332,6 +364,7 @@ func TestUntrustedDirectoryCycleFullImageTerminates(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
+
 	go func() {
 		dst := Create(&seekBuf{})
 		done <- dst.CopyFrom(img)
@@ -340,17 +373,21 @@ func TestUntrustedDirectoryCycleFullImageTerminates(t *testing.T) {
 	select {
 	case err := <-done:
 		var after runtime.MemStats
+
 		runtime.GC()
 		runtime.ReadMemStats(&after)
+
 		if err == nil {
 			t.Fatal("full-image CopyFrom accepted an image with a directory cycle")
 		}
+
 		if !errors.Is(err, ErrInvalid) {
 			t.Errorf("err = %v, want it to wrap ErrInvalid", err)
 		}
 		// What has to stay bounded is resident memory, which is what an OOM
 		// is made of.
 		t.Logf("rejected with %v (heap in use after GC %d bytes)", err, after.HeapInuse)
+
 		if after.HeapInuse > 256<<20 {
 			t.Errorf("heap in use is %d bytes after a cyclic image; want well under 256 MiB", after.HeapInuse)
 		}
@@ -372,6 +409,7 @@ func TestReaderWalkOnCyclicImage(t *testing.T) {
 	}
 
 	const budget = 200
+
 	errBudget := errors.New("visit budget exhausted")
 	visits := 0
 	deepest := ""
@@ -380,10 +418,13 @@ func TestReaderWalkOnCyclicImage(t *testing.T) {
 		if err != nil {
 			return err
 		}
+
 		visits++
+
 		if len(p) > len(deepest) {
 			deepest = p
 		}
+
 		if visits >= budget {
 			return errBudget
 		}
@@ -397,6 +438,7 @@ func TestReaderWalkOnCyclicImage(t *testing.T) {
 
 		return
 	}
+
 	t.Logf("fs.WalkDir terminated after %d visits: %v", visits, err)
 }
 
@@ -438,6 +480,7 @@ func (badSizeDir) Read([]byte) (int, error) { return 0, fs.ErrInvalid }
 func (d badSizeDir) Stat() (fs.FileInfo, error) {
 	return badSizeInfo{name: ".", size: 4096, dir: true}, nil
 }
+
 func (d badSizeDir) ReadDir(int) ([]fs.DirEntry, error) {
 	return []fs.DirEntry{badSizeDirent{badSizeInfo{name: "bad", size: d.fsys.size}}}, nil
 }
@@ -469,13 +512,16 @@ func (fsys badSizeFS) Open(name string) (fs.File, error) {
 func TestCopyFromNegativeSize(t *testing.T) {
 	out := &seekBuf{}
 	w := Create(out)
+
 	err := w.CopyFrom(badSizeFS{size: -1})
 	if err == nil {
 		err = w.Close()
 	}
+
 	if err == nil {
 		t.Fatal("CopyFrom/Close accepted a source with Size() == -1")
 	}
+
 	t.Logf("rejected: %v", err)
 }
 
@@ -490,22 +536,28 @@ func TestCopyFromNegativeSize(t *testing.T) {
 func TestEmptySymlinkTargetRejected(t *testing.T) {
 	out := &seekBuf{}
 	w := Create(out)
+
 	f, err := w.Create("/secret")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("TOPSECRET")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Mkdir("/sub", 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Symlink("x", "/sub/el"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -514,10 +566,12 @@ func TestEmptySymlinkTargetRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	fi, err := img0.(*image).Lstat("sub/el")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	nid := fi.Sys().(*Stat).Ino
 
 	// Zero the symlink's i_size in place. The field is 32 bits wide in a
@@ -539,10 +593,12 @@ func TestEmptySymlinkTargetRejected(t *testing.T) {
 	} else if !errors.Is(err, ErrInvalid) {
 		t.Errorf("ReadLink err = %v, want it to wrap ErrInvalid", err)
 	}
+
 	if fi, err := fs.Stat(img, "sub/el"); err == nil {
 		t.Errorf("Stat(sub/el) = mode=%v isdir=%v, want an error (it resolved to the root)",
 			fi.Mode(), fi.IsDir())
 	}
+
 	if data, err := fs.ReadFile(img, "sub/el/secret"); err == nil {
 		t.Errorf("ReadFile(sub/el/secret) = %q, want an error (the path was re-rooted at /)", data)
 	}
@@ -562,6 +618,7 @@ func TestWriterRejectsEmptySymlinkTarget(t *testing.T) {
 	// the source rather than the caller.
 	w2 := Create(&seekBuf{})
 	w2.addChild(&fsEntry{path: "/el", mode: disk.StatTypeSymlink | 0o777})
+
 	if err := w2.Close(); err == nil {
 		t.Error("Close accepted an entry with an empty symlink target")
 	} else if !errors.Is(err, ErrInvalid) {
@@ -576,27 +633,34 @@ func buildSymlinkCycleImage(t *testing.T, target string) []byte {
 	t.Helper()
 
 	out := &seekBuf{}
+
 	w := Create(out, WithBuildTime(1000, 0))
 	if err := w.Mkdir("/a", 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Symlink(target, "/l"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	buf := out.buf
 
 	img, err := Open(bytes.NewReader(buf))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	i := img.(*image)
+
 	aNid, _, _, err := i.resolve("x", "a", false)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if patchDirentNid(buf, aNid, uint64(i.sb.RootNid)) == 0 {
 		t.Fatal("could not construct a directory cycle")
 	}
@@ -633,16 +697,20 @@ func TestResolveWorkIsBounded(t *testing.T) {
 			buf := buildSymlinkCycleImage(t, tc.target)
 
 			cr := &countingReaderAt{ra: bytes.NewReader(buf)}
+
 			img, err := Open(cr)
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if _, err := img.Open("l"); err == nil {
 				t.Fatal("Open resolved a cyclic symlink chain")
 			}
+
 			if cr.calls > budget {
 				t.Errorf("Open made %d ReadAt calls, over the %d budget", cr.calls, budget)
 			}
+
 			t.Logf("bounded at %d ReadAt calls from a %d byte image", cr.calls, len(buf))
 		})
 	}
@@ -657,18 +725,23 @@ func TestResolveRejectsOverlongPath(t *testing.T) {
 	buf := buildSymlinkCycleImage(t, "/a/l")
 
 	cr := &countingReaderAt{ra: bytes.NewReader(buf)}
+
 	img, err := Open(cr)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	before := cr.calls
+
 	_, err = img.Open(strings.Repeat("a/", maxPathLen) + "l")
 	if err == nil {
 		t.Fatal("Open accepted a path over PATH_MAX")
 	}
+
 	if !errors.Is(err, ErrInvalid) {
 		t.Errorf("err = %v, want it to wrap ErrInvalid", err)
 	}
+
 	if n := cr.calls - before; n > 1 {
 		t.Errorf("rejecting an over-long path took %d ReadAt calls, want it rejected before any walk", n)
 	}
@@ -683,10 +756,12 @@ func patchDirentName(t *testing.T, buf []byte, from, to string) {
 	if len(from) != len(to) {
 		t.Fatalf("replacement %q is %d bytes, marker %q is %d", to, len(to), from, len(from))
 	}
+
 	i := bytes.Index(buf, []byte(from))
 	if i < 0 {
 		t.Fatalf("marker %q not found in the image", from)
 	}
+
 	copy(buf[i:], to)
 }
 
@@ -698,19 +773,24 @@ func patchDirentName(t *testing.T, buf []byte, from, to string) {
 func TestDirentNameIsABaseName(t *testing.T) {
 	out := &seekBuf{}
 	w := Create(out)
+
 	f, err := w.Create("/AAAAAAAAAA")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("pwned")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	patchDirentName(t, out.buf, "AAAAAAAAAA", "../../evil")
 
 	img, err := Open(bytes.NewReader(out.buf))
@@ -730,6 +810,7 @@ func TestDirentNameIsABaseName(t *testing.T) {
 		if err != nil {
 			return err
 		}
+
 		if p != "." {
 			t.Errorf("WalkDir yielded path %q, want an error", p)
 		}
@@ -748,16 +829,20 @@ func TestDirentNameIsABaseName(t *testing.T) {
 // removed every entry contributed by every prior layer.
 func TestMergeWhiteoutCannotEscapeItsDirectory(t *testing.T) {
 	out := &seekBuf{}
+
 	w := Create(out)
 	if err := w.Mkdir("/d", 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Mkdir("/d/BBBBBBBBBBBBBBBBBBBBBBB", 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	patchDirentName(t, out.buf, "BBBBBBBBBBBBBBBBBBBBBBB", "y/../../../.wh..wh..opq")
 
 	hostile, err := Open(bytes.NewReader(out.buf))
@@ -766,16 +851,20 @@ func TestMergeWhiteoutCannotEscapeItsDirectory(t *testing.T) {
 	}
 
 	dst := Create(&seekBuf{})
+
 	keep, err := dst.Create("/keep")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := keep.Write([]byte("PRIOR LAYER DATA")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := keep.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := dst.Mkdir("/etc", 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -784,9 +873,11 @@ func TestMergeWhiteoutCannotEscapeItsDirectory(t *testing.T) {
 	if err == nil {
 		t.Fatal("merge accepted a dirent name containing a path separator")
 	}
+
 	if !errors.Is(err, ErrInvalid) {
 		t.Errorf("err = %v, want it to wrap ErrInvalid", err)
 	}
+
 	for _, p := range []string{"/keep", "/etc"} {
 		if _, ok := dst.byPath[p]; !ok {
 			t.Errorf("%s from the prior layer was removed", p)
@@ -812,6 +903,7 @@ func (s *strictReaderAt) ReadAt(p []byte, off int64) (int, error) {
 
 		return 0, io.EOF
 	}
+
 	n := copy(p, s.buf[off:])
 	if n < len(p) {
 		return n, io.EOF
@@ -829,21 +921,25 @@ func exerciseUntrusted(t *testing.T, buf []byte) {
 	if err != nil {
 		return
 	}
+
 	_ = fs.WalkDir(img, ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
+
 		if fi, err := d.Info(); err == nil {
 			if dr, ok := fi.(interface{ DataRange() []DataRange }); ok {
 				_ = dr.DataRange()
 			}
 		}
+
 		if !d.IsDir() {
 			_, _ = fs.ReadFile(img, p)
 			if f, err := img.Open(p); err == nil {
 				if wt, ok := f.(io.WriterTo); ok {
 					_, _ = wt.WriteTo(io.Discard)
 				}
+
 				_ = f.Close()
 			}
 		}
@@ -868,10 +964,12 @@ func TestUntrustedNidStaysInBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	fNid, _, _, err := img0.(*image).resolve("x", "f", false)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if patchDirentNid(buf, fNid, 1<<58) == 0 {
 		t.Fatal("could not patch the dirent nid")
 	}
@@ -886,32 +984,40 @@ func TestUntrustedNidStaysInBounds(t *testing.T) {
 func TestUntrustedChunkAddrStaysInBounds(t *testing.T) {
 	out := &seekBuf{}
 	w := Create(out, WithBuildTime(1000, 0), WithBlockSize(65536))
+
 	f, err := w.Create("/f")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("hello")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Chtimes("/f", time.Unix(2000, 0), time.Unix(2000, 0)); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	buf := out.buf
 
 	img0, err := Open(bytes.NewReader(buf))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	fi, err := fs.Stat(img0, "f")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	nid := fi.Sys().(*Stat).Ino
 	inodeOff := img0.(*image).metaStartPos() + int64(nid)*disk.SizeInodeCompact
 
@@ -924,10 +1030,12 @@ func TestUntrustedChunkAddrStaysInBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	ino, err := (&file{img: img1.(*image), nid: nid}).readInfo()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	base := inodeOff + ino.flatDataOffset()
 	if base%disk.SizeChunkIndex != 0 {
 		base = (base + disk.SizeChunkIndex - 1) & ^int64(disk.SizeChunkIndex-1)
@@ -954,10 +1062,12 @@ func TestUntrustedChunkIndexAllocIsBacked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	inodeOff := img0.(*image).metaStartPos() + int64(nid)*disk.SizeInodeCompact
 
 	// Enough chunks for an index map just under the cap.
 	const size = (maxChunkIndexBytes / disk.SizeChunkIndex) * 4096
+
 	binary.LittleEndian.PutUint16(buf[inodeOff:], uint16(disk.LayoutChunkBased)<<1|1)
 	binary.LittleEndian.PutUint64(buf[inodeOff+8:], uint64(size))
 	binary.LittleEndian.PutUint32(buf[inodeOff+16:], disk.LayoutChunkFormatIndexes)
@@ -976,6 +1086,7 @@ func TestUntrustedChunkIndexAllocIsBacked(t *testing.T) {
 		if err != nil {
 			continue
 		}
+
 		if dr, ok := fi.(interface{ DataRange() []DataRange }); ok {
 			_ = dr.DataRange()
 		}
@@ -990,6 +1101,7 @@ func TestUntrustedChunkIndexAllocIsBacked(t *testing.T) {
 		t.Errorf("%d Stat+DataRange calls on a %d byte image allocated %d bytes",
 			calls, len(buf), grew)
 	}
+
 	t.Logf("%d calls allocated %d bytes from a %d byte image", calls, grew, len(buf))
 }
 
@@ -1016,24 +1128,30 @@ func TestCopyFromImageSharesChunkMaps(t *testing.T) {
 
 	out := &seekBuf{}
 	w := Create(out, WithBuildTime(1000, 0), WithDataFile(df))
+
 	f, err := w.Create("/f0")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write(bytes.Repeat([]byte{0xAB}, blocks*4096)); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Mkdir("/d", 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	for i := range links {
 		if err := w.Link("/f0", fmt.Sprintf("/d/l%06d", i)); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1055,10 +1173,13 @@ func TestCopyFromImageSharesChunkMaps(t *testing.T) {
 	if owner == nil || owner.linkTo != nil || len(owner.chunks) == 0 {
 		t.Fatalf("/f0 = %+v, want the entry that owns the chunk map", owner)
 	}
+
 	if cap(owner.chunks) != len(owner.chunks) {
 		t.Errorf("chunk slice holds %d entries with capacity for %d", len(owner.chunks), cap(owner.chunks))
 	}
+
 	entries, aliases := 0, 0
+
 	for _, e := range dst.byPath {
 		switch {
 		case len(e.chunks) > 0:
@@ -1067,12 +1188,15 @@ func TestCopyFromImageSharesChunkMaps(t *testing.T) {
 			aliases++
 		}
 	}
+
 	if entries != 1 || aliases != links {
 		t.Fatalf("%d entries carry chunks and %d alias /f0, want 1 and %d", entries, aliases, links)
 	}
+
 	if owner.extraLinks != links {
 		t.Errorf("/f0 has %d extra links, want %d", owner.extraLinks, links)
 	}
+
 	t.Logf("%d names share one %d-entry chunk map", aliases+1, len(owner.chunks))
 }
 
@@ -1083,29 +1207,36 @@ func TestCopyFromImageSharesChunkMaps(t *testing.T) {
 // earlier block, so the file read back the bytes already there.
 func TestUnalignedDataFileStart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "data.bin")
+
 	pre := []byte("PRE-EXISTING BYTES, NOT BLOCK ALIGNED")
 	if err := os.WriteFile(path, pre, 0o644); err != nil {
 		t.Fatal(err)
 	}
+
 	df, err := os.OpenFile(path, os.O_RDWR, 0o644)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = df.Close() }()
 
 	out := &seekBuf{}
 	w := Create(out, WithDataFile(df))
+
 	f, err := w.Create("/a")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	want := bytes.Repeat([]byte{0xCD}, 4096)
 	if _, err := f.Write(want); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1115,14 +1246,17 @@ func TestUnalignedDataFileStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = dfr.Close() }()
+
 	img, err := Open(bytes.NewReader(out.buf), WithExtraDevices(dfr))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	got, err := fs.ReadFile(img, "a")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !bytes.Equal(got, want) {
 		t.Errorf("/a read back %d bytes starting %q, want the bytes written",
 			len(got), got[:min(len(got), 24)])
@@ -1141,6 +1275,7 @@ func TestShortReadIsNotZeroFilled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	inodeOff := img0.(*image).metaStartPos() + int64(nid)*disk.SizeInodeCompact
 
 	// Flat-plain, one block past the end of the image.
@@ -1153,11 +1288,13 @@ func TestShortReadIsNotZeroFilled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tampered image failed to open: %v", err)
 	}
+
 	got, err := fs.ReadFile(img, "f")
 	if err == nil {
 		t.Fatalf("ReadFile returned %d bytes (all zero: %v) instead of an error",
 			len(got), bytes.Equal(got, make([]byte, len(got))))
 	}
+
 	t.Logf("rejected: %v", err)
 }
 
@@ -1168,25 +1305,31 @@ func TestShortReadIsNotZeroFilled(t *testing.T) {
 func TestXattrPrefixAndDuplicates(t *testing.T) {
 	out := &seekBuf{}
 	w := Create(out, WithBuildTime(1000, 0))
+
 	f, err := w.Create("/f")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Setxattr("/f", "security.capability", "real"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	buf := out.buf
 
 	img0, err := Open(bytes.NewReader(buf))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if fi, err := fs.Stat(img0, "f"); err != nil {
 		t.Fatal(err)
 	} else if st := fi.Sys().(*Stat); st.Xattrs["security.capability"] != "real" {
@@ -1199,15 +1342,18 @@ func TestXattrPrefixAndDuplicates(t *testing.T) {
 	if i < 0 {
 		t.Fatal("could not find the stored xattr name")
 	}
+
 	if got := buf[i-3]; got != 6 {
 		t.Fatalf("expected name index 6 before the name, got %d", got)
 	}
+
 	buf[i-3] = 7
 
 	img, err := Open(bytes.NewReader(buf))
 	if err != nil {
 		t.Fatalf("tampered image failed to open: %v", err)
 	}
+
 	if _, err := fs.Stat(img, "f"); err == nil {
 		t.Error("Stat accepted an undefined xattr name index")
 	} else if !errors.Is(err, ErrInvalid) {
@@ -1219,6 +1365,7 @@ func TestXattrPrefixAndDuplicates(t *testing.T) {
 	if err := setXattr(stat, 1, "security.capability", "spoofed"); err == nil {
 		t.Error("setXattr accepted a duplicate key")
 	}
+
 	if stat.Xattrs["security.capability"] != "real" {
 		t.Error("a rejected duplicate overwrote the original value")
 	}
@@ -1233,31 +1380,39 @@ func TestXattrPrefixAndDuplicates(t *testing.T) {
 func TestCopyFromImageXattrParity(t *testing.T) {
 	build := func(t *testing.T, xattrs map[string]string) []byte {
 		t.Helper()
+
 		out := &seekBuf{}
 		w := Create(out, WithBuildTime(1000, 0))
+
 		f, err := w.Create("/f")
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if err := f.Close(); err != nil {
 			t.Fatal(err)
 		}
+
 		for k, v := range xattrs {
 			if err := w.Setxattr("/f", k, v); err != nil {
 				t.Fatal(err)
 			}
 		}
+
 		if err := w.Close(); err != nil {
 			t.Fatal(err)
 		}
+
 		return out.buf
 	}
 	copyMeta := func(t *testing.T, buf []byte) error {
 		t.Helper()
+
 		img, err := Open(bytes.NewReader(buf))
 		if err != nil {
 			t.Fatalf("image failed to open: %v", err)
 		}
+
 		return Create(&seekBuf{}).CopyFrom(img, MetadataOnly())
 	}
 
@@ -1272,11 +1427,14 @@ func TestCopyFromImageXattrParity(t *testing.T) {
 		if i < 0 || buf[i-3] != 6 {
 			t.Fatalf("could not locate the stored xattr entry (index byte %d)", buf[i-3])
 		}
+
 		buf[i-3] = 7
+
 		err := copyMeta(t, buf)
 		if err == nil {
 			t.Fatal("CopyFrom accepted an undefined xattr name index")
 		}
+
 		if !errors.Is(err, ErrInvalid) {
 			t.Errorf("err = %v, want it to wrap ErrInvalid", err)
 		}
@@ -1292,15 +1450,19 @@ func TestCopyFromImageXattrParity(t *testing.T) {
 		if err := copyMeta(t, buf); err != nil {
 			t.Fatalf("untampered image failed to copy: %v", err)
 		}
+
 		i := bytes.Index(buf, []byte("bbbb"))
 		if i < 0 {
 			t.Fatal("could not locate the second stored xattr name")
 		}
+
 		copy(buf[i:], "aaaa")
+
 		err := copyMeta(t, buf)
 		if err == nil {
 			t.Fatal("CopyFrom accepted a duplicated xattr key")
 		}
+
 		if !errors.Is(err, ErrInvalid) {
 			t.Errorf("err = %v, want it to wrap ErrInvalid", err)
 		}
@@ -1314,25 +1476,30 @@ func TestCopyFromImageXattrParity(t *testing.T) {
 // treated the image as the corrupt thing it is.
 func TestEmptyDirentNameIsRejected(t *testing.T) {
 	out := &seekBuf{}
+
 	w := Create(out, WithBuildTime(1000, 0))
 	for _, n := range []string{"/a", "/b"} {
 		f, err := w.Create(n)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if err := f.Close(); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	buf := out.buf
 
 	img0, err := Open(bytes.NewReader(buf))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	aNid, _, _, err := img0.(*image).resolve("a", "a", false)
 	if err != nil {
 		t.Fatal(err)
@@ -1342,16 +1509,20 @@ func TestEmptyDirentNameIsRejected(t *testing.T) {
 	// is 12 bytes on — so a's name spans zero bytes. Nothing else changes.
 	var want [8]byte
 	binary.LittleEndian.PutUint64(want[:], aNid)
+
 	off := -1
+
 	for o := 0; o+disk.SizeDirent*2 <= len(buf); o += 4 {
 		if bytes.Equal(buf[o:o+8], want[:]) {
 			off = o
 			break
 		}
 	}
+
 	if off < 0 {
 		t.Fatal("could not locate the dirent for /a")
 	}
+
 	nextNameOff := binary.LittleEndian.Uint16(buf[off+disk.SizeDirent+8:])
 	binary.LittleEndian.PutUint16(buf[off+8:], nextNameOff)
 
@@ -1359,11 +1530,13 @@ func TestEmptyDirentNameIsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tampered image failed to open: %v", err)
 	}
+
 	if ents, err := fs.ReadDir(img, "."); err == nil {
 		names := make([]string, 0, len(ents))
 		for _, e := range ents {
 			names = append(names, e.Name())
 		}
+
 		t.Errorf("ReadDir returned %q, want an error", names)
 	} else if !errors.Is(err, ErrInvalid) {
 		t.Errorf("ReadDir err = %v, want it to wrap ErrInvalid", err)
@@ -1382,33 +1555,43 @@ func TestEmptyDirentNameIsRejected(t *testing.T) {
 // the image plus the byte offset of that file's inode.
 func buildFlatPlainImage(t *testing.T) ([]byte, int64) {
 	t.Helper()
+
 	out := &seekBuf{}
 	w := Create(out, WithBuildTime(1000, 0))
+
 	f, err := w.Create("/big")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write(bytes.Repeat([]byte("x"), 2*4096)); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	img, err := Open(bytes.NewReader(out.buf))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	fi, err := fs.Stat(img, "big")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if fi.(*fileInfo).layout != disk.LayoutFlatPlain {
 		t.Fatalf("test premise broken: layout = %d, want flat-plain", fi.(*fileInfo).layout)
 	}
+
 	nid := fi.Sys().(*Stat).Ino
+
 	return out.buf, img.(*image).metaStartPos() + int64(nid)*disk.SizeInodeCompact
 }
 
@@ -1434,12 +1617,15 @@ func TestFlatPlainAddressIsBounded(t *testing.T) {
 			if err != nil {
 				t.Fatalf("tampered image failed to open: %v", err)
 			}
+
 			if _, err := fs.Stat(img, "big"); !errors.Is(err, ErrInvalid) {
 				t.Errorf("Stat err = %v, want ErrInvalid (the address is published as DataRange.Offset)", err)
 			}
+
 			if _, err := fs.ReadFile(img, "big"); !errors.Is(err, ErrInvalid) {
 				t.Errorf("ReadFile err = %v, want ErrInvalid", err)
 			}
+
 			if err := Create(&seekBuf{}).CopyFrom(img); err == nil {
 				t.Error("CopyFrom copied a file whose data lies outside the image")
 			}
@@ -1453,23 +1639,30 @@ func TestFlatPlainAddressIsBounded(t *testing.T) {
 // an empty one when nothing followed.
 func TestCopyFromImageInlineCrossingBlock(t *testing.T) {
 	out := &seekBuf{}
+
 	w := Create(out, WithBuildTime(1000, 0))
 	if err := w.Symlink("target", "/l"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	buf := out.buf
+
 	img0, err := Open(bytes.NewReader(buf))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	nid, _, _, err := img0.(*image).resolve("l", "l", false)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	inodeOff := img0.(*image).metaStartPos() + int64(nid)*disk.SizeInodeCompact
+
 	format := binary.LittleEndian.Uint16(buf[inodeOff:])
 	if (format&0x0E)>>1 != disk.LayoutFlatInline {
 		t.Fatalf("test premise broken: format %#x, want a flat-inline inode", format)
@@ -1486,11 +1679,13 @@ func TestCopyFromImageInlineCrossingBlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tampered image failed to open: %v", err)
 	}
+
 	if target, err := img.(interface {
 		ReadLink(string) (string, error)
 	}).ReadLink("l"); err == nil {
 		t.Errorf("ReadLink returned %q, want an error", target)
 	}
+
 	err = Create(&seekBuf{}).CopyFrom(img, MetadataOnly())
 	if err == nil {
 		t.Error("CopyFrom accepted inline data crossing its block")
@@ -1505,19 +1700,24 @@ func TestCopyFromImageInlineCrossingBlock(t *testing.T) {
 func TestCopyFromImageTruncatedXattr(t *testing.T) {
 	out := &seekBuf{}
 	w := Create(out, WithBuildTime(1000, 0))
+
 	f, err := w.Create("/f")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Setxattr("/f", "security.capability", "real"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	buf := out.buf
 	// The 4-byte entry precedes the stored name: name length, name index,
 	// then the little-endian value length.
@@ -1525,15 +1725,18 @@ func TestCopyFromImageTruncatedXattr(t *testing.T) {
 	if i < 0 || buf[i-3] != 6 {
 		t.Fatalf("could not locate the stored xattr entry")
 	}
+
 	binary.LittleEndian.PutUint16(buf[i-2:], 4000)
 
 	img, err := Open(bytes.NewReader(buf))
 	if err != nil {
 		t.Fatalf("tampered image failed to open: %v", err)
 	}
+
 	if _, err := fs.Stat(img, "f"); err == nil {
 		t.Error("Stat accepted an xattr running past its area")
 	}
+
 	err = Create(&seekBuf{}).CopyFrom(img, MetadataOnly())
 	if err == nil {
 		t.Error("CopyFrom accepted an xattr running past its area")

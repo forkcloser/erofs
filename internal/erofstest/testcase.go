@@ -38,6 +38,7 @@ type Converter func(t testing.TB, wt WriterToTar) fs.FS
 func MkfsErofs(opts ...string) Converter {
 	return func(t testing.TB, wt WriterToTar) fs.FS {
 		t.Helper()
+
 		tarStream := TarFromWriterTo(wt)
 		defer func() { _ = tarStream.Close() }()
 
@@ -45,6 +46,7 @@ func MkfsErofs(opts ...string) Converter {
 		if err := ConvertTarErofs(context.Background(), tarStream, path, "", opts); err != nil {
 			t.Fatal(err)
 		}
+
 		return openEroFS(t, path)
 	}
 }
@@ -55,11 +57,13 @@ func MkfsErofs(opts ...string) Converter {
 func MkfsErofsBlobDev(chunkSize int, extraOpts ...string) Converter {
 	return func(t testing.TB, wt WriterToTar) fs.FS {
 		t.Helper()
+
 		tarStream := TarFromWriterTo(wt)
 		defer func() { _ = tarStream.Close() }()
 
 		path := filepath.Join(t.TempDir(), "test.erofs")
 		blobPath := path + ".blob"
+
 		opts := append([]string{
 			fmt.Sprintf("--blobdev=%s", blobPath),
 			fmt.Sprintf("--chunksize=%d", chunkSize),
@@ -67,11 +71,14 @@ func MkfsErofsBlobDev(chunkSize int, extraOpts ...string) Converter {
 		if err := ConvertTarErofs(context.Background(), tarStream, path, "", opts); err != nil {
 			t.Fatal(err)
 		}
+
 		bf, err := os.Open(blobPath)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		t.Cleanup(func() { _ = bf.Close() })
+
 		return openEroFS(t, path, erofs.WithExtraDevices(bf))
 	}
 }
@@ -81,6 +88,7 @@ func MkfsErofsBlobDev(chunkSize int, extraOpts ...string) Converter {
 func MkfsErofsMaxSize(maxBytes int64, opts ...string) Converter {
 	return func(t testing.TB, wt WriterToTar) fs.FS {
 		t.Helper()
+
 		tarStream := TarFromWriterTo(wt)
 		defer func() { _ = tarStream.Close() }()
 
@@ -88,13 +96,16 @@ func MkfsErofsMaxSize(maxBytes int64, opts ...string) Converter {
 		if err := ConvertTarErofs(context.Background(), tarStream, path, "", opts); err != nil {
 			t.Fatal(err)
 		}
+
 		fi, err := os.Stat(path)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if fi.Size() > maxBytes {
 			t.Errorf("image size %d exceeds limit %d", fi.Size(), maxBytes)
 		}
+
 		return openEroFS(t, path)
 	}
 }
@@ -102,23 +113,29 @@ func MkfsErofsMaxSize(maxBytes int64, opts ...string) Converter {
 // openEroFS opens an EROFS image file and returns an fs.FS.
 func openEroFS(t testing.TB, path string, opts ...erofs.OpenOpt) fs.FS {
 	t.Helper()
+
 	f, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	t.Cleanup(func() { _ = f.Close() })
+
 	efs, err := erofs.Open(f, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return efs
 }
 
 func (tc *testCase) Run(t testing.TB, conv Converter) {
 	t.Helper()
+
 	if conv == nil {
 		conv = MkfsErofs()
 	}
+
 	efs := conv(t, tc.tar())
 	tc.verify(t, efs)
 }
@@ -131,30 +148,32 @@ var Basic TestCase = &testCase{
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
 		lotsOfFilesC := make(chan WriterToTar)
+
 		go func() {
 			for i := range 5000 {
-				lotsOfFilesC <- tc.File(fmt.Sprintf("/usr/lib/testdir/lotsoffiles/%d", i), []byte{}, 0600)
+				lotsOfFilesC <- tc.File(fmt.Sprintf("/usr/lib/testdir/lotsoffiles/%d", i), []byte{}, 0o600)
 			}
+
 			close(lotsOfFilesC)
 		}()
 
 		return TarAll(
-			tc.Dir("/usr", 0755),
-			tc.Dir("/usr/lib", 0755),
-			tc.Dir("/usr/lib/testdir", 0755),
-			tc.File("/in-root.txt", []byte("root file content\n"), 0600),
-			tc.File("/usr/lib/testdir/emptyfile", []byte{}, 0600),
-			tc.File("/usr/lib/testdir/13k-zeros.raw", bytes.Repeat([]byte{0}, 1024*13), 0600),
-			tc.File("/usr/lib/testdir/16k-zeros.raw", bytes.Repeat([]byte{0}, 1024*16), 0600),
-			tc.File("/usr/lib/testdir/5k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*5), 0600),
-			tc.File("/usr/lib/testdir/16k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*16), 0600),
-			tc.Dir("/usr/lib/testdir/emptydir", 0600),
-			tc.Dir("/usr/lib/testdir/case", 0755),
-			tc.File("/usr/lib/testdir/case/file.txt", []byte("lower case dir\n"), 0600),
-			tc.Dir("/usr/lib/testdir/CASE", 0755),
-			tc.File("/usr/lib/testdir/CASE/file.txt", []byte("upper case dir\n"), 0600),
-			tc.File("/usr/lib/testdir/case.txt", []byte("lower case file\n"), 0600),
-			tc.File("/usr/lib/testdir/CASE.txt", []byte("upper case file\n"), 0600),
+			tc.Dir("/usr", 0o755),
+			tc.Dir("/usr/lib", 0o755),
+			tc.Dir("/usr/lib/testdir", 0o755),
+			tc.File("/in-root.txt", []byte("root file content\n"), 0o600),
+			tc.File("/usr/lib/testdir/emptyfile", []byte{}, 0o600),
+			tc.File("/usr/lib/testdir/13k-zeros.raw", bytes.Repeat([]byte{0}, 1024*13), 0o600),
+			tc.File("/usr/lib/testdir/16k-zeros.raw", bytes.Repeat([]byte{0}, 1024*16), 0o600),
+			tc.File("/usr/lib/testdir/5k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*5), 0o600),
+			tc.File("/usr/lib/testdir/16k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*16), 0o600),
+			tc.Dir("/usr/lib/testdir/emptydir", 0o600),
+			tc.Dir("/usr/lib/testdir/case", 0o755),
+			tc.File("/usr/lib/testdir/case/file.txt", []byte("lower case dir\n"), 0o600),
+			tc.Dir("/usr/lib/testdir/CASE", 0o755),
+			tc.File("/usr/lib/testdir/CASE/file.txt", []byte("upper case dir\n"), 0o600),
+			tc.File("/usr/lib/testdir/case.txt", []byte("lower case file\n"), 0o600),
+			tc.File("/usr/lib/testdir/CASE.txt", []byte("upper case file\n"), 0o600),
 			tc.Symlink("/in-root.txt", "/usr/lib/testdir/link"),
 			tc.Symlink("../../../in-root.txt", "/usr/lib/testdir/link-to-root"),
 			tc.Symlink("/in-root.txt", "/usr/lib/testdir/abs-link"),
@@ -165,30 +184,30 @@ var Basic TestCase = &testCase{
 			tc.WithXattrs(map[string]string{
 				"user.custom":      "value1",
 				"user.xdg.comment": "some random comment",
-			}).Dir("/usr/lib/withxattr", 0600),
+			}).Dir("/usr/lib/withxattr", 0o600),
 			tc.WithXattrs(map[string]string{
 				"user.xdg.comment": "comment for f1",
 				"user.common":      "same-value",
-			}).File("/usr/lib/withxattr/f1", []byte{}, 0600),
+			}).File("/usr/lib/withxattr/f1", []byte{}, 0o600),
 			tc.WithXattrs(map[string]string{
 				"user.xdg.comment": "comment for f2",
 				"user.common":      "same-value",
-			}).File("/usr/lib/withxattr/f2", []byte{}, 0600),
+			}).File("/usr/lib/withxattr/f2", []byte{}, 0o600),
 			tc.WithXattrs(map[string]string{
 				"user.xdg.comment": "comment for f3",
 				"user.common":      "same-value",
-			}).File("/usr/lib/withxattr/f3", []byte{}, 0600),
+			}).File("/usr/lib/withxattr/f3", []byte{}, 0o600),
 			tc.WithXattrs(map[string]string{
 				"user.xdg.comment": "comment for f4",
 				"user.common":      "same-value",
-			}).File("/usr/lib/withxattr/f4", []byte{}, 0600),
-			tc.Dir("/dev", 0755),
+			}).File("/usr/lib/withxattr/f4", []byte{}, 0o600),
+			tc.Dir("/dev", 0o755),
 			tc.Device("/dev/block0", fs.ModeDevice, 0, 1),
 			tc.Device("/dev/block1", fs.ModeDevice, 0, 0),
 			tc.Device("/dev/char0", fs.ModeCharDevice, 0, 2),
 			tc.Device("/dev/char1", fs.ModeCharDevice, 0, 3),
 			tc.Device("/dev/fifo0", fs.ModeNamedPipe, 0, 0),
-			tc.Dir("/usr/lib/testdir/lotsoffiles", 0755),
+			tc.Dir("/usr/lib/testdir/lotsoffiles", 0o755),
 			TarStream(lotsOfFilesC),
 		)
 	},
@@ -200,7 +219,12 @@ var Basic TestCase = &testCase{
 		CheckFileBytes(t, fsys, "usr/lib/testdir/13k-zeros.raw", bytes.Repeat([]byte{0}, 1024*13))
 		CheckFileBytes(t, fsys, "usr/lib/testdir/16k-zeros.raw", bytes.Repeat([]byte{0}, 1024*16))
 		CheckFileBytes(t, fsys, "usr/lib/testdir/5k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*5))
-		CheckFileBytes(t, fsys, "usr/lib/testdir/16k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*16))
+		CheckFileBytes(
+			t,
+			fsys,
+			"usr/lib/testdir/16k-sequence.raw",
+			bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*16),
+		)
 		CheckDirEntries(t, fsys, "usr/lib/testdir/emptydir", nil)
 		CheckDirSize(t, fsys, "usr/lib/testdir/lotsoffiles", 5000)
 
@@ -293,19 +317,20 @@ const (
 var LongXattrs TestCase = &testCase{
 	tar: func() WriterToTar {
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+
 		return TarAll(
-			tc.Dir("/usr", 0755),
-			tc.Dir("/usr/lib", 0755),
-			tc.Dir("/usr/lib/generated", 0755),
-			tc.Dir("/usr/lib/generated/xattrs", 0755),
+			tc.Dir("/usr", 0o755),
+			tc.Dir("/usr/lib", 0o755),
+			tc.Dir("/usr/lib/generated", 0o755),
+			tc.Dir("/usr/lib/generated/xattrs", 0o755),
 			tc.WithXattrs(map[string]string{
 				longXattrPrefix + "long-value": longXattrValue,
 				longXattrPrefix + "shortvalue": "y",
-			}).File("/usr/lib/generated/xattrs/long-prefix-xattrs", []byte{}, 0600),
+			}).File("/usr/lib/generated/xattrs/long-prefix-xattrs", []byte{}, 0o600),
 			tc.WithXattrs(map[string]string{
 				"user.short.long-value": longXattrValue,
 				"user.short.shortvalue": "y",
-			}).File("/usr/lib/generated/xattrs/short-prefix-xattrs", []byte{}, 0600),
+			}).File("/usr/lib/generated/xattrs/short-prefix-xattrs", []byte{}, 0o600),
 		)
 	},
 	verify: func(t testing.TB, fsys fs.FS) {
@@ -327,16 +352,17 @@ var LongXattrs TestCase = &testCase{
 var SpecialModeBits TestCase = &testCase{
 	tar: func() WriterToTar {
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+
 		return TarAll(
-			tc.Dir("/bin", 0755),
-			tc.File("/bin/su", []byte("setuid\n"), 0755|fs.ModeSetuid),
-			tc.File("/bin/wall", []byte("setgid\n"), 0755|fs.ModeSetgid),
-			tc.File("/bin/all-bits", []byte("all\n"), 0700|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky),
-			tc.File("/bin/plain", []byte("plain\n"), 0644),
+			tc.Dir("/bin", 0o755),
+			tc.File("/bin/su", []byte("setuid\n"), 0o755|fs.ModeSetuid),
+			tc.File("/bin/wall", []byte("setgid\n"), 0o755|fs.ModeSetgid),
+			tc.File("/bin/all-bits", []byte("all\n"), 0o700|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky),
+			tc.File("/bin/plain", []byte("plain\n"), 0o644),
 			tc.Symlink("/bin/su", "/bin/su-link"),
-			tc.Dir("/tmp", 0777|fs.ModeSticky),
-			tc.Dir("/var", 0775|fs.ModeSetgid),
-			tc.Dir("/dev", 0755),
+			tc.Dir("/tmp", 0o777|fs.ModeSticky),
+			tc.Dir("/var", 0o775|fs.ModeSetgid),
+			tc.Dir("/dev", 0o755),
 			tc.Device("/dev/null", fs.ModeCharDevice, 1, 3),
 			tc.Device("/dev/loop0", fs.ModeDevice, 7, 0),
 			tc.Device("/dev/initctl", fs.ModeNamedPipe, 0, 0),
@@ -345,17 +371,17 @@ var SpecialModeBits TestCase = &testCase{
 	verify: func(t testing.TB, fsys fs.FS) {
 		t.Helper()
 
-		CheckMode(t, fsys, "bin/su", 0755|fs.ModeSetuid)
-		CheckMode(t, fsys, "bin/wall", 0755|fs.ModeSetgid)
-		CheckMode(t, fsys, "bin/all-bits", 0700|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky)
-		CheckMode(t, fsys, "bin/plain", 0644)
-		CheckMode(t, fsys, "bin/su-link", 0777|fs.ModeSymlink)
-		CheckMode(t, fsys, "bin", 0755|fs.ModeDir)
-		CheckMode(t, fsys, "tmp", 0777|fs.ModeDir|fs.ModeSticky)
-		CheckMode(t, fsys, "var", 0775|fs.ModeDir|fs.ModeSetgid)
-		CheckMode(t, fsys, "dev/null", 0600|fs.ModeDevice|fs.ModeCharDevice)
-		CheckMode(t, fsys, "dev/loop0", 0600|fs.ModeDevice)
-		CheckMode(t, fsys, "dev/initctl", 0600|fs.ModeNamedPipe)
+		CheckMode(t, fsys, "bin/su", 0o755|fs.ModeSetuid)
+		CheckMode(t, fsys, "bin/wall", 0o755|fs.ModeSetgid)
+		CheckMode(t, fsys, "bin/all-bits", 0o700|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky)
+		CheckMode(t, fsys, "bin/plain", 0o644)
+		CheckMode(t, fsys, "bin/su-link", 0o777|fs.ModeSymlink)
+		CheckMode(t, fsys, "bin", 0o755|fs.ModeDir)
+		CheckMode(t, fsys, "tmp", 0o777|fs.ModeDir|fs.ModeSticky)
+		CheckMode(t, fsys, "var", 0o775|fs.ModeDir|fs.ModeSetgid)
+		CheckMode(t, fsys, "dev/null", 0o600|fs.ModeDevice|fs.ModeCharDevice)
+		CheckMode(t, fsys, "dev/loop0", 0o600|fs.ModeDevice)
+		CheckMode(t, fsys, "dev/initctl", 0o600|fs.ModeNamedPipe)
 
 		// The natural "copy this out to disk" path: os.Chmod only applies
 		// setuid/setgid/sticky when the fs.Mode* flags are set.
@@ -363,6 +389,7 @@ var SpecialModeBits TestCase = &testCase{
 		if err != nil {
 			t.Fatalf("stat bin/su: %v", err)
 		}
+
 		if fi.Mode()&fs.ModeSetuid == 0 {
 			t.Errorf("bin/su: mode %v (%#o) has no fs.ModeSetuid", fi.Mode(), uint32(fi.Mode()))
 		}
@@ -377,11 +404,12 @@ var SpecialModeBits TestCase = &testCase{
 var FileSizes TestCase = &testCase{
 	tar: func() WriterToTar {
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+
 		return TarAll(
-			tc.File("/exact-block.bin", generateContent(4096), 0644),
-			tc.File("/block-plus-one.bin", generateContent(4097), 0644),
-			tc.File("/partial-block.bin", generateContent(8000), 0644),
-			tc.File("/multi-block.bin", generateContent(1024*1024), 0644),
+			tc.File("/exact-block.bin", generateContent(4096), 0o644),
+			tc.File("/block-plus-one.bin", generateContent(4097), 0o644),
+			tc.File("/partial-block.bin", generateContent(8000), 0o644),
+			tc.File("/multi-block.bin", generateContent(1024*1024), 0o644),
 		)
 	},
 	verify: func(t testing.TB, fsys fs.FS) {
@@ -402,7 +430,7 @@ var LargeFile TestCase = &testCase{
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 		// 256MB + 4KB to push past the 65535-block boundary.
 		return TarAll(
-			tc.File("/large.bin", generateContent(256*1024*1024+4096), 0644),
+			tc.File("/large.bin", generateContent(256*1024*1024+4096), 0o644),
 		)
 	},
 	verify: func(t testing.TB, fsys fs.FS) {
@@ -433,21 +461,25 @@ var uidgidTestValues = []struct{ uid, gid int }{
 var UIDGIDValues TestCase = &testCase{
 	tar: func() WriterToTar {
 		base := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+
 		var entries []WriterToTar
+
 		for _, id := range uidgidTestValues {
 			tc := base.WithUIDGID(id.uid, id.gid)
 			prefix := fmt.Sprintf("/id-%d-%d", id.uid, id.gid)
 			entries = append(entries,
-				tc.Dir(prefix, 0755),
-				tc.File(prefix+"/file.txt", []byte("hello"), 0644),
-				tc.Dir(prefix+"/dir", 0755),
+				tc.Dir(prefix, 0o755),
+				tc.File(prefix+"/file.txt", []byte("hello"), 0o644),
+				tc.Dir(prefix+"/dir", 0o755),
 				tc.Symlink("file.txt", prefix+"/link"),
 			)
 		}
+
 		return TarAll(entries...)
 	},
 	verify: func(t testing.TB, fsys fs.FS) {
 		t.Helper()
+
 		for _, id := range uidgidTestValues {
 			prefix := fmt.Sprintf("id-%d-%d", id.uid, id.gid)
 			wantUID := uint32(id.uid)
@@ -477,17 +509,20 @@ func generateContent(size int) []byte {
 	for i := range data {
 		data[i] = byte(i % 251)
 	}
+
 	return data
 }
 
 // verifyContent checks a file matches the expected deterministic pattern.
 func verifyContent(t testing.TB, fsys fs.FS, name string, size int) {
 	t.Helper()
+
 	f, err := fsys.Open(name)
 	if err != nil {
 		t.Errorf("open %s: %v", name, err)
 		return
 	}
+
 	defer func() { _ = f.Close() }()
 
 	fi, err := f.Stat()
@@ -495,6 +530,7 @@ func verifyContent(t testing.TB, fsys fs.FS, name string, size int) {
 		t.Errorf("stat %s: %v", name, err)
 		return
 	}
+
 	if fi.Size() != int64(size) {
 		t.Errorf("%s: size %d, want %d", name, fi.Size(), size)
 		return
@@ -503,6 +539,7 @@ func verifyContent(t testing.TB, fsys fs.FS, name string, size int) {
 	// Read in chunks and verify against expected pattern.
 	buf := make([]byte, 64*1024)
 	offset := 0
+
 	for {
 		n, err := f.Read(buf)
 		for i := range n {
@@ -511,11 +548,14 @@ func verifyContent(t testing.TB, fsys fs.FS, name string, size int) {
 				return
 			}
 		}
+
 		offset += n
+
 		if err != nil {
 			break
 		}
 	}
+
 	if offset != size {
 		t.Errorf("%s: read %d bytes, want %d", name, offset, size)
 	}
@@ -534,15 +574,17 @@ var SparseFiles TestCase = &testCase{
 	tar: func() WriterToTar {
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 		marker := []byte("hello sparse world!\n")
+
 		return TarAll(
 			// 10MB file with a marker at offset 5MB.
-			tc.SparseFile("/sparse-10m.bin", 10*1024*1024, marker, 5*1024*1024, 0644),
+			tc.SparseFile("/sparse-10m.bin", 10*1024*1024, marker, 5*1024*1024, 0o644),
 			// 20MB file, entirely zeros.
-			tc.SparseFile("/sparse-20m.bin", 20*1024*1024, nil, 0, 0644),
+			tc.SparseFile("/sparse-20m.bin", 20*1024*1024, nil, 0, 0o644),
 		)
 	},
 	verify: func(t testing.TB, fsys fs.FS) {
 		t.Helper()
+
 		marker := "hello sparse world!\n"
 
 		verifySparse(t, fsys, "sparse-10m.bin", 10*1024*1024, 5*1024*1024, marker)
@@ -553,13 +595,15 @@ var SparseFiles TestCase = &testCase{
 // verifySparse checks a sparse file's size, verifies zeros by sampling a
 // 4KB block every 1MB, and optionally checks for a data marker at markerOff.
 // Set markerOff to -1 to skip the marker check.
-func verifySparse(t testing.TB, fsys fs.FS, name string, size int64, markerOff int64, marker string) {
+func verifySparse(t testing.TB, fsys fs.FS, name string, size, markerOff int64, marker string) {
 	t.Helper()
+
 	f, err := fsys.Open(name)
 	if err != nil {
 		t.Errorf("open %s: %v", name, err)
 		return
 	}
+
 	defer func() { _ = f.Close() }()
 
 	fi, err := f.Stat()
@@ -567,6 +611,7 @@ func verifySparse(t testing.TB, fsys fs.FS, name string, size int64, markerOff i
 		t.Errorf("stat %s: %v", name, err)
 		return
 	}
+
 	if fi.Size() != size {
 		t.Errorf("%s: size %d, want %d", name, fi.Size(), size)
 		return
@@ -574,7 +619,9 @@ func verifySparse(t testing.TB, fsys fs.FS, name string, size int64, markerOff i
 
 	// Sample a 4KB block every 1MB to verify zeros.
 	const step = 1024 * 1024
+
 	buf := make([]byte, 4096)
+
 	offset := int64(0)
 	for sampleOff := int64(0); sampleOff < size; sampleOff += step {
 		// Skip to the sample offset.
@@ -584,9 +631,12 @@ func verifySparse(t testing.TB, fsys fs.FS, name string, size int64, markerOff i
 				t.Errorf("%s: skip to offset %d: %v", name, sampleOff, err)
 				return
 			}
+
 			offset += skipped
 		}
+
 		toRead := min(int64(len(buf)), size-offset)
+
 		n, err := io.ReadFull(f, buf[:toRead])
 		if err != nil && int64(n) != toRead {
 			t.Errorf("%s: read at offset %d: got %d bytes, want %d: %v", name, offset, n, toRead, err)
@@ -597,12 +647,14 @@ func verifySparse(t testing.TB, fsys fs.FS, name string, size int64, markerOff i
 			offset += int64(n)
 			continue
 		}
+
 		for i := range n {
 			if buf[i] != 0 {
 				t.Errorf("%s: non-zero byte at offset %d", name, offset+int64(i))
 				return
 			}
 		}
+
 		offset += int64(n)
 	}
 
@@ -614,15 +666,18 @@ func verifySparse(t testing.TB, fsys fs.FS, name string, size int64, markerOff i
 			return
 		}
 		defer func() { _ = f2.Close() }()
+
 		if _, err := io.CopyN(io.Discard, f2, markerOff); err != nil {
 			t.Errorf("%s: skip to marker at %d: %v", name, markerOff, err)
 			return
 		}
+
 		mbuf := make([]byte, len(marker))
 		if _, err := io.ReadFull(f2, mbuf); err != nil {
 			t.Errorf("%s: read marker at %d: %v", name, markerOff, err)
 			return
 		}
+
 		if string(mbuf) != marker {
 			t.Errorf("%s at offset %d: got %q, want %q", name, markerOff, mbuf, marker)
 		}
@@ -637,6 +692,7 @@ func XattrPrefixFlags() []string {
 	if err != nil || tooOld {
 		return nil
 	}
+
 	return []string{
 		"--xattr-prefix=user.short",
 		"--xattr-prefix=" + longXattrPrefix,
@@ -646,11 +702,13 @@ func XattrPrefixFlags() []string {
 // CheckFile verifies that the named file has the expected string content.
 func CheckFile(t testing.TB, fsys fs.FS, name, expected string) {
 	t.Helper()
+
 	f, err := fsys.Open(name)
 	if err != nil {
 		t.Errorf("open %s: %v", name, err)
 		return
 	}
+
 	defer func() { _ = f.Close() }()
 
 	data, err := io.ReadAll(f)
@@ -671,11 +729,13 @@ func CheckFile(t testing.TB, fsys fs.FS, name, expected string) {
 // CheckFileBytes verifies that the named file has the expected byte content.
 func CheckFileBytes(t testing.TB, fsys fs.FS, name string, expected []byte) {
 	t.Helper()
+
 	f, err := fsys.Open(name)
 	if err != nil {
 		t.Errorf("open %s: %v", name, err)
 		return
 	}
+
 	defer func() { _ = f.Close() }()
 
 	data, err := io.ReadAll(f)
@@ -693,6 +753,7 @@ func CheckFileBytes(t testing.TB, fsys fs.FS, name string, expected []byte) {
 // expected entries (sorted by name).
 func CheckDirEntries(t testing.TB, fsys fs.FS, name string, expected []string) {
 	t.Helper()
+
 	entries, err := fs.ReadDir(fsys, name)
 	if err != nil {
 		t.Errorf("readdir %s: %v", name, err)
@@ -708,6 +769,7 @@ func CheckDirEntries(t testing.TB, fsys fs.FS, name string, expected []string) {
 		t.Errorf("readdir %s: got %d entries %v, want %d entries %v", name, len(names), names, len(expected), expected)
 		return
 	}
+
 	for i, n := range names {
 		if n != expected[i] {
 			t.Errorf("readdir %s[%d]: got %q, want %q", name, i, n, expected[i])
@@ -718,11 +780,13 @@ func CheckDirEntries(t testing.TB, fsys fs.FS, name string, expected []string) {
 // CheckDirSize verifies that the named directory contains exactly n entries.
 func CheckDirSize(t testing.TB, fsys fs.FS, name string, n int) {
 	t.Helper()
+
 	entries, err := fs.ReadDir(fsys, name)
 	if err != nil {
 		t.Errorf("readdir %s: %v", name, err)
 		return
 	}
+
 	if len(entries) != n {
 		t.Errorf("readdir %s: got %d entries, want %d", name, len(entries), n)
 	}
@@ -738,11 +802,13 @@ func CheckSymlink(t testing.TB, fsys fs.FS, name, expectedTarget string) {
 // CheckNotExists verifies that the named path does not exist.
 func CheckNotExists(t testing.TB, fsys fs.FS, name string) {
 	t.Helper()
+
 	f, err := fsys.Open(name)
 	if err == nil {
 		if err = f.Close(); err != nil {
 			t.Errorf("close %s: %v", name, err)
 		}
+
 		t.Errorf("expected error opening %s, but succeeded", name)
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("open %s: got %v, want fs.ErrNotExist", name, err)
@@ -758,16 +824,19 @@ type readLinkFS interface {
 // CheckReadLink verifies that ReadLink returns the expected target.
 func CheckReadLink(t testing.TB, fsys fs.FS, name, target string) {
 	t.Helper()
+
 	rlfs, ok := fsys.(readLinkFS)
 	if !ok {
 		t.Errorf("FS does not implement ReadLink")
 		return
 	}
+
 	got, err := rlfs.ReadLink(name)
 	if err != nil {
 		t.Errorf("ReadLink(%s): %v", name, err)
 		return
 	}
+
 	if got != target {
 		t.Errorf("ReadLink(%s) = %q, want %q", name, got, target)
 	}
@@ -776,16 +845,19 @@ func CheckReadLink(t testing.TB, fsys fs.FS, name, target string) {
 // CheckLstat verifies that Lstat returns the expected file type.
 func CheckLstat(t testing.TB, fsys fs.FS, name string, wantType fs.FileMode) {
 	t.Helper()
+
 	rlfs, ok := fsys.(readLinkFS)
 	if !ok {
 		t.Errorf("FS does not implement Lstat")
 		return
 	}
+
 	fi, err := rlfs.Lstat(name)
 	if err != nil {
 		t.Errorf("Lstat(%s): %v", name, err)
 		return
 	}
+
 	gotType := fi.Mode() & fs.ModeType
 	if gotType != wantType {
 		t.Errorf("Lstat(%s) type = %v, want %v", name, gotType, wantType)
@@ -795,11 +867,13 @@ func CheckLstat(t testing.TB, fsys fs.FS, name string, wantType fs.FileMode) {
 // CheckReadFile verifies fs.ReadFile returns the expected content.
 func CheckReadFile(t testing.TB, fsys fs.FS, name, expected string) {
 	t.Helper()
+
 	got, err := fs.ReadFile(fsys, name)
 	if err != nil {
 		t.Errorf("ReadFile(%s): %v", name, err)
 		return
 	}
+
 	if string(got) != expected {
 		t.Errorf("ReadFile(%s) = %q, want %q", name, got, expected)
 	}
@@ -808,6 +882,7 @@ func CheckReadFile(t testing.TB, fsys fs.FS, name, expected string) {
 // CheckReadFileDir verifies that fs.ReadFile fails on a directory.
 func CheckReadFileDir(t testing.TB, fsys fs.FS, name string) {
 	t.Helper()
+
 	_, err := fs.ReadFile(fsys, name)
 	if err == nil {
 		t.Errorf("ReadFile(%s) should fail on directory", name)
@@ -819,11 +894,13 @@ func CheckReadFileDir(t testing.TB, fsys fs.FS, name string) {
 // CheckReadDirSorted verifies that fs.ReadDir returns entries in sorted order.
 func CheckReadDirSorted(t testing.TB, fsys fs.FS, name string) {
 	t.Helper()
+
 	entries, err := fs.ReadDir(fsys, name)
 	if err != nil {
 		t.Errorf("ReadDir(%s): %v", name, err)
 		return
 	}
+
 	for i := 1; i < len(entries); i++ {
 		if entries[i-1].Name() >= entries[i].Name() {
 			t.Errorf("ReadDir(%s) not sorted: %q >= %q at index %d", name, entries[i-1].Name(), entries[i].Name(), i)
@@ -835,9 +912,11 @@ func CheckReadDirSorted(t testing.TB, fsys fs.FS, name string) {
 // CheckOpenError verifies that Open returns an error matching target.
 func CheckOpenError(t testing.TB, fsys fs.FS, name string, target error) {
 	t.Helper()
+
 	f, err := fsys.Open(name)
 	if err == nil {
 		_ = f.Close()
+
 		t.Errorf("Open(%s): expected error %v, got nil", name, target)
 	} else if !errors.Is(err, target) {
 		t.Errorf("Open(%s): got %v, want %v", name, err, target)
@@ -847,14 +926,17 @@ func CheckOpenError(t testing.TB, fsys fs.FS, name string, target error) {
 // CheckReadDirFile verifies that ReadDir on a non-directory returns ErrNotDirectory.
 func CheckReadDirFile(t testing.TB, fsys fs.FS, name string) {
 	t.Helper()
+
 	type readDirFS interface {
 		ReadDir(name string) ([]fs.DirEntry, error)
 	}
+
 	rdfs, ok := fsys.(readDirFS)
 	if !ok {
 		t.Errorf("FS does not implement ReadDir")
 		return
 	}
+
 	_, err := rdfs.ReadDir(name)
 	if err == nil {
 		t.Errorf("ReadDir(%s) should fail on non-directory", name)
@@ -866,11 +948,13 @@ func CheckReadDirFile(t testing.TB, fsys fs.FS, name string) {
 // CheckReadLinkFile verifies that ReadLink on a non-symlink returns fs.ErrInvalid.
 func CheckReadLinkFile(t testing.TB, fsys fs.FS, name string) {
 	t.Helper()
+
 	rlfs, ok := fsys.(readLinkFS)
 	if !ok {
 		t.Errorf("FS does not implement ReadLink")
 		return
 	}
+
 	_, err := rlfs.ReadLink(name)
 	if err == nil {
 		t.Errorf("ReadLink(%s) should fail on non-symlink", name)
@@ -883,11 +967,13 @@ func CheckReadLinkFile(t testing.TB, fsys fs.FS, name string) {
 // without reading does not panic.
 func CheckOpenClose(t testing.TB, fsys fs.FS, name string) {
 	t.Helper()
+
 	f, err := fsys.Open(name)
 	if err != nil {
 		t.Errorf("Open(%s): %v", name, err)
 		return
 	}
+
 	if err := f.Close(); err != nil {
 		t.Errorf("Close(%s): %v", name, err)
 	}

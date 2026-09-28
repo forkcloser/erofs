@@ -69,10 +69,12 @@ func TestErofs(t *testing.T) {
 		if runtime.GOOS == "windows" {
 			t.Skip("mkfs.erofs compression is not included on Windows")
 		}
+
 		tc := erofstest.TarContext{}
 		wt := erofstest.TarAll(
-			tc.File("/file.txt", []byte("content\n"), 0644),
+			tc.File("/file.txt", []byte("content\n"), 0o644),
 		)
+
 		tarStream := erofstest.TarFromWriterTo(wt)
 		defer func() {
 			if err := tarStream.Close(); err != nil {
@@ -111,21 +113,23 @@ func BenchmarkLookup(b *testing.B) {
 
 	// Build a tar with directories of varying sizes.
 	lotsOfFiles := make(chan erofstest.WriterToTar)
+
 	go func() {
 		for i := range 5000 {
-			lotsOfFiles <- tc.File(fmt.Sprintf("/bigdir/%d", i), []byte{}, 0600)
+			lotsOfFiles <- tc.File(fmt.Sprintf("/bigdir/%d", i), []byte{}, 0o600)
 		}
+
 		close(lotsOfFiles)
 	}()
 
 	wt := erofstest.TarAll(
-		tc.Dir("/a", 0755),
-		tc.Dir("/a/b", 0755),
-		tc.Dir("/a/b/c", 0755),
-		tc.File("/a/b/c/file.txt", []byte("content\n"), 0644),
-		tc.Dir("/smalldir", 0755),
-		tc.File("/smalldir/file.txt", []byte("content\n"), 0644),
-		tc.Dir("/bigdir", 0755),
+		tc.Dir("/a", 0o755),
+		tc.Dir("/a/b", 0o755),
+		tc.Dir("/a/b/c", 0o755),
+		tc.File("/a/b/c/file.txt", []byte("content\n"), 0o644),
+		tc.Dir("/smalldir", 0o755),
+		tc.File("/smalldir/file.txt", []byte("content\n"), 0o644),
+		tc.Dir("/bigdir", 0o755),
 		erofstest.TarStream(lotsOfFiles),
 	)
 
@@ -148,8 +152,10 @@ func BenchmarkLookup(b *testing.B) {
 					if !errors.Is(err, fs.ErrNotExist) {
 						b.Fatal(err)
 					}
+
 					continue
 				}
+
 				_ = f.Close()
 			}
 		})
@@ -165,31 +171,40 @@ type dataRanger interface {
 // Stat() on name cover exactly fileSize bytes, with all positive sizes.
 func checkDataRangeCoverage(t *testing.T, fsys fs.FS, name string, fileSize int) {
 	t.Helper()
+
 	f, err := fsys.Open(name)
 	if err != nil {
 		t.Fatalf("Open %s: %v", name, err)
 	}
+
 	defer func() { _ = f.Close() }()
+
 	info, err := f.Stat()
 	if err != nil {
 		t.Fatalf("Stat %s: %v", name, err)
 	}
+
 	if info.Size() != int64(fileSize) {
 		t.Fatalf("Size = %d, want %d", info.Size(), fileSize)
 	}
 	// All erofs.fileInfo values implement DataRange(); no type-assert guard needed.
 	dr := info.(dataRanger)
+
 	ranges := dr.DataRange()
 	if len(ranges) == 0 {
 		t.Fatalf("DataRange() returned nil for non-empty file %s", name)
 	}
+
 	var total int64
+
 	for _, r := range ranges {
 		if r.Size <= 0 {
 			t.Errorf("range has non-positive Size %d: %+v", r.Size, r)
 		}
+
 		total += r.Size
 	}
+
 	if total != info.Size() {
 		t.Errorf("total DataRange size = %d, want %d; ranges = %+v", total, info.Size(), ranges)
 	}
@@ -241,26 +256,33 @@ func TestDataRangeMultiBlockCoverage(t *testing.T) {
 		if runtime.GOOS == "windows" {
 			t.Skip("mkfs.erofs directory-source mode not available on Windows")
 		}
+
 		for _, tc := range sizes {
 			t.Run(tc.name, func(t *testing.T) {
 				dir := t.TempDir()
+
 				content := bytes.Repeat([]byte("x"), tc.fileSize)
 				if err := os.WriteFile(filepath.Join(dir, "file.bin"), content, 0o644); err != nil {
 					t.Fatal(err)
 				}
+
 				imgPath := filepath.Join(t.TempDir(), "test.erofs")
+
 				out, err := exec.Command("mkfs.erofs", imgPath, dir).CombinedOutput()
 				if err != nil {
 					t.Fatalf("mkfs.erofs: %s: %v", out, err)
 				}
+
 				imgData, err := os.ReadFile(imgPath)
 				if err != nil {
 					t.Fatal(err)
 				}
+
 				fsys, err := erofs.Open(bytes.NewReader(imgData))
 				if err != nil {
 					t.Fatal("Open:", err)
 				}
+
 				checkDataRangeCoverage(t, fsys, "file.bin", tc.fileSize)
 			})
 		}
@@ -281,6 +303,7 @@ func TestDataRangeSparseChunkBased(t *testing.T) {
 	if _, err := erofstest.CheckMkfsVersion("1.0"); err != nil {
 		t.Skipf("skipping: %v", err)
 	}
+
 	tc := erofstest.TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 	marker := []byte("hello sparse world!\n")
 	fsys := erofstest.MkfsErofsBlobDev(os.Getpagesize())(t, erofstest.TarAll(
@@ -290,17 +313,21 @@ func TestDataRangeSparseChunkBased(t *testing.T) {
 	))
 
 	foundHole := false
+
 	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
+
 		if d.IsDir() {
 			return nil
 		}
+
 		f, err := fsys.Open(p)
 		if err != nil {
 			return fmt.Errorf("Open %s: %w", p, err)
 		}
+
 		defer func() { _ = f.Close() }()
 
 		info, err := f.Stat()
@@ -319,18 +346,22 @@ func TestDataRangeSparseChunkBased(t *testing.T) {
 
 		// Invariant: sum(Size) == file size.
 		var total int64
+
 		for j, r := range ranges {
 			if r.Size <= 0 {
 				t.Errorf("%s: DataRange[%d].Size = %d, want > 0", p, j, r.Size)
 			}
+
 			total += r.Size
 			if r.Offset == -1 {
 				foundHole = true
 			}
 		}
+
 		if total != info.Size() {
 			t.Errorf("%s: sum(DataRange.Size) = %d, want %d", p, total, info.Size())
 		}
+
 		return nil
 	})
 	if err != nil {
@@ -352,6 +383,7 @@ func TestDataRangeSparseChunkBased(t *testing.T) {
 // opened.
 func TestMaxBlockSizeWideDir(t *testing.T) {
 	var buf testBuffer
+
 	w := erofs.Create(&buf, erofs.WithBlockSize(65536))
 	if err := w.Mkdir("/d", 0o755); err != nil {
 		t.Fatal(err)
@@ -363,10 +395,12 @@ func TestMaxBlockSizeWideDir(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if err := f.Close(); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -375,19 +409,24 @@ func TestMaxBlockSizeWideDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	ents, err := fs.ReadDir(img, "d")
 	if err != nil {
 		t.Fatalf("ReadDir: %v", err)
 	}
+
 	if len(ents) != n {
 		t.Fatalf("ReadDir returned %d entries, want %d", len(ents), n)
 	}
+
 	for _, e := range ents {
 		name := "d/" + e.Name()
+
 		f, err := img.Open(name)
 		if err != nil {
 			t.Fatalf("Open(%s): %v", name, err)
 		}
+
 		if err := f.Close(); err != nil {
 			t.Fatal(err)
 		}

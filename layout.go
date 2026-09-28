@@ -40,17 +40,20 @@ func (w *erofsWriter) planLayout(root *erofsEntry) {
 	var aliases []*erofsEntry
 
 	var walk func(e *erofsEntry)
+
 	walk = func(e *erofsEntry) {
 		if e.aliasOf != nil {
 			aliases = append(aliases, e)
 
 			return
 		}
+
 		w.entries = append(w.entries, e)
 		if e.mode&disk.StatTypeMask == disk.StatTypeDir {
 			slices.SortFunc(e.children, func(a, b *erofsEntry) int {
 				return cmp.Compare(a.name, b.name)
 			})
+
 			for _, c := range e.children {
 				walk(c)
 			}
@@ -117,6 +120,7 @@ func (w *erofsWriter) planLayout(root *erofsEntry) {
 			}
 		case disk.StatTypeDir:
 			direntDataSize := w.direntDataSize(e)
+
 			inBlockOff := (currentOff + headerSize) % w.blockSize
 			if direntDataSize > 0 && inBlockOff+direntDataSize <= w.blockSize {
 				e.layout = disk.LayoutFlatInline
@@ -161,6 +165,7 @@ func (w *erofsWriter) planLayout(root *erofsEntry) {
 				e.layout = disk.LayoutFlatPlain
 				e.trailingSize = w.calcTrailingSize(e)
 				e.chunkPad = chunkIndexPad(e)
+
 				totalInodeSize = headerSize + e.chunkPad + e.trailingSize
 				if totalInodeSize%32 != 0 {
 					totalInodeSize = (totalInodeSize + 31) & ^31
@@ -193,9 +198,11 @@ func chunkIndexPad(e *erofsEntry) int {
 	if e.layout != disk.LayoutChunkBased || e.trailingSize == 0 {
 		return 0
 	}
+
 	if r := (inodeCoreSize(e) + e.xattrSize) % disk.SizeChunkIndex; r != 0 {
 		return disk.SizeChunkIndex - r
 	}
+
 	return 0
 }
 
@@ -207,21 +214,26 @@ func (w *erofsWriter) calcTrailingSize(e *erofsEntry) int {
 			if e.size == 0 && len(e.chunks) == 0 {
 				return 0
 			}
+
 			return w.chunkCount(e) * disk.SizeChunkIndex
 		}
+
 		if e.layout == disk.LayoutFlatInline {
 			return int(e.size)
 		}
+
 		return 0
 	case disk.StatTypeDir:
 		if e.layout == disk.LayoutFlatInline {
 			return w.direntDataSize(e)
 		}
+
 		return 0
 	case disk.StatTypeSymlink:
 		if e.layout == disk.LayoutFlatInline {
 			return len(e.symTarget)
 		}
+
 		return 0
 	default:
 		return 0
@@ -233,11 +245,14 @@ func (w *erofsWriter) calcTrailingSize(e *erofsEntry) int {
 // be sorted alphabetically.
 func direntNames(e *erofsEntry) []string {
 	names := make([]string, 0, len(e.children)+2)
+
 	names = append(names, ".", "..")
 	for _, c := range e.children {
 		names = append(names, c.name)
 	}
+
 	slices.Sort(names)
+
 	return names
 }
 
@@ -261,6 +276,7 @@ func (w *erofsWriter) direntDataSize(e *erofsEntry) int {
 // directory. For multi-block directories, this includes inter-block padding.
 func (w *erofsWriter) calcDirentDataSize(e *erofsEntry) int {
 	names := direntNames(e)
+
 	nEntries := len(names)
 	if len(e.children) == 0 {
 		// Empty dir still needs "." and ".." entries
@@ -268,21 +284,26 @@ func (w *erofsWriter) calcDirentDataSize(e *erofsEntry) int {
 	}
 
 	totalSize := 0
+
 	i := 0
 	for i < nEntries {
 		blockUsed := 0
 		start := i
 		nameSize := 0
+
 		for j := i; j < nEntries; j++ {
 			headerSize := (j - start + 1) * disk.SizeDirent
 			nameSize += len(names[j])
+
 			needed := headerSize + nameSize
 			if needed > w.blockSize {
 				break
 			}
+
 			blockUsed = needed
 			i = j + 1
 		}
+
 		if i == start {
 			blockUsed = disk.SizeDirent + len(names[i])
 			i++
@@ -291,6 +312,7 @@ func (w *erofsWriter) calcDirentDataSize(e *erofsEntry) int {
 		if i < nEntries && blockUsed%w.blockSize != 0 {
 			blockUsed = (blockUsed + w.blockSize - 1) & ^(w.blockSize - 1)
 		}
+
 		totalSize += blockUsed
 	}
 

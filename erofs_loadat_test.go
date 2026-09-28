@@ -30,8 +30,10 @@ func newTestImage(data []byte, blkBits uint8) *image {
 // final block unreadable — which is exactly where mkfs.erofs puts the shared
 // xattr area of a small image.
 func TestLoadAtShortReadAtEOF(t *testing.T) {
-	const blkBits = 12
-	const blkSize = 1 << blkBits
+	const (
+		blkBits = 12
+		blkSize = 1 << blkBits
+	)
 
 	// An image far shorter than one block.
 	data := bytes.Repeat([]byte("z"), 100)
@@ -41,13 +43,16 @@ func TestLoadAtShortReadAtEOF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadAt(0, %d) on a %d byte image: %v", blkSize, len(data), err)
 	}
+
 	got := blk.bytes()
 	if len(got) != len(data) {
 		t.Errorf("got %d bytes, want %d", len(got), len(data))
 	}
+
 	if !bytes.Equal(got, data) {
 		t.Errorf("content mismatch")
 	}
+
 	img.putBlock(blk)
 
 	// A partial read starting mid-image is still served.
@@ -55,9 +60,11 @@ func TestLoadAtShortReadAtEOF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadAt(60, %d): %v", blkSize, err)
 	}
+
 	if n := len(blk.bytes()); n != 40 {
 		t.Errorf("got %d bytes from offset 60, want 40", n)
 	}
+
 	img.putBlock(blk)
 }
 
@@ -92,21 +99,26 @@ func TestReadReferenceImage(t *testing.T) {
 	for _, blockSize := range []string{"4096", "16384"} {
 		t.Run(blockSize, func(t *testing.T) {
 			dir := t.TempDir()
+
 			src := filepath.Join(dir, "src")
 			if err := os.MkdirAll(filepath.Join(src, "dir"), 0o755); err != nil {
 				t.Fatal(err)
 			}
+
 			if err := os.WriteFile(filepath.Join(src, "a.txt"), []byte("hello\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
+
 			if err := os.WriteFile(filepath.Join(src, "dir", "b.txt"), []byte("world\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
+
 			if err := os.Symlink("a.txt", filepath.Join(src, "link")); err != nil {
 				t.Fatal(err)
 			}
 
 			imgPath := filepath.Join(dir, "img.erofs")
+
 			cmd := exec.Command("mkfs.erofs", "--quiet", "-b", blockSize, imgPath, src)
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Skipf("mkfs.erofs -b %s failed: %v\n%s", blockSize, err, out)
@@ -126,13 +138,16 @@ func TestReadReferenceImage(t *testing.T) {
 			// Walking touches every inode, and Info() on each pulls in the
 			// xattr area, shared entries included.
 			var seen []string
+
 			err = fs.WalkDir(img, ".", func(p string, d fs.DirEntry, err error) error {
 				if err != nil {
 					return err
 				}
+
 				if _, err := d.Info(); err != nil {
 					return err
 				}
+
 				seen = append(seen, p)
 
 				return nil
@@ -152,6 +167,7 @@ func TestReadReferenceImage(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReadFile: %v", err)
 			}
+
 			if string(got) != "world\n" {
 				t.Errorf("dir/b.txt = %q, want %q", got, "world\n")
 			}
@@ -162,6 +178,7 @@ func TestReadReferenceImage(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReadLink: %v", err)
 			}
+
 			if target != "a.txt" {
 				t.Errorf("link -> %q, want %q", target, "a.txt")
 			}

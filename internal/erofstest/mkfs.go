@@ -15,14 +15,17 @@ func CheckMkfsVersion(minimum string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+
 	cur, err := parseVersion(ver)
 	if err != nil {
 		return false, fmt.Errorf("parsing mkfs.erofs version %q: %w", ver, err)
 	}
+
 	min, err := parseVersion(minimum)
 	if err != nil {
 		return false, fmt.Errorf("parsing minimum version %q: %w", minimum, err)
 	}
+
 	return cur.less(min), nil
 }
 
@@ -34,35 +37,45 @@ func (v semver) less(other semver) bool {
 	if v.major != other.major {
 		return v.major < other.major
 	}
+
 	if v.minor != other.minor {
 		return v.minor < other.minor
 	}
+
 	return v.patch < other.patch
 }
 
 func parseVersion(s string) (semver, error) {
 	parts := strings.SplitN(s, ".", 3)
-	var v semver
-	var err error
+
+	var (
+		v   semver
+		err error
+	)
+
 	if len(parts) < 1 {
 		return v, fmt.Errorf("empty version string")
 	}
+
 	v.major, err = strconv.Atoi(parts[0])
 	if err != nil {
 		return v, fmt.Errorf("invalid major version: %w", err)
 	}
+
 	if len(parts) >= 2 {
 		v.minor, err = strconv.Atoi(parts[1])
 		if err != nil {
 			return v, fmt.Errorf("invalid minor version: %w", err)
 		}
 	}
+
 	if len(parts) >= 3 {
 		v.patch, err = strconv.Atoi(parts[2])
 		if err != nil {
 			return v, fmt.Errorf("invalid patch version: %w", err)
 		}
 	}
+
 	return v, nil
 }
 
@@ -73,9 +86,11 @@ func mkfsVersion() (string, error) {
 	}
 	// Output format: "mkfs.erofs (erofs-utils) 1.9.1\n..."
 	line, _, _ := strings.Cut(string(out), "\n")
+
 	fields := strings.Fields(line)
 	if len(fields) < 3 {
 		return "", fmt.Errorf("unexpected mkfs.erofs version output: %q", line)
 	}
+
 	return strings.TrimPrefix(fields[len(fields)-1], "v"), nil
 }

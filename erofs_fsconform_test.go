@@ -14,16 +14,20 @@ func conformImage(t *testing.T) fs.FS {
 	t.Helper()
 
 	out := &seekBuf{}
+
 	w := Create(out, WithBuildTime(1000, 0))
 	if err := w.Mkdir("/dir", 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	for _, n := range []string{"/a.txt", "/dir/b.txt", "/dir/c.txt"} {
 		writeFile(t, w, n, []byte("content of "+n))
 	}
+
 	if err := w.Symlink("a.txt", "/link"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -66,6 +70,7 @@ func TestInvalidPathsRejected(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if f, err := img.Open(name); err == nil {
 				_ = f.Close()
+
 				t.Errorf("Open(%q) succeeded; want a PathError wrapping fs.ErrInvalid", name)
 			} else if !errors.Is(err, fs.ErrInvalid) {
 				t.Errorf("Open(%q) err = %v; want it to wrap fs.ErrInvalid", name, err)
@@ -75,9 +80,11 @@ func TestInvalidPathsRejected(t *testing.T) {
 			if _, err := fs.Stat(img, name); !errors.Is(err, fs.ErrInvalid) {
 				t.Errorf("Stat(%q) err = %v; want fs.ErrInvalid", name, err)
 			}
+
 			if _, err := fs.ReadFile(img, name); !errors.Is(err, fs.ErrInvalid) {
 				t.Errorf("ReadFile(%q) err = %v; want fs.ErrInvalid", name, err)
 			}
+
 			if _, err := fs.ReadDir(img, name); !errors.Is(err, fs.ErrInvalid) {
 				t.Errorf("ReadDir(%q) err = %v; want fs.ErrInvalid", name, err)
 			}
@@ -96,6 +103,7 @@ func TestValidPathsAccepted(t *testing.T) {
 
 			continue
 		}
+
 		_ = f.Close()
 	}
 }
@@ -110,6 +118,7 @@ func TestNonUTF8NamesRemainReachable(t *testing.T) {
 	out := &seekBuf{}
 	w := Create(out, WithBuildTime(1000, 0))
 	writeFile(t, w, "/"+raw, []byte("payload"))
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -127,6 +136,7 @@ func TestNonUTF8NamesRemainReachable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(%q): %v", raw, err)
 	}
+
 	if string(got) != "payload" {
 		t.Errorf("got %q, want %q", got, "payload")
 	}
@@ -136,12 +146,15 @@ func TestNonUTF8NamesRemainReachable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	var found bool
+
 	for _, e := range ents {
 		if e.Name() == raw {
 			found = true
 		}
 	}
+
 	if !found {
 		t.Errorf("%q missing from ReadDir(\".\")", raw)
 	}
@@ -152,10 +165,12 @@ func TestWalkDirFromRoot(t *testing.T) {
 	img := conformImage(t)
 
 	var seen []string
+
 	err := fs.WalkDir(img, ".", func(p string, _ fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
+
 		seen = append(seen, p)
 
 		return nil
@@ -168,6 +183,7 @@ func TestWalkDirFromRoot(t *testing.T) {
 	if len(seen) != len(want) {
 		t.Fatalf("walked %v, want %v", seen, want)
 	}
+
 	for i := range want {
 		if seen[i] != want[i] {
 			t.Errorf("walk[%d] = %q, want %q", i, seen[i], want[i])

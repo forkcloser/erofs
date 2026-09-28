@@ -136,9 +136,11 @@ func checkSparseContent(t *testing.T, img fs.FS, bs int, label string) {
 	if err != nil {
 		t.Fatalf("%s: read: %v", label, err)
 	}
+
 	if len(got) != 4*bs {
 		t.Fatalf("%s: read %d bytes, want %d", label, len(got), 4*bs)
 	}
+
 	for blk, want := range []byte{'A', 0, 'B', 'C'} {
 		block := got[blk*bs : (blk+1)*bs]
 		if !bytes.Equal(block, bytes.Repeat([]byte{want}, bs)) {
@@ -158,10 +160,12 @@ func TestChunkMapHonoursBlockSize(t *testing.T) {
 			blob := sparseBlob(bs)
 
 			out := &seekBuf{}
+
 			w := Create(out, WithBlockSize(bs), WithBuildTime(1000, 0))
 			if err := w.CopyFrom(newSparseFS(bs, blob), MetadataOnly()); err != nil {
 				t.Fatal(err)
 			}
+
 			if err := w.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -170,6 +174,7 @@ func TestChunkMapHonoursBlockSize(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			checkSparseContent(t, img, bs, "image")
 			fsckWithDevice(t, out.buf, blob)
 		})
@@ -183,13 +188,16 @@ func TestChunkMapHonoursBlockSize(t *testing.T) {
 // planLayout collapsed its extents into a single mapping.
 func TestChunkMapSurvivesReindex(t *testing.T) {
 	const bs = 4096
+
 	blob := sparseBlob(bs)
 
 	out := &seekBuf{}
+
 	w := Create(out, WithBlockSize(bs), WithBuildTime(1000, 0))
 	if err := w.CopyFrom(newSparseFS(bs, blob), MetadataOnly()); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -198,14 +206,17 @@ func TestChunkMapSurvivesReindex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	checkSparseContent(t, img1, bs, "first image")
 
 	// Re-index the image into a fresh metadata-only image.
 	out2 := &seekBuf{}
+
 	w2 := Create(out2, WithBuildTime(1000, 0))
 	if err := w2.CopyFrom(img1, MetadataOnly()); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w2.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -214,6 +225,7 @@ func TestChunkMapSurvivesReindex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	checkSparseContent(t, img2, bs, "re-indexed image")
 	fsckWithDevice(t, out2.buf, blob)
 }
@@ -238,15 +250,19 @@ func fsckWithDevice(t *testing.T, image, blob []byte) {
 	if _, err := exec.LookPath("fsck.erofs"); err != nil {
 		return
 	}
+
 	dir := t.TempDir()
 	imgPath := dir + "/img.erofs"
 	blobPath := dir + "/blob.bin"
+
 	if err := os.WriteFile(imgPath, image, 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := os.WriteFile(blobPath, blob, 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	out, err := exec.Command("fsck.erofs", "--device="+blobPath, imgPath).CombinedOutput()
 	if err != nil {
 		t.Errorf("fsck.erofs rejected the image: %v\n%s", err, out)
