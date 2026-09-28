@@ -201,7 +201,12 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 				return err
 			}
 			if len(xb) < int(xattrEntry.NameLen) {
-				return fmt.Errorf("xattr block too small for name of length %d for nid %d: %w", xattrEntry.NameLen, b.nid, ErrInvalid)
+				return fmt.Errorf(
+					"xattr block too small for name of length %d for nid %d: %w",
+					xattrEntry.NameLen,
+					b.nid,
+					ErrInvalid,
+				)
 			}
 		}
 		name := prefix + string(xb[:xattrEntry.NameLen])

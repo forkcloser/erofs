@@ -146,6 +146,7 @@ func (ti tarInfo) Name() string {
 func (ti tarInfo) Size() int64 {
 	return ti.size
 }
+
 func (ti tarInfo) Mode() os.FileMode {
 	return ti.mode
 }
@@ -160,6 +161,7 @@ func (ti tarInfo) ModTime() time.Time {
 func (ti tarInfo) IsDir() bool {
 	return (ti.mode & os.ModeDir) != 0
 }
+
 func (ti tarInfo) Sys() any {
 	return ti.hdr
 }
@@ -238,20 +240,20 @@ func (tc TarContext) Dir(name string, perm os.FileMode) WriterToTar {
 // Symlink returns a symlink tar entry
 func (tc TarContext) Symlink(oldname, newname string) WriterToTar {
 	return writerToFn(func(tw *tar.Writer) error {
-		return writeHeaderAndContent(tw, tc.newHeader(0777|os.ModeSymlink, newname, oldname, 0), nil)
+		return writeHeaderAndContent(tw, tc.newHeader(0o777|os.ModeSymlink, newname, oldname, 0), nil)
 	})
 }
 
 // Link returns a hard link tar entry
 func (tc TarContext) Link(oldname, newname string) WriterToTar {
 	return writerToFn(func(tw *tar.Writer) error {
-		return writeHeaderAndContent(tw, tc.newHeader(0777, newname, oldname, 0), nil)
+		return writeHeaderAndContent(tw, tc.newHeader(0o777, newname, oldname, 0), nil)
 	})
 }
 
-func (tc TarContext) Device(name string, ftype os.FileMode, major int64, minor int64) WriterToTar {
+func (tc TarContext) Device(name string, ftype os.FileMode, major, minor int64) WriterToTar {
 	return writerToFn(func(tw *tar.Writer) error {
-		hdr := tc.newHeader(0600, name, "", 0)
+		hdr := tc.newHeader(0o600, name, "", 0)
 		hdr.Typeflag = typeFlag(ftype)
 		hdr.Devmajor = major
 		hdr.Devminor = minor

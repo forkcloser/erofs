@@ -11,9 +11,7 @@ import (
 )
 
 func main() {
-	var (
-		path string
-	)
+	var path string
 
 	flag.StringVar(&path, "img", "", "Path to erofs image")
 	flag.Parse()

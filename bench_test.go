@@ -30,7 +30,7 @@ func populateBenchDir(b *testing.B, root string, targetSize int64) {
 
 	writeFile := func(name string, size int, mode os.FileMode) {
 		p := filepath.Join(root, filepath.FromSlash(name))
-		_ = os.MkdirAll(filepath.Dir(p), 0755)
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
 		data := make([]byte, size)
 		for i := range data {
 			data[i] = byte(i % 251)
@@ -44,7 +44,7 @@ func populateBenchDir(b *testing.B, root string, targetSize int64) {
 
 	writeDir := func(name string) {
 		p := filepath.Join(root, filepath.FromSlash(name))
-		if err := os.MkdirAll(p, 0755); err != nil {
+		if err := os.MkdirAll(p, 0o755); err != nil {
 			b.Fatal(err)
 		}
 		_ = os.Chtimes(p, now, now)
@@ -52,7 +52,7 @@ func populateBenchDir(b *testing.B, root string, targetSize int64) {
 
 	writeSymlink := func(name, target string) {
 		p := filepath.Join(root, filepath.FromSlash(name))
-		_ = os.MkdirAll(filepath.Dir(p), 0755)
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
 		if err := os.Symlink(target, p); err != nil {
 			b.Fatal(err)
 		}
@@ -68,18 +68,18 @@ func populateBenchDir(b *testing.B, root string, targetSize int64) {
 
 	for i := 0; written < targetSize/4 && i < 2000; i++ {
 		size := 100 + (i*137)%1900
-		writeFile(fmt.Sprintf("/etc/conf.d/config-%04d", i), size, 0644)
+		writeFile(fmt.Sprintf("/etc/conf.d/config-%04d", i), size, 0o644)
 	}
 
 	for i := 0; written < targetSize*3/4; i++ {
 		size := 50*1024 + (i*7919)%(450*1024)
-		writeFile(fmt.Sprintf("/usr/lib/x86_64-linux-gnu/lib%04d.so", i), size, 0755)
+		writeFile(fmt.Sprintf("/usr/lib/x86_64-linux-gnu/lib%04d.so", i), size, 0o755)
 	}
 
 	for i := 0; written < targetSize; i++ {
 		remaining := targetSize - written
 		size := min(int64(2*1024*1024), remaining)
-		writeFile(fmt.Sprintf("/usr/bin/binary-%04d", i), int(size), 0755)
+		writeFile(fmt.Sprintf("/usr/bin/binary-%04d", i), int(size), 0o755)
 	}
 
 	for i := range 50 {
@@ -91,7 +91,7 @@ func populateBenchDir(b *testing.B, root string, targetSize int64) {
 
 	for i := range 500 {
 		size := 200 + (i*31)%800
-		writeFile(fmt.Sprintf("/usr/share/doc/package-%04d/README", i), size, 0644)
+		writeFile(fmt.Sprintf("/usr/share/doc/package-%04d/README", i), size, 0o644)
 	}
 }
 
@@ -105,7 +105,7 @@ func populateOverlayDir(b *testing.B, root string, targetSize int64) {
 
 	writeFile := func(name string, size int, mode os.FileMode) {
 		p := filepath.Join(root, filepath.FromSlash(name))
-		_ = os.MkdirAll(filepath.Dir(p), 0755)
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
 		data := make([]byte, size)
 		for i := range data {
 			data[i] = byte((i + 7) % 251)
@@ -119,7 +119,7 @@ func populateOverlayDir(b *testing.B, root string, targetSize int64) {
 
 	writeDir := func(name string) {
 		p := filepath.Join(root, filepath.FromSlash(name))
-		if err := os.MkdirAll(p, 0755); err != nil {
+		if err := os.MkdirAll(p, 0o755); err != nil {
 			b.Fatal(err)
 		}
 		_ = os.Chtimes(p, now, now)
@@ -127,8 +127,8 @@ func populateOverlayDir(b *testing.B, root string, targetSize int64) {
 
 	writeWhiteout := func(name string) {
 		p := filepath.Join(root, filepath.FromSlash(name))
-		_ = os.MkdirAll(filepath.Dir(p), 0755)
-		if err := os.WriteFile(p, nil, 0644); err != nil {
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, nil, 0o644); err != nil {
 			b.Fatal(err)
 		}
 		_ = os.Chtimes(p, now, now)
@@ -151,7 +151,7 @@ func populateOverlayDir(b *testing.B, root string, targetSize int64) {
 	// Overwrite some configs.
 	for i := range 20 {
 		size := 200 + (i*137)%1900
-		writeFile(fmt.Sprintf("/etc/conf.d/config-%04d", i), size, 0644)
+		writeFile(fmt.Sprintf("/etc/conf.d/config-%04d", i), size, 0o644)
 	}
 
 	// New directory tree.
@@ -165,7 +165,7 @@ func populateOverlayDir(b *testing.B, root string, targetSize int64) {
 		if size <= 0 {
 			break
 		}
-		writeFile(fmt.Sprintf("/opt/overlay/data-%04d.bin", i), int(size), 0644)
+		writeFile(fmt.Sprintf("/opt/overlay/data-%04d.bin", i), int(size), 0o644)
 	}
 }
 
@@ -173,7 +173,7 @@ func populateOverlayDir(b *testing.B, root string, targetSize int64) {
 func prepareBenchDir(b *testing.B) string {
 	b.Helper()
 	dirPath := filepath.Join(b.TempDir(), "root")
-	if err := os.MkdirAll(dirPath, 0755); err != nil {
+	if err := os.MkdirAll(dirPath, 0o755); err != nil {
 		b.Fatal(err)
 	}
 	populateBenchDir(b, dirPath, benchTargetSize)
@@ -301,14 +301,14 @@ func prepareMergeSources(b *testing.B) mergeSources {
 
 	// Build base directory.
 	baseDirPath := filepath.Join(tmpDir, "base")
-	if err := os.MkdirAll(baseDirPath, 0755); err != nil {
+	if err := os.MkdirAll(baseDirPath, 0o755); err != nil {
 		b.Fatal(err)
 	}
 	populateBenchDir(b, baseDirPath, benchTargetSize)
 
 	// Build overlay directory.
 	s.overlayDirPath = filepath.Join(tmpDir, "overlay")
-	if err := os.MkdirAll(s.overlayDirPath, 0755); err != nil {
+	if err := os.MkdirAll(s.overlayDirPath, 0o755); err != nil {
 		b.Fatal(err)
 	}
 	populateOverlayDir(b, s.overlayDirPath, benchTargetSize/benchMergeOverlayFraction)
@@ -541,16 +541,22 @@ func BenchmarkMerge10Layer(b *testing.B) {
 	layers := []layerSpec{
 		{name: "base-os", size: 250 * 1024 * 1024},
 		{name: "runtime", size: 30 * 1024 * 1024},
-		{name: "deps", size: 15 * 1024 * 1024,
-			whiteouts: []string{"/usr/share/doc/.wh..wh..opq"}},
+		{
+			name: "deps", size: 15 * 1024 * 1024,
+			whiteouts: []string{"/usr/share/doc/.wh..wh..opq"},
+		},
 		{name: "app-v1", size: 8 * 1024 * 1024},
-		{name: "app-v2", size: 5 * 1024 * 1024,
+		{
+			name: "app-v2", size: 5 * 1024 * 1024,
 			whiteouts: []string{"/opt/app/.wh.old-binary"},
-			opaques:   []string{"/tmp/"}},
+			opaques:   []string{"/tmp/"},
+		},
 		{name: "config", size: 50 * 1024},
 		{name: "secrets", size: 4 * 1024},
-		{name: "hotfix1", size: 2 * 1024 * 1024,
-			whiteouts: []string{"/usr/lib/x86_64-linux-gnu/.wh.libold.so"}},
+		{
+			name: "hotfix1", size: 2 * 1024 * 1024,
+			whiteouts: []string{"/usr/lib/x86_64-linux-gnu/.wh.libold.so"},
+		},
 		{name: "hotfix2", size: 500 * 1024},
 		{name: "metadata", size: 10 * 1024},
 	}
@@ -568,7 +574,7 @@ func BenchmarkMerge10Layer(b *testing.B) {
 	for li, spec := range layers {
 		// Generate directory.
 		dirPath := filepath.Join(tmpDir, fmt.Sprintf("layer%d", li))
-		if err := os.MkdirAll(dirPath, 0755); err != nil {
+		if err := os.MkdirAll(dirPath, 0o755); err != nil {
 			b.Fatal(err)
 		}
 
@@ -577,24 +583,24 @@ func BenchmarkMerge10Layer(b *testing.B) {
 
 			writeDir := func(name string) {
 				p := filepath.Join(dirPath, filepath.FromSlash(name))
-				_ = os.MkdirAll(p, 0755)
+				_ = os.MkdirAll(p, 0o755)
 				_ = os.Chtimes(p, now, now)
 			}
 			writeFile := func(name string, size int) {
 				p := filepath.Join(dirPath, filepath.FromSlash(name))
-				_ = os.MkdirAll(filepath.Dir(p), 0755)
+				_ = os.MkdirAll(filepath.Dir(p), 0o755)
 				data := make([]byte, size)
 				for i := range data {
 					data[i] = byte((i + li*7) % 251)
 				}
-				_ = os.WriteFile(p, data, 0644)
+				_ = os.WriteFile(p, data, 0o644)
 				_ = os.Chtimes(p, now, now)
 				written += int64(size)
 			}
 			writeWhiteout := func(name string) {
 				p := filepath.Join(dirPath, filepath.FromSlash(name))
-				_ = os.MkdirAll(filepath.Dir(p), 0755)
-				_ = os.WriteFile(p, nil, 0644)
+				_ = os.MkdirAll(filepath.Dir(p), 0o755)
+				_ = os.WriteFile(p, nil, 0o644)
 				_ = os.Chtimes(p, now, now)
 			}
 
@@ -718,8 +724,10 @@ func BenchmarkMerge10Layer(b *testing.B) {
 				}
 			} else {
 				// Upper layers: simpler structure.
-				for _, d := range []string{"/", "/usr", "/usr/lib", "/usr/lib/x86_64-linux-gnu",
-					"/usr/share", "/usr/share/doc", "/opt", "/opt/app", "/tmp", "/etc"} {
+				for _, d := range []string{
+					"/", "/usr", "/usr/lib", "/usr/lib/x86_64-linux-gnu",
+					"/usr/share", "/usr/share/doc", "/opt", "/opt/app", "/tmp", "/etc",
+				} {
 					writeDir(d)
 				}
 				for i := 0; written < spec.size; i++ {

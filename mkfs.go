@@ -482,7 +482,7 @@ func checkOwner(uid, gid int) (uint32, uint32, error) {
 
 // Chtimes sets the access and modification times on the named path.
 // EROFS only stores mtime; atime is retained for read-back before Close.
-func (fsys *Writer) Chtimes(name string, atime time.Time, mtime time.Time) error {
+func (fsys *Writer) Chtimes(name string, atime, mtime time.Time) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
 	}
@@ -1274,7 +1274,7 @@ func cleanPath(p string) string {
 
 // fixParentNids sets the parent NID in the ".." dirent for all directories.
 // This must be called after planLayout has assigned NIDs.
-func fixParentNids(e *erofsEntry, parent *erofsEntry) {
+func fixParentNids(e, parent *erofsEntry) {
 	e.parentNid = parent.nid
 	for _, c := range e.children {
 		if c.mode&disk.StatTypeMask == disk.StatTypeDir {
@@ -1307,6 +1307,7 @@ func (fi *writerFileInfo) Mode() fs.FileMode { return disk.EroFSModeToGoFileMode
 func (fi *writerFileInfo) ModTime() time.Time {
 	return time.Unix(int64(fi.entry.mtime), int64(fi.entry.mtimeNs))
 }
+
 func (fi *writerFileInfo) IsDir() bool { return fi.entry.mode&disk.StatTypeMask == disk.StatTypeDir }
 func (fi *writerFileInfo) Sys() any    { return nil }
 
@@ -1412,8 +1413,9 @@ type dirEntry struct {
 	entry *fsEntry
 }
 
-func (de *dirEntry) Name() string               { return path.Base(de.entry.path) }
-func (de *dirEntry) IsDir() bool                { return de.entry.mode&disk.StatTypeMask == disk.StatTypeDir }
+func (de *dirEntry) Name() string { return path.Base(de.entry.path) }
+func (de *dirEntry) IsDir() bool  { return de.entry.mode&disk.StatTypeMask == disk.StatTypeDir }
+
 func (de *dirEntry) Type() fs.FileMode          { return disk.EroFSModeToGoFileMode(de.entry.mode).Type() }
 func (de *dirEntry) Info() (fs.FileInfo, error) { return &writerFileInfo{entry: de.entry}, nil }
 
@@ -1576,8 +1578,12 @@ func (fsys *Writer) checkPath(name string) error {
 // instead of letting it run until memory is gone.
 func checkPathLen(name string) error {
 	if len(name) > maxPathLen {
-		return fmt.Errorf("mkfs: path is %d bytes, over the %d byte limit (a source whose directories form a cycle looks like this): %w",
-			len(name), maxPathLen, ErrInvalid)
+		return fmt.Errorf(
+			"mkfs: path is %d bytes, over the %d byte limit (a source whose directories form a cycle looks like this): %w",
+			len(name),
+			maxPathLen,
+			ErrInvalid,
+		)
 	}
 
 	return nil
@@ -1983,7 +1989,9 @@ func (fsys *Writer) remapChunkDevices(p string, chunks []builder.Chunk) error {
 		if chunks[i].DeviceID == 0 {
 			return fmt.Errorf(
 				"mkfs: %s: chunk references the source's own device (DeviceID 0), which is not registered in the destination: %w",
-				p, ErrInvalid)
+				p,
+				ErrInvalid,
+			)
 		}
 		// Device IDs are 1-based indexes into the device table, so the
 		// remapped value must still name a device the destination declares.
@@ -2037,7 +2045,12 @@ func (fsys *Writer) chunksFromRanges(ranges []DataRange, fileSize int64) ([]buil
 		// Non-final entries must be block-aligned in size; the final entry may
 		// end mid-block to match the file tail.
 		if i < last && uint64(r.Size)%blockSize != 0 {
-			return nil, fmt.Errorf("DataRange[%d]: non-final Size %d is not block-aligned (block size %d)", i, r.Size, blockSize)
+			return nil, fmt.Errorf(
+				"DataRange[%d]: non-final Size %d is not block-aligned (block size %d)",
+				i,
+				r.Size,
+				blockSize,
+			)
 		}
 		if r.Offset == holeOffset {
 			// Hole: emit NullPhysicalBlock chunks covering the hole span.
@@ -2056,13 +2069,22 @@ func (fsys *Writer) chunksFromRanges(ranges []DataRange, fileSize int64) ([]buil
 			return nil, fmt.Errorf("DataRange[%d]: negative Offset %d", i, r.Offset)
 		}
 		if uint64(r.Offset)%blockSize != 0 {
-			return nil, fmt.Errorf("DataRange[%d]: Offset %d is not block-aligned (block size %d)", i, r.Offset, blockSize)
+			return nil, fmt.Errorf(
+				"DataRange[%d]: Offset %d is not block-aligned (block size %d)",
+				i,
+				r.Offset,
+				blockSize,
+			)
 		}
 		// Non-EROFS sources register exactly one device via DeviceBlocks();
 		// only Device=0 is valid. Device=0xFFFF would also wrap deviceID to 0
 		// (the primary image), producing an invalid mapping.
 		if r.Device != 0 {
-			return nil, fmt.Errorf("DataRange[%d]: Device %d out of range (source declared one device, only Device=0 is valid)", i, r.Device)
+			return nil, fmt.Errorf(
+				"DataRange[%d]: Device %d out of range (source declared one device, only Device=0 is valid)",
+				i,
+				r.Device,
+			)
 		}
 		deviceID := r.Device + 1
 		startBlock := uint64(r.Offset) / blockSize

@@ -24,12 +24,21 @@ import (
 func TestCopyFromPreservesModTime(t *testing.T) {
 	when := time.Date(2024, 3, 4, 5, 6, 7, 890, time.UTC)
 	src := fstest.MapFS{
-		"dir":        &fstest.MapFile{Mode: fs.ModeDir | 0o755, ModTime: when},
-		"dir/f":      &fstest.MapFile{Data: []byte("x"), Mode: 0o644, ModTime: when.Add(time.Hour)},
-		"link":       &fstest.MapFile{Data: []byte("dir/f"), Mode: fs.ModeSymlink | 0o777, ModTime: when.Add(2 * time.Hour)},
-		"untimed":    &fstest.MapFile{Data: []byte("y"), Mode: 0o644},
-		"withsys":    &fstest.MapFile{Data: []byte("z"), Mode: 0o644, ModTime: when, Sys: &builder.Entry{UID: 7}},
-		"stampedsys": &fstest.MapFile{Data: []byte("w"), Mode: 0o644, ModTime: when, Sys: &builder.Entry{Mtime: 1234, MtimeNs: 5}},
+		"dir":   &fstest.MapFile{Mode: fs.ModeDir | 0o755, ModTime: when},
+		"dir/f": &fstest.MapFile{Data: []byte("x"), Mode: 0o644, ModTime: when.Add(time.Hour)},
+		"link": &fstest.MapFile{
+			Data:    []byte("dir/f"),
+			Mode:    fs.ModeSymlink | 0o777,
+			ModTime: when.Add(2 * time.Hour),
+		},
+		"untimed": &fstest.MapFile{Data: []byte("y"), Mode: 0o644},
+		"withsys": &fstest.MapFile{Data: []byte("z"), Mode: 0o644, ModTime: when, Sys: &builder.Entry{UID: 7}},
+		"stampedsys": &fstest.MapFile{
+			Data:    []byte("w"),
+			Mode:    0o644,
+			ModTime: when,
+			Sys:     &builder.Entry{Mtime: 1234, MtimeNs: 5},
+		},
 	}
 
 	var buf testBuffer
@@ -271,8 +280,12 @@ func TestCopyFromHardlinkScope(t *testing.T) {
 // a file whose other names the image does not hold.
 func TestCopyFromHardlinkIdentity(t *testing.T) {
 	src := fstest.MapFS{
-		"a":       &fstest.MapFile{Data: []byte("dev1"), Mode: 0o644, Sys: &builder.Entry{Nlink: 2, Dev: 1, Ino: 100}},
-		"a2":      &fstest.MapFile{Data: []byte("ignored: same inode as a"), Mode: 0o644, Sys: &builder.Entry{Nlink: 2, Dev: 1, Ino: 100}},
+		"a": &fstest.MapFile{Data: []byte("dev1"), Mode: 0o644, Sys: &builder.Entry{Nlink: 2, Dev: 1, Ino: 100}},
+		"a2": &fstest.MapFile{
+			Data: []byte("ignored: same inode as a"),
+			Mode: 0o644,
+			Sys:  &builder.Entry{Nlink: 2, Dev: 1, Ino: 100},
+		},
 		"b":       &fstest.MapFile{Data: []byte("dev2"), Mode: 0o644, Sys: &builder.Entry{Nlink: 2, Dev: 2, Ino: 100}},
 		"noino":   &fstest.MapFile{Data: []byte("n1"), Mode: 0o644, Sys: &builder.Entry{Nlink: 3}},
 		"noino2":  &fstest.MapFile{Data: []byte("n2"), Mode: 0o644, Sys: &builder.Entry{Nlink: 3}},
@@ -305,7 +318,13 @@ func TestCopyFromHardlinkIdentity(t *testing.T) {
 			t.Errorf("%s and %s share ino %d, want distinct inodes", pair[0], pair[1], x.Ino)
 		}
 		if x.Nlink != 1 || y.Nlink != 1 {
-			t.Errorf("%s/%s nlink %d/%d, want 1: a count is computed from names, not copied", pair[0], pair[1], x.Nlink, y.Nlink)
+			t.Errorf(
+				"%s/%s nlink %d/%d, want 1: a count is computed from names, not copied",
+				pair[0],
+				pair[1],
+				x.Nlink,
+				y.Nlink,
+			)
 		}
 	}
 	if st := erofstest.Stat(t, efs, "partial"); st.Nlink != 1 {

@@ -582,7 +582,13 @@ func chunkMapBytes(chunkFmt uint16, fileSize uint64, blkBits uint8, unit int64) 
 // reader will ever parse back (maxChunkIndexBytes). Both mean the size field
 // cannot be trusted, and carrying it forward would let a corrupt source drive
 // the writer's own allocations — the entry's trailing size is derived from it.
-func (fsys *Writer) parseChunks(data []byte, chunkFmt uint16, fileSize uint64, blkBits uint8, deviceIDMask uint16) ([]builder.Chunk, error) {
+func (fsys *Writer) parseChunks(
+	data []byte,
+	chunkFmt uint16,
+	fileSize uint64,
+	blkBits uint8,
+	deviceIDMask uint16,
+) ([]builder.Chunk, error) {
 	// The same format rules the reader's loadBlock applies. 48-bit chunk
 	// addressing is unimplemented end to end, so a source declaring it must
 	// not be silently reinterpreted as 32-bit.
@@ -686,7 +692,12 @@ func (fsys *Writer) parseChunks(data []byte, chunkFmt uint16, fileSize uint64, b
 // span reads n bytes at an absolute image offset (see copyFromImage) and is
 // how shared entries are reached; sharedOff is the shared xattr area's byte
 // offset, which the reader computes the same way, 0 included.
-func parseXattrsFromBuf(buf []byte, span func(off, n int64) ([]byte, error), sharedOff int64, longPrefix func(uint8) (string, error)) (map[string]string, error) {
+func parseXattrsFromBuf(
+	buf []byte,
+	span func(off, n int64) ([]byte, error),
+	sharedOff int64,
+	longPrefix func(uint8) (string, error),
+) (map[string]string, error) {
 	if len(buf) < disk.SizeXattrBodyHeader {
 		return nil, fmt.Errorf("xattr body of %d bytes too small: %w", len(buf), ErrInvalid)
 	}

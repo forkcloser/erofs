@@ -68,7 +68,11 @@ func TestChunkBasedXattrAlignment(t *testing.T) {
 		t.Fatal("ReadFile:", err)
 	}
 	if !bytes.Equal(got, want) {
-		t.Fatalf("file data mismatch: chunk-index map misaligned after xattr area (got %d bytes, first=0x%02x)", len(got), firstByte(got))
+		t.Fatalf(
+			"file data mismatch: chunk-index map misaligned after xattr area (got %d bytes, first=0x%02x)",
+			len(got),
+			firstByte(got),
+		)
 	}
 
 	// The xattr itself should round-trip.
@@ -141,6 +145,7 @@ func (chunkSourceDir) Read([]byte) (int, error) { return 0, fs.ErrInvalid }
 func (chunkSourceDir) Stat() (fs.FileInfo, error) {
 	return chunkSourceInfo{name: ".", dir: true}, nil
 }
+
 func (d chunkSourceDir) ReadDir(int) ([]fs.DirEntry, error) {
 	return []fs.DirEntry{chunkSourceDirent{chunkSourceInfo{
 		name:   d.fsys.name,

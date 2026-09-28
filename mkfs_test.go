@@ -458,10 +458,10 @@ func TestCreateFSSpecialModeBits(t *testing.T) {
 		name string
 		mode fs.FileMode
 	}{
-		{"/su", 0755 | fs.ModeSetuid},
-		{"/wall", 0755 | fs.ModeSetgid},
-		{"/all-bits", 0700 | fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky},
-		{"/plain", 0644},
+		{"/su", 0o755 | fs.ModeSetuid},
+		{"/wall", 0o755 | fs.ModeSetgid},
+		{"/all-bits", 0o700 | fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky},
+		{"/plain", 0o644},
 	} {
 		fh, err := fsys.Create(f.name)
 		if err != nil {
@@ -478,10 +478,10 @@ func TestCreateFSSpecialModeBits(t *testing.T) {
 		}
 	}
 
-	if err := fsys.Mkdir("/tmp", 0777|fs.ModeSticky); err != nil {
+	if err := fsys.Mkdir("/tmp", 0o777|fs.ModeSticky); err != nil {
 		t.Fatal(err)
 	}
-	if err := fsys.Mkdir("/var", 0775|fs.ModeSetgid); err != nil {
+	if err := fsys.Mkdir("/var", 0o775|fs.ModeSetgid); err != nil {
 		t.Fatal(err)
 	}
 	if err := fsys.Symlink("/su", "/su-link"); err != nil {
@@ -500,14 +500,14 @@ func TestCreateFSSpecialModeBits(t *testing.T) {
 		t.Fatal("EroFS:", err)
 	}
 
-	erofstest.CheckMode(t, efs, "su", 0755|fs.ModeSetuid)
-	erofstest.CheckMode(t, efs, "wall", 0755|fs.ModeSetgid)
-	erofstest.CheckMode(t, efs, "all-bits", 0700|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky)
-	erofstest.CheckMode(t, efs, "plain", 0644)
-	erofstest.CheckMode(t, efs, "tmp", 0777|fs.ModeDir|fs.ModeSticky)
-	erofstest.CheckMode(t, efs, "var", 0775|fs.ModeDir|fs.ModeSetgid)
-	erofstest.CheckMode(t, efs, "su-link", 0777|fs.ModeSymlink)
-	erofstest.CheckMode(t, efs, "null", 0666|fs.ModeDevice|fs.ModeCharDevice)
+	erofstest.CheckMode(t, efs, "su", 0o755|fs.ModeSetuid)
+	erofstest.CheckMode(t, efs, "wall", 0o755|fs.ModeSetgid)
+	erofstest.CheckMode(t, efs, "all-bits", 0o700|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky)
+	erofstest.CheckMode(t, efs, "plain", 0o644)
+	erofstest.CheckMode(t, efs, "tmp", 0o777|fs.ModeDir|fs.ModeSticky)
+	erofstest.CheckMode(t, efs, "var", 0o775|fs.ModeDir|fs.ModeSetgid)
+	erofstest.CheckMode(t, efs, "su-link", 0o777|fs.ModeSymlink)
+	erofstest.CheckMode(t, efs, "null", 0o666|fs.ModeDevice|fs.ModeCharDevice)
 
 	// Writer and reader must agree on the mode they report for an entry.
 	wfi, err := fsys.Stat("/su")
@@ -1370,6 +1370,7 @@ type chunkedDir struct {
 func (d *chunkedDir) Stat() (fs.FileInfo, error) {
 	return &chunkedDirInfo{}, nil
 }
+
 func (d *chunkedDir) Read([]byte) (int, error) {
 	return 0, &fs.PathError{Op: "read", Path: ".", Err: fmt.Errorf("is a directory")}
 }
@@ -1432,6 +1433,7 @@ type chunkedFile struct {
 func (f *chunkedFile) Stat() (fs.FileInfo, error) {
 	return &chunkedFileInfo{size: int64(len(f.data))}, nil
 }
+
 func (f *chunkedFile) Read(p []byte) (int, error) {
 	if f.offset >= len(f.data) {
 		return 0, io.EOF
@@ -1869,6 +1871,7 @@ type dataRangerDir struct {
 func (d *dataRangerDir) Stat() (fs.FileInfo, error) {
 	return &dataRangerDirInfo{}, nil
 }
+
 func (d *dataRangerDir) Read([]byte) (int, error) {
 	return 0, &fs.PathError{Op: "read", Path: ".", Err: fmt.Errorf("is a directory")}
 }

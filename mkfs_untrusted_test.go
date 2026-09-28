@@ -438,6 +438,7 @@ func (badSizeDir) Read([]byte) (int, error) { return 0, fs.ErrInvalid }
 func (d badSizeDir) Stat() (fs.FileInfo, error) {
 	return badSizeInfo{name: ".", size: 4096, dir: true}, nil
 }
+
 func (d badSizeDir) ReadDir(int) ([]fs.DirEntry, error) {
 	return []fs.DirEntry{badSizeDirent{badSizeInfo{name: "bad", size: d.fsys.size}}}, nil
 }

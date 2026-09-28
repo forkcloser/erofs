@@ -133,28 +133,28 @@ var Basic TestCase = &testCase{
 		lotsOfFilesC := make(chan WriterToTar)
 		go func() {
 			for i := range 5000 {
-				lotsOfFilesC <- tc.File(fmt.Sprintf("/usr/lib/testdir/lotsoffiles/%d", i), []byte{}, 0600)
+				lotsOfFilesC <- tc.File(fmt.Sprintf("/usr/lib/testdir/lotsoffiles/%d", i), []byte{}, 0o600)
 			}
 			close(lotsOfFilesC)
 		}()
 
 		return TarAll(
-			tc.Dir("/usr", 0755),
-			tc.Dir("/usr/lib", 0755),
-			tc.Dir("/usr/lib/testdir", 0755),
-			tc.File("/in-root.txt", []byte("root file content\n"), 0600),
-			tc.File("/usr/lib/testdir/emptyfile", []byte{}, 0600),
-			tc.File("/usr/lib/testdir/13k-zeros.raw", bytes.Repeat([]byte{0}, 1024*13), 0600),
-			tc.File("/usr/lib/testdir/16k-zeros.raw", bytes.Repeat([]byte{0}, 1024*16), 0600),
-			tc.File("/usr/lib/testdir/5k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*5), 0600),
-			tc.File("/usr/lib/testdir/16k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*16), 0600),
-			tc.Dir("/usr/lib/testdir/emptydir", 0600),
-			tc.Dir("/usr/lib/testdir/case", 0755),
-			tc.File("/usr/lib/testdir/case/file.txt", []byte("lower case dir\n"), 0600),
-			tc.Dir("/usr/lib/testdir/CASE", 0755),
-			tc.File("/usr/lib/testdir/CASE/file.txt", []byte("upper case dir\n"), 0600),
-			tc.File("/usr/lib/testdir/case.txt", []byte("lower case file\n"), 0600),
-			tc.File("/usr/lib/testdir/CASE.txt", []byte("upper case file\n"), 0600),
+			tc.Dir("/usr", 0o755),
+			tc.Dir("/usr/lib", 0o755),
+			tc.Dir("/usr/lib/testdir", 0o755),
+			tc.File("/in-root.txt", []byte("root file content\n"), 0o600),
+			tc.File("/usr/lib/testdir/emptyfile", []byte{}, 0o600),
+			tc.File("/usr/lib/testdir/13k-zeros.raw", bytes.Repeat([]byte{0}, 1024*13), 0o600),
+			tc.File("/usr/lib/testdir/16k-zeros.raw", bytes.Repeat([]byte{0}, 1024*16), 0o600),
+			tc.File("/usr/lib/testdir/5k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*5), 0o600),
+			tc.File("/usr/lib/testdir/16k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*16), 0o600),
+			tc.Dir("/usr/lib/testdir/emptydir", 0o600),
+			tc.Dir("/usr/lib/testdir/case", 0o755),
+			tc.File("/usr/lib/testdir/case/file.txt", []byte("lower case dir\n"), 0o600),
+			tc.Dir("/usr/lib/testdir/CASE", 0o755),
+			tc.File("/usr/lib/testdir/CASE/file.txt", []byte("upper case dir\n"), 0o600),
+			tc.File("/usr/lib/testdir/case.txt", []byte("lower case file\n"), 0o600),
+			tc.File("/usr/lib/testdir/CASE.txt", []byte("upper case file\n"), 0o600),
 			tc.Symlink("/in-root.txt", "/usr/lib/testdir/link"),
 			tc.Symlink("../../../in-root.txt", "/usr/lib/testdir/link-to-root"),
 			tc.Symlink("/in-root.txt", "/usr/lib/testdir/abs-link"),
@@ -165,30 +165,30 @@ var Basic TestCase = &testCase{
 			tc.WithXattrs(map[string]string{
 				"user.custom":      "value1",
 				"user.xdg.comment": "some random comment",
-			}).Dir("/usr/lib/withxattr", 0600),
+			}).Dir("/usr/lib/withxattr", 0o600),
 			tc.WithXattrs(map[string]string{
 				"user.xdg.comment": "comment for f1",
 				"user.common":      "same-value",
-			}).File("/usr/lib/withxattr/f1", []byte{}, 0600),
+			}).File("/usr/lib/withxattr/f1", []byte{}, 0o600),
 			tc.WithXattrs(map[string]string{
 				"user.xdg.comment": "comment for f2",
 				"user.common":      "same-value",
-			}).File("/usr/lib/withxattr/f2", []byte{}, 0600),
+			}).File("/usr/lib/withxattr/f2", []byte{}, 0o600),
 			tc.WithXattrs(map[string]string{
 				"user.xdg.comment": "comment for f3",
 				"user.common":      "same-value",
-			}).File("/usr/lib/withxattr/f3", []byte{}, 0600),
+			}).File("/usr/lib/withxattr/f3", []byte{}, 0o600),
 			tc.WithXattrs(map[string]string{
 				"user.xdg.comment": "comment for f4",
 				"user.common":      "same-value",
-			}).File("/usr/lib/withxattr/f4", []byte{}, 0600),
-			tc.Dir("/dev", 0755),
+			}).File("/usr/lib/withxattr/f4", []byte{}, 0o600),
+			tc.Dir("/dev", 0o755),
 			tc.Device("/dev/block0", fs.ModeDevice, 0, 1),
 			tc.Device("/dev/block1", fs.ModeDevice, 0, 0),
 			tc.Device("/dev/char0", fs.ModeCharDevice, 0, 2),
 			tc.Device("/dev/char1", fs.ModeCharDevice, 0, 3),
 			tc.Device("/dev/fifo0", fs.ModeNamedPipe, 0, 0),
-			tc.Dir("/usr/lib/testdir/lotsoffiles", 0755),
+			tc.Dir("/usr/lib/testdir/lotsoffiles", 0o755),
 			TarStream(lotsOfFilesC),
 		)
 	},
@@ -200,7 +200,12 @@ var Basic TestCase = &testCase{
 		CheckFileBytes(t, fsys, "usr/lib/testdir/13k-zeros.raw", bytes.Repeat([]byte{0}, 1024*13))
 		CheckFileBytes(t, fsys, "usr/lib/testdir/16k-zeros.raw", bytes.Repeat([]byte{0}, 1024*16))
 		CheckFileBytes(t, fsys, "usr/lib/testdir/5k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*5))
-		CheckFileBytes(t, fsys, "usr/lib/testdir/16k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*16))
+		CheckFileBytes(
+			t,
+			fsys,
+			"usr/lib/testdir/16k-sequence.raw",
+			bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*16),
+		)
 		CheckDirEntries(t, fsys, "usr/lib/testdir/emptydir", nil)
 		CheckDirSize(t, fsys, "usr/lib/testdir/lotsoffiles", 5000)
 
@@ -294,18 +299,18 @@ var LongXattrs TestCase = &testCase{
 	tar: func() WriterToTar {
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 		return TarAll(
-			tc.Dir("/usr", 0755),
-			tc.Dir("/usr/lib", 0755),
-			tc.Dir("/usr/lib/generated", 0755),
-			tc.Dir("/usr/lib/generated/xattrs", 0755),
+			tc.Dir("/usr", 0o755),
+			tc.Dir("/usr/lib", 0o755),
+			tc.Dir("/usr/lib/generated", 0o755),
+			tc.Dir("/usr/lib/generated/xattrs", 0o755),
 			tc.WithXattrs(map[string]string{
 				longXattrPrefix + "long-value": longXattrValue,
 				longXattrPrefix + "shortvalue": "y",
-			}).File("/usr/lib/generated/xattrs/long-prefix-xattrs", []byte{}, 0600),
+			}).File("/usr/lib/generated/xattrs/long-prefix-xattrs", []byte{}, 0o600),
 			tc.WithXattrs(map[string]string{
 				"user.short.long-value": longXattrValue,
 				"user.short.shortvalue": "y",
-			}).File("/usr/lib/generated/xattrs/short-prefix-xattrs", []byte{}, 0600),
+			}).File("/usr/lib/generated/xattrs/short-prefix-xattrs", []byte{}, 0o600),
 		)
 	},
 	verify: func(t testing.TB, fsys fs.FS) {
@@ -328,15 +333,15 @@ var SpecialModeBits TestCase = &testCase{
 	tar: func() WriterToTar {
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 		return TarAll(
-			tc.Dir("/bin", 0755),
-			tc.File("/bin/su", []byte("setuid\n"), 0755|fs.ModeSetuid),
-			tc.File("/bin/wall", []byte("setgid\n"), 0755|fs.ModeSetgid),
-			tc.File("/bin/all-bits", []byte("all\n"), 0700|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky),
-			tc.File("/bin/plain", []byte("plain\n"), 0644),
+			tc.Dir("/bin", 0o755),
+			tc.File("/bin/su", []byte("setuid\n"), 0o755|fs.ModeSetuid),
+			tc.File("/bin/wall", []byte("setgid\n"), 0o755|fs.ModeSetgid),
+			tc.File("/bin/all-bits", []byte("all\n"), 0o700|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky),
+			tc.File("/bin/plain", []byte("plain\n"), 0o644),
 			tc.Symlink("/bin/su", "/bin/su-link"),
-			tc.Dir("/tmp", 0777|fs.ModeSticky),
-			tc.Dir("/var", 0775|fs.ModeSetgid),
-			tc.Dir("/dev", 0755),
+			tc.Dir("/tmp", 0o777|fs.ModeSticky),
+			tc.Dir("/var", 0o775|fs.ModeSetgid),
+			tc.Dir("/dev", 0o755),
 			tc.Device("/dev/null", fs.ModeCharDevice, 1, 3),
 			tc.Device("/dev/loop0", fs.ModeDevice, 7, 0),
 			tc.Device("/dev/initctl", fs.ModeNamedPipe, 0, 0),
@@ -345,17 +350,17 @@ var SpecialModeBits TestCase = &testCase{
 	verify: func(t testing.TB, fsys fs.FS) {
 		t.Helper()
 
-		CheckMode(t, fsys, "bin/su", 0755|fs.ModeSetuid)
-		CheckMode(t, fsys, "bin/wall", 0755|fs.ModeSetgid)
-		CheckMode(t, fsys, "bin/all-bits", 0700|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky)
-		CheckMode(t, fsys, "bin/plain", 0644)
-		CheckMode(t, fsys, "bin/su-link", 0777|fs.ModeSymlink)
-		CheckMode(t, fsys, "bin", 0755|fs.ModeDir)
-		CheckMode(t, fsys, "tmp", 0777|fs.ModeDir|fs.ModeSticky)
-		CheckMode(t, fsys, "var", 0775|fs.ModeDir|fs.ModeSetgid)
-		CheckMode(t, fsys, "dev/null", 0600|fs.ModeDevice|fs.ModeCharDevice)
-		CheckMode(t, fsys, "dev/loop0", 0600|fs.ModeDevice)
-		CheckMode(t, fsys, "dev/initctl", 0600|fs.ModeNamedPipe)
+		CheckMode(t, fsys, "bin/su", 0o755|fs.ModeSetuid)
+		CheckMode(t, fsys, "bin/wall", 0o755|fs.ModeSetgid)
+		CheckMode(t, fsys, "bin/all-bits", 0o700|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky)
+		CheckMode(t, fsys, "bin/plain", 0o644)
+		CheckMode(t, fsys, "bin/su-link", 0o777|fs.ModeSymlink)
+		CheckMode(t, fsys, "bin", 0o755|fs.ModeDir)
+		CheckMode(t, fsys, "tmp", 0o777|fs.ModeDir|fs.ModeSticky)
+		CheckMode(t, fsys, "var", 0o775|fs.ModeDir|fs.ModeSetgid)
+		CheckMode(t, fsys, "dev/null", 0o600|fs.ModeDevice|fs.ModeCharDevice)
+		CheckMode(t, fsys, "dev/loop0", 0o600|fs.ModeDevice)
+		CheckMode(t, fsys, "dev/initctl", 0o600|fs.ModeNamedPipe)
 
 		// The natural "copy this out to disk" path: os.Chmod only applies
 		// setuid/setgid/sticky when the fs.Mode* flags are set.
@@ -378,10 +383,10 @@ var FileSizes TestCase = &testCase{
 	tar: func() WriterToTar {
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 		return TarAll(
-			tc.File("/exact-block.bin", generateContent(4096), 0644),
-			tc.File("/block-plus-one.bin", generateContent(4097), 0644),
-			tc.File("/partial-block.bin", generateContent(8000), 0644),
-			tc.File("/multi-block.bin", generateContent(1024*1024), 0644),
+			tc.File("/exact-block.bin", generateContent(4096), 0o644),
+			tc.File("/block-plus-one.bin", generateContent(4097), 0o644),
+			tc.File("/partial-block.bin", generateContent(8000), 0o644),
+			tc.File("/multi-block.bin", generateContent(1024*1024), 0o644),
 		)
 	},
 	verify: func(t testing.TB, fsys fs.FS) {
@@ -402,7 +407,7 @@ var LargeFile TestCase = &testCase{
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 		// 256MB + 4KB to push past the 65535-block boundary.
 		return TarAll(
-			tc.File("/large.bin", generateContent(256*1024*1024+4096), 0644),
+			tc.File("/large.bin", generateContent(256*1024*1024+4096), 0o644),
 		)
 	},
 	verify: func(t testing.TB, fsys fs.FS) {
@@ -438,9 +443,9 @@ var UIDGIDValues TestCase = &testCase{
 			tc := base.WithUIDGID(id.uid, id.gid)
 			prefix := fmt.Sprintf("/id-%d-%d", id.uid, id.gid)
 			entries = append(entries,
-				tc.Dir(prefix, 0755),
-				tc.File(prefix+"/file.txt", []byte("hello"), 0644),
-				tc.Dir(prefix+"/dir", 0755),
+				tc.Dir(prefix, 0o755),
+				tc.File(prefix+"/file.txt", []byte("hello"), 0o644),
+				tc.Dir(prefix+"/dir", 0o755),
 				tc.Symlink("file.txt", prefix+"/link"),
 			)
 		}
@@ -536,9 +541,9 @@ var SparseFiles TestCase = &testCase{
 		marker := []byte("hello sparse world!\n")
 		return TarAll(
 			// 10MB file with a marker at offset 5MB.
-			tc.SparseFile("/sparse-10m.bin", 10*1024*1024, marker, 5*1024*1024, 0644),
+			tc.SparseFile("/sparse-10m.bin", 10*1024*1024, marker, 5*1024*1024, 0o644),
 			// 20MB file, entirely zeros.
-			tc.SparseFile("/sparse-20m.bin", 20*1024*1024, nil, 0, 0644),
+			tc.SparseFile("/sparse-20m.bin", 20*1024*1024, nil, 0, 0o644),
 		)
 	},
 	verify: func(t testing.TB, fsys fs.FS) {
@@ -553,7 +558,7 @@ var SparseFiles TestCase = &testCase{
 // verifySparse checks a sparse file's size, verifies zeros by sampling a
 // 4KB block every 1MB, and optionally checks for a data marker at markerOff.
 // Set markerOff to -1 to skip the marker check.
-func verifySparse(t testing.TB, fsys fs.FS, name string, size int64, markerOff int64, marker string) {
+func verifySparse(t testing.TB, fsys fs.FS, name string, size, markerOff int64, marker string) {
 	t.Helper()
 	f, err := fsys.Open(name)
 	if err != nil {

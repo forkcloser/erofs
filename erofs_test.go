@@ -71,7 +71,7 @@ func TestErofs(t *testing.T) {
 		}
 		tc := erofstest.TarContext{}
 		wt := erofstest.TarAll(
-			tc.File("/file.txt", []byte("content\n"), 0644),
+			tc.File("/file.txt", []byte("content\n"), 0o644),
 		)
 		tarStream := erofstest.TarFromWriterTo(wt)
 		defer func() {
@@ -113,19 +113,19 @@ func BenchmarkLookup(b *testing.B) {
 	lotsOfFiles := make(chan erofstest.WriterToTar)
 	go func() {
 		for i := range 5000 {
-			lotsOfFiles <- tc.File(fmt.Sprintf("/bigdir/%d", i), []byte{}, 0600)
+			lotsOfFiles <- tc.File(fmt.Sprintf("/bigdir/%d", i), []byte{}, 0o600)
 		}
 		close(lotsOfFiles)
 	}()
 
 	wt := erofstest.TarAll(
-		tc.Dir("/a", 0755),
-		tc.Dir("/a/b", 0755),
-		tc.Dir("/a/b/c", 0755),
-		tc.File("/a/b/c/file.txt", []byte("content\n"), 0644),
-		tc.Dir("/smalldir", 0755),
-		tc.File("/smalldir/file.txt", []byte("content\n"), 0644),
-		tc.Dir("/bigdir", 0755),
+		tc.Dir("/a", 0o755),
+		tc.Dir("/a/b", 0o755),
+		tc.Dir("/a/b/c", 0o755),
+		tc.File("/a/b/c/file.txt", []byte("content\n"), 0o644),
+		tc.Dir("/smalldir", 0o755),
+		tc.File("/smalldir/file.txt", []byte("content\n"), 0o644),
+		tc.Dir("/bigdir", 0o755),
 		erofstest.TarStream(lotsOfFiles),
 	)
 

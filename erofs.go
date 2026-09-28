@@ -241,7 +241,11 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 
 	if int(ondiskExtraDevices) != len(o.extraDevices) {
 		// TODO: Provide options for skipping extra devices and error out later?
-		return nil, fmt.Errorf("invalid super block: extra devices count %d does not match provided %d", ondiskExtraDevices, len(o.extraDevices))
+		return nil, fmt.Errorf(
+			"invalid super block: extra devices count %d does not match provided %d",
+			ondiskExtraDevices,
+			len(o.extraDevices),
+		)
 	}
 
 	// Parse the device table if extra devices exist
@@ -433,7 +437,13 @@ func (img *image) checkImageRange(off, n int64) error {
 		return fmt.Errorf("data range [%d, +%d) is out of range: %w", off, n, ErrInvalid)
 	}
 	if img.size > 0 && off+n > img.size {
-		return fmt.Errorf("data range [%d, +%d) lies past the end of the %d byte image: %w", off, n, img.size, ErrInvalid)
+		return fmt.Errorf(
+			"data range [%d, +%d) lies past the end of the %d byte image: %w",
+			off,
+			n,
+			img.size,
+			ErrInvalid,
+		)
 	}
 
 	return nil
@@ -687,7 +697,11 @@ func (img *image) loadLongPrefixes() error {
 			}
 
 			if startOffset > fi.size {
-				img.prefixesErr = fmt.Errorf("xattr prefix start offset %d exceeds packed inode size %d", startOffset, fi.size)
+				img.prefixesErr = fmt.Errorf(
+					"xattr prefix start offset %d exceeds packed inode size %d",
+					startOffset,
+					fi.size,
+				)
 				return
 			}
 
@@ -703,8 +717,7 @@ func (img *image) loadLongPrefixes() error {
 		for i := 0; i < int(img.sb.XattrPrefixCount); i++ {
 			data, err := img.readMetadata(r)
 			if err != nil {
-				img.prefixesErr =
-					fmt.Errorf("failed to read long xattr prefix %d: %w", i, err)
+				img.prefixesErr = fmt.Errorf("failed to read long xattr prefix %d: %w", i, err)
 				return
 			}
 
@@ -886,7 +899,13 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 		// untrusted sizes too, and a hole used to hand them back unchecked as
 		// the block's offset and end.
 		if blockOffset < 0 || blockEnd > blockSize || blockOffset >= blockEnd {
-			return nil, fmt.Errorf("invalid chunk block bounds [%d:%d] for nid %d: %w", blockOffset, blockEnd, fi.nid, ErrInvalid)
+			return nil, fmt.Errorf(
+				"invalid chunk block bounds [%d:%d] for nid %d: %w",
+				blockOffset,
+				blockEnd,
+				fi.nid,
+				ErrInvalid,
+			)
 		}
 
 		if addr == -1 {
@@ -941,7 +960,13 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 		return nil, fmt.Errorf("failed to read block for nid %d: %w", fi.nid, err)
 	} else if n != blockEnd-blockOffset {
 		img.putBlock(b)
-		return nil, fmt.Errorf("failed to read full block for nid %d: %w, expected %d, actual %d", fi.nid, ErrInvalid, blockEnd-blockOffset, n)
+		return nil, fmt.Errorf(
+			"failed to read full block for nid %d: %w, expected %d, actual %d",
+			fi.nid,
+			ErrInvalid,
+			blockEnd-blockOffset,
+			n,
+		)
 	}
 	return b, nil
 }
@@ -1086,7 +1111,8 @@ func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.File
 	// joins dirent names without any depth limit of its own.
 	if len(name) > maxPathLen {
 		return 0, 0, "", &fs.PathError{Op: op, Path: name, Err: fmt.Errorf(
-			"path is %d bytes, over the %d byte limit: %w", len(name), maxPathLen, ErrInvalid)}
+			"path is %d bytes, over the %d byte limit: %w", len(name), maxPathLen, ErrInvalid,
+		)}
 	}
 	if name == "." {
 		name = ""
@@ -1170,7 +1196,8 @@ func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.File
 			if len(target) > maxPathLen {
 				return 0, 0, "", &fs.PathError{Op: op, Path: original, Err: fmt.Errorf(
 					"resolved path is %d bytes, over the %d byte limit: %w",
-					len(target), maxPathLen, ErrInvalid)}
+					len(target), maxPathLen, ErrInvalid,
+				)}
 			}
 			if len(target) > 0 && target[0] == '/' {
 				target = target[1:]
@@ -1183,7 +1210,8 @@ func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.File
 			// subtree: see the fs.Sub caveat on Open.
 			if target != "" && !validPath(target) {
 				return 0, 0, "", &fs.PathError{Op: op, Path: original, Err: fmt.Errorf(
-					"symlink resolves to %q, which is not a valid path: %w", target, ErrInvalid)}
+					"symlink resolves to %q, which is not a valid path: %w", target, ErrInvalid,
+				)}
 			}
 			nid = uint64(i.sb.RootNid)
 			ftype = fs.ModeDir
@@ -1248,7 +1276,12 @@ func (i *image) ReadFile(name string) ([]byte, error) {
 		return nil, err
 	}
 	if fi.size < 0 || fi.size > maxReadFileSize {
-		return nil, fmt.Errorf("file size %d exceeds ReadFile limit %d; use Open and io.Copy for large files: %w", fi.size, int64(maxReadFileSize), ErrInvalid)
+		return nil, fmt.Errorf(
+			"file size %d exceeds ReadFile limit %d; use Open and io.Copy for large files: %w",
+			fi.size,
+			int64(maxReadFileSize),
+			ErrInvalid,
+		)
 	}
 	buf := make([]byte, fi.size)
 	if err := readAll(f, buf); err != nil {
@@ -1835,7 +1868,12 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 		// Validate that NameOff is within bounds and dirent entries fit.
 		if int(dirents[0].NameOff) > bufLen || entryN == 0 {
 			d.img.putBlock(b)
-			return ents, fmt.Errorf("invalid dirent name offset %d (buf size %d): %w", dirents[0].NameOff, bufLen, ErrInvalid)
+			return ents, fmt.Errorf(
+				"invalid dirent name offset %d (buf size %d): %w",
+				dirents[0].NameOff,
+				bufLen,
+				ErrInvalid,
+			)
 		}
 
 		// The names occupy one contiguous region running from the first
@@ -1873,7 +1911,8 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 					return ents, fmt.Errorf("dirent entry %d exceeds block: %w", i+1, ErrInvalid)
 				}
 				dirents[1].Unmarshal(buf[start:])
-				if int(dirents[0].NameOff) > bufLen || int(dirents[1].NameOff) > bufLen || dirents[1].NameOff < dirents[0].NameOff {
+				if int(dirents[0].NameOff) > bufLen || int(dirents[1].NameOff) > bufLen ||
+					dirents[1].NameOff < dirents[0].NameOff {
 					d.img.putBlock(b)
 					return ents, fmt.Errorf("invalid dirent name offset range [%d:%d] (buf size %d): %w",
 						dirents[0].NameOff, dirents[1].NameOff, bufLen, ErrInvalid)
@@ -1881,7 +1920,12 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 				hi = int(dirents[1].NameOff)
 			case lo > bufLen:
 				d.img.putBlock(b)
-				return ents, fmt.Errorf("invalid dirent name offset %d (buf size %d): %w", dirents[0].NameOff, bufLen, ErrInvalid)
+				return ents, fmt.Errorf(
+					"invalid dirent name offset %d (buf size %d): %w",
+					dirents[0].NameOff,
+					bufLen,
+					ErrInvalid,
+				)
 			default:
 				// The last entry's name runs to the end of the block, with
 				// any NUL padding trimmed.
@@ -2210,6 +2254,7 @@ func (fi *fileInfo) GetXattr(name string) (string, bool) {
 	v, ok := fi.stat.Xattrs[name]
 	return v, ok
 }
+
 func decodeSuperBlock(b [disk.SizeSuperBlock]byte, sb *disk.SuperBlock) error {
 	sb.Unmarshal(b[:])
 	if sb.MagicNumber != disk.MagicNumber {

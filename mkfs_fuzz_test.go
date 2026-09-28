@@ -201,7 +201,7 @@ func FuzzWriterDirectoryTree(f *testing.F) {
 	f.Add(uint8(5), uint8(5), []byte(""))
 	f.Add(uint8(10), uint8(0), []byte("x"))
 
-	f.Fuzz(func(t *testing.T, depth uint8, filesPerDir uint8, content []byte) {
+	f.Fuzz(func(t *testing.T, depth, filesPerDir uint8, content []byte) {
 		d := int(depth)
 		fpd := int(filesPerDir)
 		if d > 10 || fpd > 10 || len(content) > 1024 {

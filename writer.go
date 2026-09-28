@@ -143,8 +143,13 @@ func (w *erofsWriter) checkLimits() error {
 			}
 		}
 		if e.xattrSize > 0 && xattrICount(e.xattrSize) > maxXattrICount {
-			return fmt.Errorf("mkfs: %s: xattr area of %d bytes needs more than the %d entries i_xattr_icount can hold: %w",
-				e.path, e.xattrSize, maxXattrICount, ErrInvalid)
+			return fmt.Errorf(
+				"mkfs: %s: xattr area of %d bytes needs more than the %d entries i_xattr_icount can hold: %w",
+				e.path,
+				e.xattrSize,
+				maxXattrICount,
+				ErrInvalid,
+			)
 		}
 	}
 

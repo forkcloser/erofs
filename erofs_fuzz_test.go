@@ -50,10 +50,10 @@ func initFuzzFlat(t testing.TB) fuzzImage {
 		for i := range 50 {
 			name := fmt.Sprintf("file%03d.txt", i)
 			content := bytes.Repeat([]byte{byte(i)}, (i+1)*100)
-			entries = append(entries, tc.File("/"+name, content, 0644))
+			entries = append(entries, tc.File("/"+name, content, 0o644))
 			files = append(files, name)
 		}
-		entries = append(entries, tc.File("/empty", []byte{}, 0644))
+		entries = append(entries, tc.File("/empty", []byte{}, 0o644))
 		files = append(files, "empty")
 
 		fuzzFlat = buildFuzzImage(t, entries, files, []string{"."})
@@ -70,17 +70,17 @@ func initFuzzNested(t testing.TB) fuzzImage {
 		var entries []erofstest.WriterToTar
 		var files, dirs []string
 
-		entries = append(entries, tc.File("/root.txt", []byte("root"), 0644))
+		entries = append(entries, tc.File("/root.txt", []byte("root"), 0o644))
 		files = append(files, "root.txt")
 
 		for i := range 10 {
 			dirName := fmt.Sprintf("dir%d", i)
-			entries = append(entries, tc.Dir("/"+dirName, 0755))
+			entries = append(entries, tc.Dir("/"+dirName, 0o755))
 			dirs = append(dirs, dirName)
 
 			for j := range 5 {
 				name := fmt.Sprintf("%s/f%d.txt", dirName, j)
-				entries = append(entries, tc.File("/"+name, fmt.Appendf(nil, "content-%d-%d", i, j), 0644))
+				entries = append(entries, tc.File("/"+name, fmt.Appendf(nil, "content-%d-%d", i, j), 0o644))
 				files = append(files, name)
 			}
 		}
@@ -107,13 +107,13 @@ func initFuzzDeep(t testing.TB) fuzzImage {
 			} else {
 				path = path + "/" + seg
 			}
-			entries = append(entries, tc.Dir("/"+path, 0755))
+			entries = append(entries, tc.Dir("/"+path, 0o755))
 			dirs = append(dirs, path)
 
 			for i := range 3 {
 				fpath := fmt.Sprintf("%s/file%d.dat", path, i)
 				content := bytes.Repeat([]byte{byte(depth*3 + i)}, 512)
-				entries = append(entries, tc.File("/"+fpath, content, 0644))
+				entries = append(entries, tc.File("/"+fpath, content, 0o644))
 				files = append(files, fpath)
 			}
 		}
@@ -138,11 +138,11 @@ func initFuzzWide(t testing.TB) fuzzImage {
 
 		for i := range 200 {
 			dirName := fmt.Sprintf("pkg%03d", i)
-			entries = append(entries, tc.Dir("/"+dirName, 0755))
+			entries = append(entries, tc.Dir("/"+dirName, 0o755))
 			dirs = append(dirs, dirName)
 
 			fname := fmt.Sprintf("%s/main.go", dirName)
-			entries = append(entries, tc.File("/"+fname, fmt.Appendf(nil, "package pkg%03d\n", i), 0644))
+			entries = append(entries, tc.File("/"+fname, fmt.Appendf(nil, "package pkg%03d\n", i), 0o644))
 			files = append(files, fname)
 		}
 
@@ -742,9 +742,9 @@ func buildMinimalImage(t testing.TB) []byte {
 
 	tc := erofstest.TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 	wt := erofstest.TarAll(
-		tc.Dir("/dir", 0755),
-		tc.File("/dir/hello.txt", []byte("hello world\n"), 0644),
-		tc.File("/empty", []byte{}, 0644),
+		tc.Dir("/dir", 0o755),
+		tc.File("/dir/hello.txt", []byte("hello world\n"), 0o644),
+		tc.File("/empty", []byte{}, 0o644),
 		tc.Symlink("/dir/hello.txt", "/link"),
 	)
 	tarStream := erofstest.TarFromWriterTo(wt)
