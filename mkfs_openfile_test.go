@@ -17,9 +17,11 @@ func writeFile(t *testing.T, w *Writer, name string, data []byte) {
 	if err != nil {
 		t.Fatalf("Create(%q): %v", name, err)
 	}
+
 	if _, err := f.Write(data); err != nil {
 		t.Fatalf("Write(%q): %v", name, err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatalf("Close(%q): %v", name, err)
 	}
@@ -40,21 +42,26 @@ func TestCreateRejectsSecondOpenFile(t *testing.T) {
 	f2, err := w.Create("/two")
 	if err == nil {
 		_ = f2.Close()
+
 		t.Fatal("Create succeeded while another file was open for writing")
 	}
+
 	if !strings.Contains(err.Error(), "/one") {
 		t.Errorf("error should name the file still open, got: %v", err)
 	}
+
 	t.Logf("rejected with: %v", err)
 
 	// Closing the first file releases the slot.
 	if err := f1.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	f2, err = w.Create("/two")
 	if err != nil {
 		t.Fatalf("Create after closing the first file: %v", err)
 	}
+
 	if err := f2.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -68,22 +75,26 @@ func TestSequentialFilesKeepTheirData(t *testing.T) {
 		if useDataFile {
 			name = "datafile"
 		}
+
 		t.Run(name, func(t *testing.T) {
 			out := &seekBuf{}
 			opts := []CreateOpt{WithBuildTime(1000, 0)}
 
 			var blobPath string
+
 			if useDataFile {
 				df, err := os.CreateTemp(t.TempDir(), "blob-*")
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer func() { _ = df.Close() }()
+
 				blobPath = df.Name()
 				opts = append(opts, WithDataFile(df))
 			}
 
 			w := Create(out, opts...)
+
 			want := map[string][]byte{
 				"one":   bytes.Repeat([]byte("1"), 32),
 				"two":   bytes.Repeat([]byte("2"), 32),
@@ -92,27 +103,33 @@ func TestSequentialFilesKeepTheirData(t *testing.T) {
 			for _, n := range []string{"one", "two", "three"} {
 				writeFile(t, w, "/"+n, want[n])
 			}
+
 			if err := w.Close(); err != nil {
 				t.Fatal(err)
 			}
 
 			var readOpts []OpenOpt
+
 			if useDataFile {
 				blob, err := os.ReadFile(blobPath)
 				if err != nil {
 					t.Fatal(err)
 				}
+
 				readOpts = append(readOpts, WithExtraDevices(bytes.NewReader(blob)))
 			}
+
 			img, err := Open(bytes.NewReader(out.buf), readOpts...)
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			for _, n := range []string{"one", "two", "three"} {
 				got, err := fs.ReadFile(img, n)
 				if err != nil {
 					t.Fatalf("read %q: %v", n, err)
 				}
+
 				if !bytes.Equal(got, want[n]) {
 					t.Errorf("%q: got %d bytes starting %q, want %d bytes starting %q",
 						n, len(got), firstByte(got), len(want[n]), firstByte(want[n]))
@@ -139,6 +156,7 @@ func TestCopyFromRejectsOpenFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("hello")); err != nil {
 		t.Fatal(err)
 	}
@@ -153,6 +171,7 @@ func TestCopyFromRejectsOpenFile(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.CopyFrom(src); err != nil {
 		t.Fatalf("CopyFrom after closing the file: %v", err)
 	}
@@ -168,6 +187,7 @@ func TestWriterCloseRejectsOpenFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write(bytes.Repeat([]byte("x"), 100)); err != nil {
 		t.Fatal(err)
 	}
@@ -181,6 +201,7 @@ func TestWriterCloseRejectsOpenFile(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close after closing the file: %v", err)
 	}

@@ -15,15 +15,18 @@ import (
 // resulting image contains no trace of it.
 func TestWriterRemoveFile(t *testing.T) {
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 
 	f, err := w.Create("/keep.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("keep\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -32,9 +35,11 @@ func TestWriterRemoveFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f2.Write([]byte("drop\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f2.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -53,6 +58,7 @@ func TestWriterRemoveFile(t *testing.T) {
 	if err != nil {
 		t.Fatal("Open:", err)
 	}
+
 	erofstest.CheckFile(t, efs, "keep.txt", "keep\n")
 	erofstest.CheckDirEntries(t, efs, ".", []string{"keep.txt"})
 }
@@ -60,14 +66,17 @@ func TestWriterRemoveFile(t *testing.T) {
 // TestWriterRemoveEmptyDir verifies that an empty directory can be removed.
 func TestWriterRemoveEmptyDir(t *testing.T) {
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 
 	if err := w.Mkdir("/a", 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Mkdir("/b", 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Remove("/b"); err != nil {
 		t.Fatal("Remove empty dir:", err)
 	}
@@ -77,10 +86,12 @@ func TestWriterRemoveEmptyDir(t *testing.T) {
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	erofstest.CheckDirEntries(t, efs, ".", []string{"a"})
 }
 
@@ -88,15 +99,18 @@ func TestWriterRemoveEmptyDir(t *testing.T) {
 // for a directory that still has children.
 func TestWriterRemoveNonEmptyDirFails(t *testing.T) {
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 
 	if err := w.Mkdir("/dir", 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	f, err := w.Create("/dir/child")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -105,10 +119,12 @@ func TestWriterRemoveNonEmptyDirFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error removing non-empty directory")
 	}
+
 	var pe *fs.PathError
 	if !errors.As(err, &pe) {
 		t.Fatalf("error is not *fs.PathError: %T %v", err, err)
 	}
+
 	if !errors.Is(err, erofs.ErrDirNotEmpty) {
 		t.Fatalf("error is not ErrDirNotEmpty: %v", err)
 	}
@@ -118,6 +134,7 @@ func TestWriterRemoveNonEmptyDirFails(t *testing.T) {
 // fs.ErrNotExist for a path that was never added.
 func TestWriterRemoveMissingReturnsErrNotExist(t *testing.T) {
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 
 	err := w.Remove("/missing")
@@ -129,6 +146,7 @@ func TestWriterRemoveMissingReturnsErrNotExist(t *testing.T) {
 // TestWriterRemoveRootFails verifies Remove cannot delete "/".
 func TestWriterRemoveRootFails(t *testing.T) {
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 	if err := w.Remove("/"); err == nil {
 		t.Fatal("expected error removing root")
@@ -138,21 +156,26 @@ func TestWriterRemoveRootFails(t *testing.T) {
 // TestWriterRemoveSymlink verifies a symlink can be removed.
 func TestWriterRemoveSymlink(t *testing.T) {
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 
 	f, err := w.Create("/target")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("x\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Symlink("target", "/link"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Remove("/link"); err != nil {
 		t.Fatal("Remove symlink:", err)
 	}
@@ -160,11 +183,14 @@ func TestWriterRemoveSymlink(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	erofstest.CheckDirEntries(t, efs, ".", []string{"target"})
 }
 
@@ -172,21 +198,26 @@ func TestWriterRemoveSymlink(t *testing.T) {
 // canonical path intact with the correct nlink.
 func TestWriterRemoveHardlinkAlias(t *testing.T) {
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 
 	f, err := w.Create("/orig")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("hardlink payload\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Link("/orig", "/alias1"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Link("/orig", "/alias2"); err != nil {
 		t.Fatal(err)
 	}
@@ -200,19 +231,23 @@ func TestWriterRemoveHardlinkAlias(t *testing.T) {
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	erofstest.CheckFile(t, efs, "orig", "hardlink payload\n")
 	erofstest.CheckFile(t, efs, "alias2", "hardlink payload\n")
 	erofstest.CheckDirEntries(t, efs, ".", []string{"alias2", "orig"})
 
 	stOrig := erofstest.Stat(t, efs, "orig")
+
 	stAlias := erofstest.Stat(t, efs, "alias2")
 	if stOrig.Ino != stAlias.Ino {
 		t.Errorf("Ino mismatch after alias remove: orig=%d alias2=%d", stOrig.Ino, stAlias.Ino)
 	}
+
 	if stOrig.Nlink != 2 {
 		t.Errorf("orig nlink after alias remove: got %d, want 2", stOrig.Nlink)
 	}
@@ -223,21 +258,26 @@ func TestWriterRemoveHardlinkAlias(t *testing.T) {
 // to canonical (POSIX unlink semantics).
 func TestWriterRemoveHardlinkCanonicalPromotes(t *testing.T) {
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 
 	f, err := w.Create("/orig")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("promote me\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Link("/orig", "/alias1"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Link("/orig", "/alias2"); err != nil {
 		t.Fatal(err)
 	}
@@ -252,19 +292,23 @@ func TestWriterRemoveHardlinkCanonicalPromotes(t *testing.T) {
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	erofstest.CheckFile(t, efs, "alias1", "promote me\n")
 	erofstest.CheckFile(t, efs, "alias2", "promote me\n")
 	erofstest.CheckDirEntries(t, efs, ".", []string{"alias1", "alias2"})
 
 	st1 := erofstest.Stat(t, efs, "alias1")
+
 	st2 := erofstest.Stat(t, efs, "alias2")
 	if st1.Ino != st2.Ino {
 		t.Errorf("Ino mismatch after canonical remove: alias1=%d alias2=%d", st1.Ino, st2.Ino)
 	}
+
 	if st1.Nlink != 2 {
 		t.Errorf("alias1 nlink: got %d, want 2", st1.Nlink)
 	}
@@ -274,24 +318,30 @@ func TestWriterRemoveHardlinkCanonicalPromotes(t *testing.T) {
 // pair drops both paths and the data along with them.
 func TestWriterRemoveHardlinkAllAliases(t *testing.T) {
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 
 	f, err := w.Create("/orig")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("doomed\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Link("/orig", "/alias"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Remove("/orig"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Remove("/alias"); err != nil {
 		t.Fatal(err)
 	}
@@ -299,11 +349,14 @@ func TestWriterRemoveHardlinkAllAliases(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	erofstest.CheckDirEntries(t, efs, ".", []string{})
 }
 
@@ -311,22 +364,27 @@ func TestWriterRemoveHardlinkAllAliases(t *testing.T) {
 // all of its descendants, leaving unrelated paths untouched.
 func TestWriterRemoveAllRecursive(t *testing.T) {
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 
 	if err := w.Mkdir("/dir", 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Mkdir("/dir/sub", 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	for _, p := range []string{"/dir/a", "/dir/b", "/dir/sub/c"} {
 		f, err := w.Create(p)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if _, err := f.Write([]byte(p + "\n")); err != nil {
 			t.Fatal(err)
 		}
+
 		if err := f.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -335,10 +393,12 @@ func TestWriterRemoveAllRecursive(t *testing.T) {
 	if err := w.Mkdir("/other", 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	f, err := w.Create("/other/keep")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -352,10 +412,12 @@ func TestWriterRemoveAllRecursive(t *testing.T) {
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	erofstest.CheckDirEntries(t, efs, ".", []string{"other"})
 	erofstest.CheckDirEntries(t, efs, "other", []string{"keep"})
 }
@@ -364,6 +426,7 @@ func TestWriterRemoveAllRecursive(t *testing.T) {
 // a path that does not exist.
 func TestWriterRemoveAllMissing(t *testing.T) {
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 	if err := w.RemoveAll("/does/not/exist"); err != nil {
 		t.Fatalf("RemoveAll missing: got %v, want nil", err)
@@ -376,12 +439,14 @@ func TestWriterRemoveAllMissing(t *testing.T) {
 // treating it as a missing path.
 func TestWriterRemoveAllNonDirectoryAncestor(t *testing.T) {
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 
 	f, err := w.Create("/file")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -395,6 +460,7 @@ func TestWriterRemoveAllNonDirectoryAncestor(t *testing.T) {
 // TestWriterRemoveAllRoot verifies RemoveAll cannot delete "/".
 func TestWriterRemoveAllRoot(t *testing.T) {
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 	if err := w.RemoveAll("/"); err == nil {
 		t.Fatal("expected error removing root")
@@ -405,15 +471,18 @@ func TestWriterRemoveAllRoot(t *testing.T) {
 // file, just like Remove.
 func TestWriterRemoveAllFile(t *testing.T) {
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 
 	f, err := w.Create("/drop.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.RemoveAll("/drop.txt"); err != nil {
 		t.Fatal("RemoveAll file:", err)
 	}
@@ -421,11 +490,14 @@ func TestWriterRemoveAllFile(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	erofstest.CheckDirEntries(t, efs, ".", []string{})
 }
 
@@ -434,24 +506,30 @@ func TestWriterRemoveAllFile(t *testing.T) {
 // count when the alias is removed.
 func TestWriterRemoveAllHardlinkInside(t *testing.T) {
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 
 	if err := w.Mkdir("/keep", 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	f, err := w.Create("/keep/orig")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("payload\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Mkdir("/scratch", 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Link("/keep/orig", "/scratch/alias"); err != nil {
 		t.Fatal(err)
 	}
@@ -463,12 +541,16 @@ func TestWriterRemoveAllHardlinkInside(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	erofstest.CheckFile(t, efs, "keep/orig", "payload\n")
+
 	st := erofstest.Stat(t, efs, "keep/orig")
 	if st.Nlink != 1 {
 		t.Errorf("keep/orig nlink after scratch removal: got %d, want 1", st.Nlink)
@@ -482,18 +564,22 @@ func TestWriterRemoveAllHardlinkInside(t *testing.T) {
 // (unlink(2) semantics) and the merge succeeds.
 func TestMergeWhiteoutHardlinkTarget(t *testing.T) {
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 
 	f, err := w.Create("/orig")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("linked\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Link("/orig", "/dir/alias"); err != nil {
 		t.Fatal(err)
 	}
@@ -504,17 +590,21 @@ func TestMergeWhiteoutHardlinkTarget(t *testing.T) {
 	if err := w.CopyFrom(overlay, erofs.Merge()); err != nil {
 		t.Fatal("CopyFrom overlay:", err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	erofstest.CheckNotExists(t, efs, "orig")
 	erofstest.CheckFile(t, efs, "dir/alias", "linked\n")
+
 	if st := erofstest.Stat(t, efs, "dir/alias"); st.Nlink != 1 {
 		t.Errorf("nlink after whiteout of target: got %d, want 1", st.Nlink)
 	}
@@ -526,31 +616,40 @@ func TestMergeWhiteoutHardlinkTarget(t *testing.T) {
 func TestWriterRemoveHardlinkPromotionDeterministic(t *testing.T) {
 	build := func(order []string) []byte {
 		var buf testBuffer
+
 		w := erofs.Create(&buf, erofs.WithBuildTime(0, 0))
+
 		f, err := w.Create("/orig")
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if _, err := f.Write([]byte("x")); err != nil {
 			t.Fatal(err)
 		}
+
 		if err := f.Close(); err != nil {
 			t.Fatal(err)
 		}
+
 		for _, l := range order {
 			if err := w.Link("/orig", l); err != nil {
 				t.Fatal(err)
 			}
 		}
+
 		if err := w.Remove("/orig"); err != nil {
 			t.Fatal(err)
 		}
+
 		if err := w.Close(); err != nil {
 			t.Fatal(err)
 		}
+
 		return append([]byte(nil), buf.Bytes()...)
 	}
 	a := build([]string{"/b", "/c", "/d/e"})
+
 	b := build([]string{"/d/e", "/c", "/b"})
 	if !bytes.Equal(a, b) {
 		t.Error("alias promotion produced order-dependent images")
@@ -561,23 +660,30 @@ func TestWriterRemoveHardlinkPromotionDeterministic(t *testing.T) {
 // removed out from under its writer, directly or via an ancestor.
 func TestWriterRemoveOpenFile(t *testing.T) {
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
+
 	f, err := w.Create("/dir/open")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Remove("/dir/open"); err == nil {
 		t.Error("Remove of open file succeeded")
 	}
+
 	if err := w.RemoveAll("/dir"); err == nil {
 		t.Error("RemoveAll over open file succeeded")
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.RemoveAll("/dir"); err != nil {
 		t.Fatal("RemoveAll after close:", err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}

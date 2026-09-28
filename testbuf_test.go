@@ -22,13 +22,16 @@ func (b *testBuffer) Write(p []byte) (int, error) {
 			b.buf = b.buf[:end]
 		}
 	}
+
 	copy(b.buf[b.pos:], p)
 	b.pos = end
+
 	return len(p), nil
 }
 
 func (b *testBuffer) Seek(offset int64, whence int) (int64, error) {
 	var abs int64
+
 	switch whence {
 	case io.SeekStart:
 		abs = offset
@@ -39,10 +42,13 @@ func (b *testBuffer) Seek(offset int64, whence int) (int64, error) {
 	default:
 		return 0, fmt.Errorf("testbuf: invalid whence %d", whence)
 	}
+
 	if abs < 0 {
 		return 0, fmt.Errorf("testbuf: negative position %d", abs)
 	}
+
 	b.pos = int(abs)
+
 	return abs, nil
 }
 

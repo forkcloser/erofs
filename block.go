@@ -10,6 +10,7 @@ func (b *block) bytes() []byte {
 	if b.buf == nil || b.offset == -1 {
 		return nil
 	}
+
 	return b.buf[b.offset:b.end]
 }
 
@@ -18,5 +19,6 @@ func calculateBlocks(blockBits uint8, size int64) int {
 	if size > blockNum<<blockBits {
 		blockNum++
 	}
+
 	return int(blockNum)
 }

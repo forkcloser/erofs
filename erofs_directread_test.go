@@ -16,6 +16,7 @@ func readAllVia(t *testing.T, img *image, name string, bufSize int, forceBlockPa
 	if err != nil {
 		t.Fatalf("resolve %q: %v", name, err)
 	}
+
 	f := &file{img: img, name: base, nid: nid, ftype: ftype}
 	if forceBlockPath {
 		// Pretend the direct path was checked and unavailable.
@@ -24,16 +25,20 @@ func readAllVia(t *testing.T, img *image, name string, bufSize int, forceBlockPa
 	}
 
 	var out []byte
+
 	buf := make([]byte, bufSize)
 	for {
 		n, err := f.Read(buf)
 		out = append(out, buf[:n]...)
+
 		if err == io.EOF {
 			break
 		}
+
 		if err != nil {
 			t.Fatalf("read %q: %v", name, err)
 		}
+
 		if n == 0 {
 			t.Fatalf("read %q returned 0 bytes with no error", name)
 		}
@@ -60,16 +65,20 @@ func TestDirectReadMatchesBlockPath(t *testing.T) {
 
 	out := &seekBuf{}
 	w := Create(out, WithBlockSize(blockSize), WithBuildTime(1000, 0))
+
 	want := make(map[string][]byte, len(sizes))
 	for _, size := range sizes {
 		name := "/f" + itoa(size)
+
 		data := make([]byte, size)
 		for i := range data {
 			data[i] = byte(i*7 + size)
 		}
+
 		want[name[1:]] = data
 		writeFile(t, w, name, data)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -78,6 +87,7 @@ func TestDirectReadMatchesBlockPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	img := fsys.(*image)
 
 	for name, expect := range want {
@@ -89,10 +99,12 @@ func TestDirectReadMatchesBlockPath(t *testing.T) {
 				t.Errorf("%s bufSize=%d: direct path returned %d bytes, want %d",
 					name, bufSize, len(direct), len(expect))
 			}
+
 			if !bytes.Equal(blocks, expect) {
 				t.Errorf("%s bufSize=%d: block path returned %d bytes, want %d",
 					name, bufSize, len(blocks), len(expect))
 			}
+
 			if !bytes.Equal(direct, blocks) {
 				t.Errorf("%s bufSize=%d: the two read paths disagree", name, bufSize)
 			}
@@ -106,12 +118,15 @@ func TestWriteToMatchesRead(t *testing.T) {
 
 	out := &seekBuf{}
 	w := Create(out, WithBlockSize(blockSize), WithBuildTime(1000, 0))
+
 	data := make([]byte, 5*blockSize+123)
 	for i := range data {
 		data[i] = byte(i)
 	}
+
 	writeFile(t, w, "/big", data)
 	writeFile(t, w, "/small", []byte("tiny"))
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -126,12 +141,16 @@ func TestWriteToMatchesRead(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		var buf bytes.Buffer
+
 		n, err := io.Copy(&buf, fh)
 		if err != nil {
 			t.Fatalf("io.Copy %q: %v", name, err)
 		}
+
 		_ = fh.Close()
+
 		if n != int64(len(expect)) || !bytes.Equal(buf.Bytes(), expect) {
 			t.Errorf("%s: io.Copy produced %d bytes, want %d", name, n, len(expect))
 		}
@@ -145,6 +164,7 @@ func TestWriteToResumesFromOffset(t *testing.T) {
 	w := Create(out, WithBuildTime(1000, 0))
 	data := []byte("0123456789abcdef")
 	writeFile(t, w, "/f", data)
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -153,14 +173,17 @@ func TestWriteToResumesFromOffset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	fh, err := img.Open("f")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	head := make([]byte, 6)
 	if _, err := io.ReadFull(fh, head); err != nil {
 		t.Fatal(err)
 	}
+
 	if string(head) != "012345" {
 		t.Fatalf("head = %q, want %q", head, "012345")
 	}
@@ -169,6 +192,7 @@ func TestWriteToResumesFromOffset(t *testing.T) {
 	if _, err := io.Copy(&rest, fh); err != nil {
 		t.Fatal(err)
 	}
+
 	if rest.String() != "6789abcdef" {
 		t.Errorf("rest = %q, want %q", rest.String(), "6789abcdef")
 	}
@@ -178,13 +202,16 @@ func TestWriteToResumesFromOffset(t *testing.T) {
 // direct path must decline and leave the block loop to zero-fill.
 func TestDirectReadSparseFile(t *testing.T) {
 	const bs = 4096
+
 	blob := sparseBlob(bs)
 
 	out := &seekBuf{}
+
 	w := Create(out, WithBlockSize(bs), WithBuildTime(1000, 0))
 	if err := w.CopyFrom(newSparseFS(bs, blob), MetadataOnly()); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -193,17 +220,21 @@ func TestDirectReadSparseFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	img := fsys.(*image)
 
 	nid, ftype, base, err := img.resolve("open", "f", true)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	f := &file{img: img, name: base, nid: nid, ftype: ftype}
+
 	ino, err := f.readInfo()
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if sr := f.directReader(ino); sr != nil {
 		t.Error("a sparse file must not take the direct path; its hole would read as device data")
 	}
@@ -212,7 +243,9 @@ func TestDirectReadSparseFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	checkSparseContent(t, img, bs, "sparse via block path")
+
 	if len(got) != 4*bs {
 		t.Errorf("read %d bytes, want %d", len(got), 4*bs)
 	}
@@ -222,6 +255,7 @@ func itoa(n int) string {
 	if n == 0 {
 		return "0"
 	}
+
 	var b []byte
 	for n > 0 {
 		b = append([]byte{byte('0' + n%10)}, b...)

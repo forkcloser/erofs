@@ -45,6 +45,7 @@ func TarAll(wt ...WriterToTar) WriterToTar {
 				return err
 			}
 		}
+
 		return nil
 	})
 }
@@ -58,6 +59,7 @@ func TarStream(wc chan WriterToTar) WriterToTar {
 				return err
 			}
 		}
+
 		return nil
 	})
 }
@@ -74,6 +76,7 @@ func TarFromWriterTo(wt WriterToTar) io.ReadCloser {
 			w.CloseWithError(err)
 			return
 		}
+
 		w.CloseWithError(tw.Close())
 	}()
 
@@ -98,10 +101,12 @@ func paxXattrs(xattrs map[string]string) map[string]string {
 	if len(xattrs) == 0 {
 		return nil
 	}
+
 	records := make(map[string]string, len(xattrs))
 	for k, v := range xattrs {
 		records["SCHILY.xattr."+k] = v
 	}
+
 	return records
 }
 
@@ -122,6 +127,7 @@ func (tc TarContext) newHeader(mode os.FileMode, name, link string, size int64) 
 		ti.hdr.Typeflag = tar.TypeLink
 		ti.hdr.Linkname = link
 	}
+
 	hdr, err := tar.FileInfoHeader(ti, link)
 	if err != nil {
 		// Only returns an error on bad input mode
@@ -155,6 +161,7 @@ func (ti tarInfo) ModTime() time.Time {
 	if ti.modt != nil {
 		return *ti.modt
 	}
+
 	return time.Now().UTC()
 }
 
@@ -171,6 +178,7 @@ func (tc TarContext) WithUIDGID(uid, gid int) TarContext {
 	ntc := tc
 	ntc.UID = uid
 	ntc.GID = gid
+
 	return ntc
 }
 
@@ -178,6 +186,7 @@ func (tc TarContext) WithUIDGID(uid, gid int) TarContext {
 func (tc TarContext) WithModTime(modtime time.Time) TarContext {
 	ntc := tc
 	ntc.ModTime = &modtime
+
 	return ntc
 }
 
@@ -188,7 +197,9 @@ func (tc TarContext) WithXattrs(xattrs map[string]string) TarContext {
 	if ntc.Xattrs == nil {
 		ntc.Xattrs = map[string]string{}
 	}
+
 	maps.Copy(ntc.Xattrs, xattrs)
+
 	return ntc
 }
 
@@ -208,7 +219,9 @@ func (tc TarContext) SparseFile(name string, size int64, data []byte, dataOffset
 		if err := tw.WriteHeader(hdr); err != nil {
 			return err
 		}
+
 		zeros := make([]byte, 64*1024)
+
 		written := int64(0)
 		for written < size {
 			chunk := min(size-written, int64(len(zeros)))
@@ -220,12 +233,15 @@ func (tc TarContext) SparseFile(name string, size int64, data []byte, dataOffset
 				sStart := max(written-dataOffset, 0)
 				copy(buf[dStart:], data[sStart:])
 			}
+
 			n, err := tw.Write(buf)
 			written += int64(n)
+
 			if err != nil {
 				return err
 			}
 		}
+
 		return nil
 	})
 }
@@ -257,6 +273,7 @@ func (tc TarContext) Device(name string, ftype os.FileMode, major, minor int64) 
 		hdr.Typeflag = typeFlag(ftype)
 		hdr.Devmajor = major
 		hdr.Devminor = minor
+
 		return writeHeaderAndContent(tw, hdr, nil)
 	})
 }
@@ -265,9 +282,11 @@ func typeFlag(ftype os.FileMode) byte {
 	if ftype&os.ModeCharDevice != 0 {
 		return tar.TypeChar
 	}
+
 	if ftype&os.ModeNamedPipe != 0 {
 		return tar.TypeFifo
 	}
+
 	return tar.TypeBlock
 }
 
@@ -275,13 +294,16 @@ func writeHeaderAndContent(tw *tar.Writer, h *tar.Header, b []byte) error {
 	if h.Size != int64(len(b)) {
 		return errors.New("bad content length")
 	}
+
 	if err := tw.WriteHeader(h); err != nil {
 		return err
 	}
+
 	if len(b) > 0 {
 		if _, err := tw.Write(b); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }

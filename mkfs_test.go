@@ -21,6 +21,7 @@ import (
 // TestCreateFSSpool exercises spool mode: CreateFS without a data file.
 func TestCreateFSSpool(t *testing.T) {
 	var buf testBuffer
+
 	fsys := erofs.Create(&buf)
 
 	// Create a regular file.
@@ -28,9 +29,11 @@ func TestCreateFSSpool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("hello world\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -39,13 +42,16 @@ func TestCreateFSSpool(t *testing.T) {
 	if err := fsys.Mkdir("/subdir", 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	f2, err := fsys.Create("/subdir/nested.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f2.Write([]byte("nested\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f2.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -60,6 +66,7 @@ func TestCreateFSSpool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f3.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -72,6 +79,7 @@ func TestCreateFSSpool(t *testing.T) {
 
 	// Read back the image.
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal("EroFS:", err)
@@ -88,22 +96,27 @@ func TestCreateFSSpool(t *testing.T) {
 // TestCreateFSDataFile exercises data file mode (metadata-only).
 func TestCreateFSDataFile(t *testing.T) {
 	dataPath := filepath.Join(t.TempDir(), "data.bin")
+
 	df, err := os.Create(dataPath)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = df.Close() }()
 
 	var metaBuf testBuffer
+
 	fsys := erofs.Create(&metaBuf, erofs.WithDataFile(df))
 
 	f, err := fsys.Create("/hello.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("data file mode\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -112,10 +125,12 @@ func TestCreateFSDataFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	data := bytes.Repeat([]byte("ABCDEFGH"), 1024) // 8KB
 	if _, err := f2.Write(data); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f2.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -143,21 +158,26 @@ func TestCreateFSDataFile(t *testing.T) {
 // TestCreateFSMetadata verifies Chmod, Chown, Setxattr, SetMtime.
 func TestCreateFSMetadata(t *testing.T) {
 	var buf testBuffer
+
 	fsys := erofs.Create(&buf)
 
 	f, err := fsys.Create("/file.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("content\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Chmod(0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Chown(1000, 2000); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -165,6 +185,7 @@ func TestCreateFSMetadata(t *testing.T) {
 	if err := fsys.Setxattr("/file.txt", "user.test", "value123"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := fsys.Chtimes("/file.txt", time.Time{}, time.Unix(1700000000, 123456789)); err != nil {
 		t.Fatal(err)
 	}
@@ -172,9 +193,11 @@ func TestCreateFSMetadata(t *testing.T) {
 	if err := fsys.Mkdir("/mydir", 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := fsys.Chmod("/mydir", 0o700); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := fsys.Chown("/mydir", 500, 600); err != nil {
 		t.Fatal(err)
 	}
@@ -184,6 +207,7 @@ func TestCreateFSMetadata(t *testing.T) {
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal("EroFS:", err)
@@ -194,15 +218,19 @@ func TestCreateFSMetadata(t *testing.T) {
 	if st.Mode.Perm() != 0o755 {
 		t.Errorf("file perm: got %o, want 755", st.Mode.Perm())
 	}
+
 	if st.UID != 1000 || st.GID != 2000 {
 		t.Errorf("file uid/gid: got %d/%d, want 1000/2000", st.UID, st.GID)
 	}
+
 	if st.Mtime != 1700000000 {
 		t.Errorf("file mtime: got %d, want 1700000000", st.Mtime)
 	}
+
 	if st.MtimeNs != 123456789 {
 		t.Errorf("file mtimeNs: got %d, want 123456789", st.MtimeNs)
 	}
+
 	erofstest.CheckXattrs(t, efs, "file.txt", map[string]string{"user.test": "value123"})
 
 	// Check dir metadata.
@@ -210,6 +238,7 @@ func TestCreateFSMetadata(t *testing.T) {
 	if dst.Mode.Perm() != 0o700 {
 		t.Errorf("dir perm: got %o, want 700", dst.Mode.Perm())
 	}
+
 	if dst.UID != 500 || dst.GID != 600 {
 		t.Errorf("dir uid/gid: got %d/%d, want 500/600", dst.UID, dst.GID)
 	}
@@ -218,11 +247,13 @@ func TestCreateFSMetadata(t *testing.T) {
 // TestCreateFSMknod verifies char and block device creation.
 func TestCreateFSMknod(t *testing.T) {
 	var buf testBuffer
+
 	fsys := erofs.Create(&buf)
 
 	if err := fsys.Mknod("/null", fs.ModeDevice|fs.ModeCharDevice|0o666, 1<<8|3); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := fsys.Mknod("/sda", fs.ModeDevice|0o660, 8<<8); err != nil {
 		t.Fatal(err)
 	}
@@ -232,6 +263,7 @@ func TestCreateFSMknod(t *testing.T) {
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal("EroFS:", err)
@@ -245,6 +277,7 @@ func TestCreateFSMknod(t *testing.T) {
 // the Chunk.Count uint16 split for files > 65535 blocks.
 func TestCreateFSLargeFile(t *testing.T) {
 	var buf testBuffer
+
 	fsys := erofs.Create(&buf)
 
 	// 128KB file — enough to span multiple blocks but not absurdly large.
@@ -257,9 +290,11 @@ func TestCreateFSLargeFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write(data); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -269,6 +304,7 @@ func TestCreateFSLargeFile(t *testing.T) {
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal("EroFS:", err)
@@ -281,13 +317,16 @@ func TestCreateFSLargeFile(t *testing.T) {
 // including chunk splitting for files > 65535 blocks.
 func TestCreateFSLargeFileDataFile(t *testing.T) {
 	dataPath := filepath.Join(t.TempDir(), "data.bin")
+
 	df, err := os.Create(dataPath)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = df.Close() }()
 
 	var metaBuf testBuffer
+
 	fsys := erofs.Create(&metaBuf, erofs.WithDataFile(df))
 
 	// 128KB file.
@@ -300,9 +339,11 @@ func TestCreateFSLargeFileDataFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write(data); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -329,14 +370,18 @@ func TestCreateFSLargeFileDataFile(t *testing.T) {
 func TestCreateFSErrors(t *testing.T) {
 	t.Run("duplicate path", func(t *testing.T) {
 		var buf testBuffer
+
 		fsys := erofs.Create(&buf)
+
 		f, err := fsys.Create("/dup.txt")
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if err := f.Close(); err != nil {
 			t.Fatal(err)
 		}
+
 		_, err = fsys.Create("/dup.txt")
 		if err == nil {
 			t.Fatal("expected error for duplicate path")
@@ -345,14 +390,18 @@ func TestCreateFSErrors(t *testing.T) {
 
 	t.Run("write after close", func(t *testing.T) {
 		var buf testBuffer
+
 		fsys := erofs.Create(&buf)
+
 		f, err := fsys.Create("/file.txt")
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if _, err := f.Write([]byte("data")); err != nil {
 			t.Fatal(err)
 		}
+
 		if err := f.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -365,14 +414,18 @@ func TestCreateFSErrors(t *testing.T) {
 
 	t.Run("file double close", func(t *testing.T) {
 		var buf testBuffer
+
 		fsys := erofs.Create(&buf)
+
 		f, err := fsys.Create("/file.txt")
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if err := f.Close(); err != nil {
 			t.Fatal(err)
 		}
+
 		err = f.Close()
 		if err == nil {
 			t.Fatal("expected error on double close")
@@ -381,10 +434,12 @@ func TestCreateFSErrors(t *testing.T) {
 
 	t.Run("FS double close", func(t *testing.T) {
 		var buf testBuffer
+
 		fsys := erofs.Create(&buf)
 		if err := fsys.Close(); err != nil {
 			t.Fatal(err)
 		}
+
 		err := fsys.Close()
 		if err == nil {
 			t.Fatal("expected error on FS double close")
@@ -393,10 +448,12 @@ func TestCreateFSErrors(t *testing.T) {
 
 	t.Run("create after FS close", func(t *testing.T) {
 		var buf testBuffer
+
 		fsys := erofs.Create(&buf)
 		if err := fsys.Close(); err != nil {
 			t.Fatal(err)
 		}
+
 		_, err := fsys.Create("/file.txt")
 		if err == nil {
 			t.Fatal("expected error creating after FS close")
@@ -408,15 +465,18 @@ func TestCreateFSErrors(t *testing.T) {
 // implicitly when creating deeply nested files.
 func TestCreateFSImplicitDirs(t *testing.T) {
 	var buf testBuffer
+
 	fsys := erofs.Create(&buf)
 
 	f, err := fsys.Create("/a/b/c/deep.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("deep\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -426,6 +486,7 @@ func TestCreateFSImplicitDirs(t *testing.T) {
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal("EroFS:", err)
@@ -440,6 +501,7 @@ func TestCreateFSImplicitDirs(t *testing.T) {
 			t.Errorf("stat %s: %v", dir, err)
 			continue
 		}
+
 		if !fi.IsDir() {
 			t.Errorf("%s: not a directory", dir)
 		}
@@ -452,6 +514,7 @@ func TestCreateFSImplicitDirs(t *testing.T) {
 // on-disk bits left in them.
 func TestCreateFSSpecialModeBits(t *testing.T) {
 	var buf testBuffer
+
 	fsys := erofs.Create(&buf)
 
 	for _, f := range []struct {
@@ -467,12 +530,15 @@ func TestCreateFSSpecialModeBits(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if _, err := fh.Write([]byte(f.name)); err != nil {
 			t.Fatal(err)
 		}
+
 		if err := fh.Close(); err != nil {
 			t.Fatal(err)
 		}
+
 		if err := fsys.Chmod(f.name, f.mode); err != nil {
 			t.Fatal(err)
 		}
@@ -481,20 +547,25 @@ func TestCreateFSSpecialModeBits(t *testing.T) {
 	if err := fsys.Mkdir("/tmp", 0o777|fs.ModeSticky); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := fsys.Mkdir("/var", 0o775|fs.ModeSetgid); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := fsys.Symlink("/su", "/su-link"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := fsys.Mknod("/null", fs.ModeDevice|fs.ModeCharDevice|0o666, 0x0103); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := fsys.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal("EroFS:", err)
@@ -514,10 +585,12 @@ func TestCreateFSSpecialModeBits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	rfi, err := fs.Stat(efs, "su")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if wfi.Mode() != rfi.Mode() {
 		t.Errorf("su: writer mode %v (%#o), reader mode %v (%#o)",
 			wfi.Mode(), uint32(wfi.Mode()), rfi.Mode(), uint32(rfi.Mode()))
@@ -527,12 +600,14 @@ func TestCreateFSSpecialModeBits(t *testing.T) {
 // TestCreateFSEmpty verifies that an empty FS produces a valid image.
 func TestCreateFSEmpty(t *testing.T) {
 	var buf testBuffer
+
 	fsys := erofs.Create(&buf)
 	if err := fsys.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal("EroFS:", err)
@@ -542,6 +617,7 @@ func TestCreateFSEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(entries) != 0 {
 		t.Errorf("expected empty root dir, got %d entries", len(entries))
 	}
@@ -553,6 +629,7 @@ func TestCreateFSBlockSize(t *testing.T) {
 	for _, bs := range []int{512, 1024, 4096, 65536} {
 		t.Run(fmt.Sprintf("%d", bs), func(t *testing.T) {
 			var buf testBuffer
+
 			fsys := erofs.Create(&buf, erofs.WithBlockSize(bs))
 
 			f, err := fsys.Create("/file.txt")
@@ -564,6 +641,7 @@ func TestCreateFSBlockSize(t *testing.T) {
 			if _, err := f.Write(data); err != nil {
 				t.Fatal(err)
 			}
+
 			if err := f.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -586,10 +664,12 @@ func TestCreateFSBlockSize(t *testing.T) {
 
 			// Verify BlkSizeBits in the superblock.
 			var sb disk.SuperBlock
+
 			r := bytes.NewReader(buf.Bytes()[disk.SuperBlockOffset:])
 			if err := binary.Read(r, binary.LittleEndian, &sb); err != nil {
 				t.Fatal("decode superblock:", err)
 			}
+
 			if got := 1 << sb.BlkSizeBits; got != bs {
 				t.Errorf("superblock block size = %d, want %d", got, bs)
 			}
@@ -616,13 +696,16 @@ func TestCreateFSBlockSize(t *testing.T) {
 	} {
 		t.Run("invalid/"+c.name, func(t *testing.T) {
 			var buf testBuffer
+
 			fsys := erofs.Create(&buf, erofs.WithBlockSize(c.size))
 			if _, err := fsys.Create("/file.txt"); err == nil {
 				t.Errorf("Create: expected error for invalid block size %d", c.size)
 			}
+
 			if err := fsys.Mkdir("/dir", 0o755); err == nil {
 				t.Errorf("Mkdir: expected error for invalid block size %d", c.size)
 			}
+
 			if err := fsys.Close(); err == nil {
 				t.Errorf("Close: expected error for invalid block size %d", c.size)
 			}
@@ -634,38 +717,48 @@ func TestCreateFSBlockSize(t *testing.T) {
 	// to a non-default block size.
 	t.Run("dataFile/1024", func(t *testing.T) {
 		const bs = 1024
+
 		dataPath := filepath.Join(t.TempDir(), "data.bin")
+
 		df, err := os.Create(dataPath)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		defer func() { _ = df.Close() }()
 
 		var metaBuf testBuffer
+
 		fsys := erofs.Create(&metaBuf, erofs.WithBlockSize(bs), erofs.WithDataFile(df))
 
 		// Span multiple blocks so chunk indexes and padding both run.
 		data := bytes.Repeat([]byte("Y"), bs*3+17)
+
 		f, err := fsys.Create("/big.bin")
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if _, err := f.Write(data); err != nil {
 			t.Fatal(err)
 		}
+
 		if err := f.Close(); err != nil {
 			t.Fatal(err)
 		}
 
 		// Second file, smaller than a block, to verify padding around it.
 		small := []byte("hi\n")
+
 		f2, err := fsys.Create("/small.txt")
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if _, err := f2.Write(small); err != nil {
 			t.Fatal(err)
 		}
+
 		if err := f2.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -679,6 +772,7 @@ func TestCreateFSBlockSize(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if fi.Size()%int64(bs) != 0 {
 			t.Errorf("data file size %d is not a multiple of block size %d", fi.Size(), bs)
 		}
@@ -693,6 +787,7 @@ func TestCreateFSBlockSize(t *testing.T) {
 		if err != nil {
 			t.Fatal("Open:", err)
 		}
+
 		erofstest.CheckFileBytes(t, efs, "big.bin", data)
 		erofstest.CheckFileBytes(t, efs, "small.txt", small)
 	})
@@ -701,15 +796,18 @@ func TestCreateFSBlockSize(t *testing.T) {
 // TestCreateFSSetNlink verifies that SetNlink overrides computed nlink.
 func TestCreateFSSetNlink(t *testing.T) {
 	var buf testBuffer
+
 	fsys := erofs.Create(&buf)
 
 	f, err := fsys.Create("/file.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("data")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -723,6 +821,7 @@ func TestCreateFSSetNlink(t *testing.T) {
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal("EroFS:", err)
@@ -737,14 +836,17 @@ func TestCreateFSSetNlink(t *testing.T) {
 // TestCreateFSDirNlink verifies that directory nlink = 2 + child_dir_count.
 func TestCreateFSDirNlink(t *testing.T) {
 	var buf testBuffer
+
 	fsys := erofs.Create(&buf)
 
 	if err := fsys.Mkdir("/parent", 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := fsys.Mkdir("/parent/child1", 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := fsys.Mkdir("/parent/child2", 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -753,6 +855,7 @@ func TestCreateFSDirNlink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -762,6 +865,7 @@ func TestCreateFSDirNlink(t *testing.T) {
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal("EroFS:", err)
@@ -777,16 +881,20 @@ func TestCreateFSDirNlink(t *testing.T) {
 // TestCreateFSWithTempDir verifies that WithTempDir is respected.
 func TestCreateFSWithTempDir(t *testing.T) {
 	tmpDir := t.TempDir()
+
 	var buf testBuffer
+
 	fsys := erofs.Create(&buf, erofs.WithTempDir(tmpDir))
 
 	f, err := fsys.Create("/file.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("hello")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -796,6 +904,7 @@ func TestCreateFSWithTempDir(t *testing.T) {
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal("EroFS:", err)
@@ -808,11 +917,13 @@ func TestCreateFSWithTempDir(t *testing.T) {
 // and path-based methods can set metadata on it.
 func TestCreateFSRootMetadata(t *testing.T) {
 	var buf testBuffer
+
 	fsys := erofs.Create(&buf)
 
 	if err := fsys.Mkdir("/", 0o700); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := fsys.Chown("/", 1000, 2000); err != nil {
 		t.Fatal(err)
 	}
@@ -822,6 +933,7 @@ func TestCreateFSRootMetadata(t *testing.T) {
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal("EroFS:", err)
@@ -831,6 +943,7 @@ func TestCreateFSRootMetadata(t *testing.T) {
 	if st.Mode.Perm() != 0o700 {
 		t.Errorf("root perm: got %o, want 700", st.Mode.Perm())
 	}
+
 	if st.UID != 1000 || st.GID != 2000 {
 		t.Errorf("root uid/gid: got %d/%d, want 1000/2000", st.UID, st.GID)
 	}
@@ -840,6 +953,7 @@ func TestCreateFSRootMetadata(t *testing.T) {
 // spool and verify ordering.
 func TestCreateFSMultipleFiles(t *testing.T) {
 	var buf testBuffer
+
 	fsys := erofs.Create(&buf)
 
 	for i := range 100 {
@@ -847,9 +961,11 @@ func TestCreateFSMultipleFiles(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if _, err := fmt.Fprintf(f, "content %d\n", i); err != nil {
 			t.Fatal(err)
 		}
+
 		if err := f.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -860,6 +976,7 @@ func TestCreateFSMultipleFiles(t *testing.T) {
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal("EroFS:", err)
@@ -876,6 +993,7 @@ func TestCreateFSMultipleFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(entries) != 100 {
 		t.Errorf("got %d entries, want 100", len(entries))
 	}
@@ -884,15 +1002,18 @@ func TestCreateFSMultipleFiles(t *testing.T) {
 // TestWriterOpen tests Open and Read for regular files in spool mode.
 func TestWriterOpen(t *testing.T) {
 	var buf testBuffer
+
 	fsys := erofs.Create(&buf)
 
 	f, err := fsys.Create("/hello.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("hello world\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -908,6 +1029,7 @@ func TestWriterOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if string(got) != "hello world\n" {
 		t.Errorf("got %q, want %q", got, "hello world\n")
 	}
@@ -916,22 +1038,27 @@ func TestWriterOpen(t *testing.T) {
 // TestWriterOpenDataFile tests Open and Read for regular files in data file mode.
 func TestWriterOpenDataFile(t *testing.T) {
 	dataPath := filepath.Join(t.TempDir(), "data.bin")
+
 	df, err := os.Create(dataPath)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = df.Close() }()
 
 	var metaBuf testBuffer
+
 	fsys := erofs.Create(&metaBuf, erofs.WithDataFile(df))
 
 	f, err := fsys.Create("/hello.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("data file content\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -946,6 +1073,7 @@ func TestWriterOpenDataFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if string(got) != "data file content\n" {
 		t.Errorf("got %q, want %q", got, "data file content\n")
 	}
@@ -954,12 +1082,14 @@ func TestWriterOpenDataFile(t *testing.T) {
 // TestWriterOpenEmpty tests Open on an empty file.
 func TestWriterOpenEmpty(t *testing.T) {
 	var buf testBuffer
+
 	fsys := erofs.Create(&buf)
 
 	f, err := fsys.Create("/empty")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -974,6 +1104,7 @@ func TestWriterOpenEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(got) != 0 {
 		t.Errorf("expected empty, got %d bytes", len(got))
 	}
@@ -982,18 +1113,22 @@ func TestWriterOpenEmpty(t *testing.T) {
 // TestWriterStat tests Stat for various entry types.
 func TestWriterStat(t *testing.T) {
 	var buf testBuffer
+
 	fsys := erofs.Create(&buf)
 
 	f, err := fsys.Create("/file.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("content\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Chmod(0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1001,12 +1136,15 @@ func TestWriterStat(t *testing.T) {
 	if err := fsys.Chtimes("/file.txt", time.Time{}, time.Unix(1700000000, 123456789)); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := fsys.Mkdir("/dir", 0o700); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := fsys.Symlink("file.txt", "/link"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := fsys.Mknod("/null", fs.ModeDevice|fs.ModeCharDevice|0o666, 1<<8|3); err != nil {
 		t.Fatal(err)
 	}
@@ -1016,18 +1154,23 @@ func TestWriterStat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if fi.Name() != "file.txt" {
 		t.Errorf("name: got %q, want %q", fi.Name(), "file.txt")
 	}
+
 	if fi.Size() != 8 {
 		t.Errorf("size: got %d, want 8", fi.Size())
 	}
+
 	if fi.Mode().Perm() != 0o755 {
 		t.Errorf("mode: got %o, want 755", fi.Mode().Perm())
 	}
+
 	if !fi.Mode().IsRegular() {
 		t.Errorf("expected regular file mode")
 	}
+
 	if fi.ModTime() != time.Unix(1700000000, 123456789) {
 		t.Errorf("modtime: got %v, want %v", fi.ModTime(), time.Unix(1700000000, 123456789))
 	}
@@ -1037,9 +1180,11 @@ func TestWriterStat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !di.IsDir() {
 		t.Error("expected directory")
 	}
+
 	if di.Mode().Perm() != 0o700 {
 		t.Errorf("dir mode: got %o, want 700", di.Mode().Perm())
 	}
@@ -1049,6 +1194,7 @@ func TestWriterStat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if li.Mode().Type() != fs.ModeSymlink {
 		t.Errorf("expected symlink, got %v", li.Mode().Type())
 	}
@@ -1058,6 +1204,7 @@ func TestWriterStat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if ni.Mode()&fs.ModeCharDevice == 0 {
 		t.Errorf("expected char device, got %v", ni.Mode())
 	}
@@ -1067,9 +1214,11 @@ func TestWriterStat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !ri.IsDir() {
 		t.Error("root: expected directory")
 	}
+
 	if ri.Name() != "/" {
 		t.Errorf("root name: got %q, want %q", ri.Name(), "/")
 	}
@@ -1084,6 +1233,7 @@ func TestWriterStat(t *testing.T) {
 // TestWriterReadDir tests Open on directories and ReadDir.
 func TestWriterReadDir(t *testing.T) {
 	var buf testBuffer
+
 	fsys := erofs.Create(&buf)
 
 	if err := fsys.Mkdir("/subdir", 0o755); err != nil {
@@ -1094,9 +1244,11 @@ func TestWriterReadDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f1.Write([]byte("hello")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f1.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1105,9 +1257,11 @@ func TestWriterReadDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f2.Write([]byte("nested")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f2.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1137,10 +1291,12 @@ func TestWriterReadDir(t *testing.T) {
 	for _, e := range entries {
 		names = append(names, e.Name())
 	}
+
 	want := []string{"hello.txt", "link", "subdir"}
 	if len(names) != len(want) {
 		t.Fatalf("got %v, want %v", names, want)
 	}
+
 	for i := range want {
 		if names[i] != want[i] {
 			t.Errorf("entry[%d]: got %q, want %q", i, names[i], want[i])
@@ -1165,6 +1321,7 @@ func TestWriterReadDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(sdEntries) != 1 || sdEntries[0].Name() != "nested.txt" {
 		t.Errorf("subdir entries: got %v, want [nested.txt]", sdEntries)
 	}
@@ -1174,7 +1331,9 @@ func TestWriterReadDir(t *testing.T) {
 func TestWriterOpenErrors(t *testing.T) {
 	t.Run("not found", func(t *testing.T) {
 		var buf testBuffer
+
 		fsys := erofs.Create(&buf)
+
 		_, err := fsys.Open("/nonexistent")
 		if err == nil {
 			t.Fatal("expected error")
@@ -1183,11 +1342,14 @@ func TestWriterOpenErrors(t *testing.T) {
 
 	t.Run("file not yet closed", func(t *testing.T) {
 		var buf testBuffer
+
 		fsys := erofs.Create(&buf)
+
 		f, err := fsys.Create("/file.txt")
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if _, err := f.Write([]byte("data")); err != nil {
 			t.Fatal(err)
 		}
@@ -1206,11 +1368,13 @@ func TestWriterOpenErrors(t *testing.T) {
 		if err != nil {
 			t.Fatal("expected success after file closed:", err)
 		}
+
 		_ = rf.Close()
 	})
 
 	t.Run("read from dir", func(t *testing.T) {
 		var buf testBuffer
+
 		fsys := erofs.Create(&buf)
 		if err := fsys.Mkdir("/dir", 0o755); err != nil {
 			t.Fatal(err)
@@ -1238,6 +1402,7 @@ func TestMetadataOnlyNoFileData(t *testing.T) {
 
 	t.Run("MetadataOnly flag", func(t *testing.T) {
 		var meta testBuffer
+
 		w := erofs.Create(&meta)
 
 		srcFS := fstest.MapFS{
@@ -1254,27 +1419,33 @@ func TestMetadataOnlyNoFileData(t *testing.T) {
 		if bytes.Contains(meta.Bytes(), marker) {
 			t.Error("metadata image contains file data — data leaked into metadata-only output")
 		}
+
 		t.Logf("metadata size: %d bytes, marker size: %d bytes", len(meta.Bytes()), len(marker))
 	})
 
 	t.Run("WithDataFile", func(t *testing.T) {
 		dataPath := filepath.Join(t.TempDir(), "data.bin")
+
 		df, err := os.Create(dataPath)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		defer func() { _ = df.Close() }()
 
 		var meta testBuffer
+
 		w := erofs.Create(&meta, erofs.WithDataFile(df))
 
 		f, err := w.Create("/testfile.bin")
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if _, err := f.Write(marker); err != nil {
 			t.Fatal(err)
 		}
+
 		if err := f.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -1292,9 +1463,11 @@ func TestMetadataOnlyNoFileData(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if !bytes.Contains(dfRead, marker) {
 			t.Error("data file does not contain file data")
 		}
+
 		t.Logf("metadata: %d bytes, data file: %d bytes", len(meta.Bytes()), len(dfRead))
 	})
 
@@ -1302,15 +1475,17 @@ func TestMetadataOnlyNoFileData(t *testing.T) {
 		// Simulate a source that provides chunk mappings (like ext4).
 		// The metadata image must not contain file data, and no data
 		// should be written to a data file.
-
 		dataPath := filepath.Join(t.TempDir(), "data.bin")
+
 		df, err := os.Create(dataPath)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		defer func() { _ = df.Close() }()
 
 		var meta testBuffer
+
 		w := erofs.Create(&meta, erofs.WithDataFile(df))
 
 		// Build a source FS where entries carry pre-existing chunks.
@@ -1319,6 +1494,7 @@ func TestMetadataOnlyNoFileData(t *testing.T) {
 		if err := w.CopyFrom(srcFS, erofs.MetadataOnly()); err != nil {
 			t.Fatal("CopyFrom:", err)
 		}
+
 		if err := w.Close(); err != nil {
 			t.Fatal("Close:", err)
 		}
@@ -1333,9 +1509,11 @@ func TestMetadataOnlyNoFileData(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if dfInfo.Size() != 0 {
 			t.Errorf("data file should be empty for pre-existing chunks, got %d bytes", dfInfo.Size())
 		}
+
 		t.Logf("metadata: %d bytes, data file: %d bytes", len(meta.Bytes()), dfInfo.Size())
 	})
 }
@@ -1356,9 +1534,11 @@ func (cfs *chunkedFS) Open(name string) (fs.File, error) {
 	if name == "." {
 		return &chunkedDir{cfs: cfs}, nil
 	}
+
 	if name == "testfile.bin" {
 		return &chunkedFile{data: cfs.data}, nil
 	}
+
 	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
 }
 
@@ -1379,7 +1559,9 @@ func (d *chunkedDir) ReadDir(n int) ([]fs.DirEntry, error) {
 	if d.didRead {
 		return nil, io.EOF
 	}
+
 	d.didRead = true
+
 	return []fs.DirEntry{&chunkedDirEntry{data: d.cfs.data}}, nil
 }
 
@@ -1414,6 +1596,7 @@ func (i *chunkedFileInfo) ModTime() time.Time { return time.Time{} }
 func (i *chunkedFileInfo) IsDir() bool        { return false }
 func (i *chunkedFileInfo) Sys() any {
 	nblocks := (i.size + 4095) / 4096
+
 	return &builder.Entry{
 		Nlink: 1,
 		Data:  bytes.NewReader(make([]byte, i.size)),
@@ -1438,8 +1621,10 @@ func (f *chunkedFile) Read(p []byte) (int, error) {
 	if f.offset >= len(f.data) {
 		return 0, io.EOF
 	}
+
 	n := copy(p, f.data[f.offset:])
 	f.offset += n
+
 	return n, nil
 }
 func (f *chunkedFile) Close() error { return nil }
@@ -1458,19 +1643,23 @@ func TestMergeBasic(t *testing.T) {
 	}
 
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 
 	if err := w.CopyFrom(base); err != nil {
 		t.Fatal("CopyFrom base:", err)
 	}
+
 	if err := w.CopyFrom(overlay, erofs.Merge()); err != nil {
 		t.Fatal("CopyFrom overlay:", err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal("Open:", err)
@@ -1496,19 +1685,23 @@ func TestMergeWhiteout(t *testing.T) {
 	}
 
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 
 	if err := w.CopyFrom(base); err != nil {
 		t.Fatal("CopyFrom base:", err)
 	}
+
 	if err := w.CopyFrom(overlay, erofs.Merge()); err != nil {
 		t.Fatal("CopyFrom overlay:", err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal("Open:", err)
@@ -1533,19 +1726,23 @@ func TestMergeOpaque(t *testing.T) {
 	}
 
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 
 	if err := w.CopyFrom(base); err != nil {
 		t.Fatal("CopyFrom base:", err)
 	}
+
 	if err := w.CopyFrom(overlay, erofs.Merge()); err != nil {
 		t.Fatal("CopyFrom overlay:", err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal("Open:", err)
@@ -1567,19 +1764,23 @@ func TestMergeOverwrite(t *testing.T) {
 	}
 
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 
 	if err := w.CopyFrom(base); err != nil {
 		t.Fatal("CopyFrom base:", err)
 	}
+
 	if err := w.CopyFrom(overlay, erofs.Merge()); err != nil {
 		t.Fatal("CopyFrom overlay:", err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal("Open:", err)
@@ -1598,19 +1799,23 @@ func TestMergeWhiteoutDir(t *testing.T) {
 	}
 
 	var buf testBuffer
+
 	w := erofs.Create(&buf)
 
 	if err := w.CopyFrom(base); err != nil {
 		t.Fatal("CopyFrom base:", err)
 	}
+
 	if err := w.CopyFrom(overlay, erofs.Merge()); err != nil {
 		t.Fatal("CopyFrom overlay:", err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
 	erofstest.FsckErofsBytes(t, buf.Bytes())
+
 	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
 		t.Fatal("Open:", err)
@@ -1626,6 +1831,7 @@ func TestCreateFSUIDGID(t *testing.T) {
 	type uidgid struct {
 		uid, gid int
 	}
+
 	cases := []uidgid{
 		{0, 0},
 		{1, 1},
@@ -1642,6 +1848,7 @@ func TestCreateFSUIDGID(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("uid%d_gid%d", tc.uid, tc.gid), func(t *testing.T) {
 			var buf testBuffer
+
 			fsys := erofs.Create(&buf)
 
 			// Test UID/GID on a regular file via File.Chown.
@@ -1649,12 +1856,15 @@ func TestCreateFSUIDGID(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if _, err := f.Write([]byte("hello")); err != nil {
 				t.Fatal(err)
 			}
+
 			if err := f.Chown(tc.uid, tc.gid); err != nil {
 				t.Fatal(err)
 			}
+
 			if err := f.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -1663,6 +1873,7 @@ func TestCreateFSUIDGID(t *testing.T) {
 			if err := fsys.Mkdir("/dir", 0o755); err != nil {
 				t.Fatal(err)
 			}
+
 			if err := fsys.Chown("/dir", tc.uid, tc.gid); err != nil {
 				t.Fatal(err)
 			}
@@ -1671,6 +1882,7 @@ func TestCreateFSUIDGID(t *testing.T) {
 			if err := fsys.Symlink("file.txt", "/link"); err != nil {
 				t.Fatal(err)
 			}
+
 			if err := fsys.Chown("/link", tc.uid, tc.gid); err != nil {
 				t.Fatal(err)
 			}
@@ -1680,6 +1892,7 @@ func TestCreateFSUIDGID(t *testing.T) {
 			}
 
 			erofstest.FsckErofsBytes(t, buf.Bytes())
+
 			efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 			if err != nil {
 				t.Fatal("Open:", err)
@@ -1720,33 +1933,42 @@ func TestCopyFromStatSource(t *testing.T) {
 	// Build a source EROFS image with a directory that has xattrs and
 	// custom ownership, plus a file with custom ownership.
 	var srcBuf erofstest.TestBuffer
+
 	w := erofs.Create(&srcBuf)
 
 	if err := w.Mkdir("/", 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Mkdir("/mydir", 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Setxattr("/mydir", "trusted.overlay.opaque", "y"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Setxattr("/mydir", "user.custom", "val"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Chown("/mydir", 1000, 1000); err != nil {
 		t.Fatal(err)
 	}
+
 	f, err := w.Create("/mydir/file.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := f.Write([]byte("content")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Chown("/mydir/file.txt", 2000, 2000); err != nil {
 		t.Fatal(err)
 	}
@@ -1755,6 +1977,7 @@ func TestCopyFromStatSource(t *testing.T) {
 	if err := w.Mknod("/mydir/null", fs.ModeDevice|fs.ModeCharDevice|0o666, 1<<8|3); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Chown("/mydir/null", 3000, 3000); err != nil {
 		t.Fatal(err)
 	}
@@ -1771,10 +1994,12 @@ func TestCopyFromStatSource(t *testing.T) {
 
 	// CopyFrom into a new Writer (non-MetadataOnly → uses WalkDir path).
 	var dstBuf erofstest.TestBuffer
+
 	w2 := erofs.Create(&dstBuf)
 	if err := w2.CopyFrom(srcFS); err != nil {
 		t.Fatal("CopyFrom:", err)
 	}
+
 	if err := w2.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
@@ -1796,26 +2021,31 @@ func TestCopyFromStatSource(t *testing.T) {
 	if dirSt.UID != 1000 {
 		t.Errorf("mydir UID = %d, want 1000", dirSt.UID)
 	}
+
 	if dirSt.GID != 1000 {
 		t.Errorf("mydir GID = %d, want 1000", dirSt.GID)
 	}
 
 	// File content and ownership must be preserved.
 	erofstest.CheckFile(t, dstFS, "mydir/file.txt", "content")
+
 	fileSt := erofstest.Stat(t, dstFS, "mydir/file.txt")
 	if fileSt.UID != 2000 {
 		t.Errorf("file.txt UID = %d, want 2000", fileSt.UID)
 	}
+
 	if fileSt.GID != 2000 {
 		t.Errorf("file.txt GID = %d, want 2000", fileSt.GID)
 	}
 
 	// Device node metadata must be preserved.
 	erofstest.CheckDevice(t, dstFS, "mydir/null", fs.ModeDevice|fs.ModeCharDevice, 1<<8|3)
+
 	devSt := erofstest.Stat(t, dstFS, "mydir/null")
 	if devSt.UID != 3000 {
 		t.Errorf("null UID = %d, want 3000", devSt.UID)
 	}
+
 	if devSt.GID != 3000 {
 		t.Errorf("null GID = %d, want 3000", devSt.GID)
 	}
@@ -1857,9 +2087,11 @@ func (f *dataRangerFS) Open(name string) (fs.File, error) {
 	if name == "." {
 		return &dataRangerDir{fs: f}, nil
 	}
+
 	if name == f.file.name {
 		return &dataRangerFile{info: f.file}, nil
 	}
+
 	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
 }
 
@@ -1880,7 +2112,9 @@ func (d *dataRangerDir) ReadDir(n int) ([]fs.DirEntry, error) {
 	if d.didRead {
 		return nil, io.EOF
 	}
+
 	d.didRead = true
+
 	return []fs.DirEntry{&dataRangerEntry{info: d.fs.file}}, nil
 }
 
@@ -1910,6 +2144,7 @@ func (f *dataRangerFile) Read(p []byte) (int, error) {
 	if f.offset >= f.info.size {
 		return 0, io.EOF
 	}
+
 	var n int
 	if f.info.content != nil {
 		// Serve actual content so leak-detection tests can catch accidental reads.
@@ -1920,9 +2155,12 @@ func (f *dataRangerFile) Read(p []byte) (int, error) {
 		for i := range p[:end] {
 			p[i] = 0
 		}
+
 		n = int(end)
 	}
+
 	f.offset += int64(n)
+
 	return n, nil
 }
 func (f *dataRangerFile) Close() error { return nil }
@@ -1950,10 +2188,12 @@ func TestCopyFromDataRange(t *testing.T) {
 		}
 
 		var buf testBuffer
+
 		w := erofs.Create(&buf)
 		if err := w.CopyFrom(src, erofs.MetadataOnly()); err != nil {
 			t.Fatal("CopyFrom:", err)
 		}
+
 		if err := w.Close(); err != nil {
 			t.Fatal("Close:", err)
 		}
@@ -1966,6 +2206,7 @@ func TestCopyFromDataRange(t *testing.T) {
 		if err != nil {
 			t.Fatal("Open:", err)
 		}
+
 		info := statDataRange(t, dstFS, "data.bin")
 		if len(info) == 0 {
 			t.Fatal("DataRange() returned nil for chunk-based file")
@@ -1976,9 +2217,11 @@ func TestCopyFromDataRange(t *testing.T) {
 		if got.Device != 1 {
 			t.Errorf("Device = %d, want 1", got.Device)
 		}
+
 		if got.Offset != blockSize*10 {
 			t.Errorf("Offset = %d, want %d", got.Offset, blockSize*10)
 		}
+
 		if got.Size != blockSize*2 {
 			t.Errorf("Size = %d, want %d", got.Size, blockSize*2)
 		}
@@ -1999,10 +2242,12 @@ func TestCopyFromDataRange(t *testing.T) {
 		}
 
 		var buf testBuffer
+
 		w := erofs.Create(&buf)
 		if err := w.CopyFrom(src, erofs.MetadataOnly()); err != nil {
 			t.Fatal("CopyFrom:", err)
 		}
+
 		if err := w.Close(); err != nil {
 			t.Fatal("Close:", err)
 		}
@@ -2014,13 +2259,16 @@ func TestCopyFromDataRange(t *testing.T) {
 		if err != nil {
 			t.Fatal("Open:", err)
 		}
+
 		ranges := statDataRange(t, dstFS, "sparse.bin")
 		if len(ranges) != 2 {
 			t.Fatalf("DataRange() len = %d, want 2; ranges = %v", len(ranges), ranges)
 		}
+
 		if ranges[0].Device != 1 || ranges[0].Offset != blockSize*5 || ranges[0].Size != blockSize {
 			t.Errorf("ranges[0] = %+v, want {Device:1 Offset:%d Size:%d}", ranges[0], blockSize*5, blockSize)
 		}
+
 		if ranges[1].Device != 1 || ranges[1].Offset != blockSize*20 || ranges[1].Size != blockSize*3 {
 			t.Errorf("ranges[1] = %+v, want {Device:1 Offset:%d Size:%d}", ranges[1], blockSize*20, blockSize*3)
 		}
@@ -2040,14 +2288,18 @@ func TestCopyFromDataRange(t *testing.T) {
 				ranges:  []erofs.DataRange{{Device: 0, Offset: 0, Size: int64(len(marker))}},
 			},
 		}
+
 		var buf testBuffer
+
 		w := erofs.Create(&buf)
 		if err := w.CopyFrom(src, erofs.MetadataOnly()); err != nil {
 			t.Fatal("CopyFrom:", err)
 		}
+
 		if err := w.Close(); err != nil {
 			t.Fatal("Close:", err)
 		}
+
 		if bytes.Contains(buf.Bytes(), marker) {
 			t.Error("metadata-only image contains file data — leak detected")
 		}
@@ -2061,6 +2313,7 @@ func TestCopyFromDataRange(t *testing.T) {
 		//   - DataRange with Device=1, Offset=blockSize*7, Size=blockSize  (data)
 		//   - DataRange with Offset==-1, Size=blockSize*3                  (hole)
 		const blockSize = 4096
+
 		src := &dataRangerFS{
 			deviceBlocks: 1024,
 			file: &dataRangerFileInfo{
@@ -2072,11 +2325,14 @@ func TestCopyFromDataRange(t *testing.T) {
 				},
 			},
 		}
+
 		var buf testBuffer
+
 		w := erofs.Create(&buf)
 		if err := w.CopyFrom(src, erofs.MetadataOnly()); err != nil {
 			t.Fatal("CopyFrom:", err)
 		}
+
 		if err := w.Close(); err != nil {
 			t.Fatal("Close:", err)
 		}
@@ -2088,6 +2344,7 @@ func TestCopyFromDataRange(t *testing.T) {
 		if err != nil {
 			t.Fatal("Open:", err)
 		}
+
 		ranges := statDataRange(t, dstFS, "sparse.bin")
 
 		// Verify total coverage equals file size.
@@ -2095,12 +2352,14 @@ func TestCopyFromDataRange(t *testing.T) {
 		for _, r := range ranges {
 			total += r.Size
 		}
+
 		if total != blockSize*4 {
 			t.Fatalf("total DataRange size = %d, want %d; ranges = %+v", total, blockSize*4, ranges)
 		}
 
 		// Find the data range and verify it points to physical block 7 on device 1.
 		var dataRanges, holeRanges []erofs.DataRange
+
 		for _, r := range ranges {
 			if r.Offset == -1 {
 				holeRanges = append(holeRanges, r)
@@ -2108,9 +2367,11 @@ func TestCopyFromDataRange(t *testing.T) {
 				dataRanges = append(dataRanges, r)
 			}
 		}
+
 		if len(dataRanges) != 1 {
 			t.Fatalf("want 1 data range, got %d; ranges = %+v", len(dataRanges), ranges)
 		}
+
 		dr := dataRanges[0]
 		if dr.Device != 1 || dr.Offset != blockSize*7 || dr.Size != blockSize {
 			t.Errorf("data range = %+v, want {Device:1 Offset:%d Size:%d}", dr, blockSize*7, blockSize)
@@ -2120,6 +2381,7 @@ func TestCopyFromDataRange(t *testing.T) {
 		for _, r := range holeRanges {
 			holeTotal += r.Size
 		}
+
 		if holeTotal != blockSize*3 {
 			t.Errorf("hole total = %d, want %d; holeRanges = %+v", holeTotal, blockSize*3, holeRanges)
 		}
@@ -2133,6 +2395,7 @@ func TestChunksFromRangesValidation(t *testing.T) {
 	// CopyFrom(MetadataOnly) on a DataRange-implementing source calls it.
 	tryRanges := func(t *testing.T, ranges []erofs.DataRange) error {
 		t.Helper()
+
 		src := &dataRangerFS{
 			deviceBlocks: 1024,
 			file: &dataRangerFileInfo{
@@ -2141,12 +2404,16 @@ func TestChunksFromRangesValidation(t *testing.T) {
 				ranges: ranges,
 			},
 		}
+
 		var buf testBuffer
+
 		w := erofs.Create(&buf)
+
 		err := w.CopyFrom(src, erofs.MetadataOnly())
 		if err == nil {
 			_ = w.Close()
 		}
+
 		return err
 	}
 
@@ -2248,12 +2515,16 @@ func TestChunksFromRangesValidation(t *testing.T) {
 				},
 			},
 		}
+
 		var buf testBuffer
+
 		w := erofs.Create(&buf)
+
 		err := w.CopyFrom(src, erofs.MetadataOnly())
 		if err == nil {
 			_ = w.Close()
 		}
+
 		if err != nil {
 			t.Fatalf("unexpected error for valid partial final range: %v", err)
 		}
@@ -2271,21 +2542,27 @@ func TestChunksFromRangesValidation(t *testing.T) {
 // DataRange() if the FileInfo supports it.
 func statDataRange(t *testing.T, fsys fs.FS, name string) []erofs.DataRange {
 	t.Helper()
+
 	f, err := fsys.Open(name)
 	if err != nil {
 		t.Fatalf("Open(%s): %v", name, err)
 	}
+
 	defer func() { _ = f.Close() }()
+
 	info, err := f.Stat()
 	if err != nil {
 		t.Fatalf("Stat(%s): %v", name, err)
 	}
+
 	type dataRanger interface {
 		DataRange() []erofs.DataRange
 	}
+
 	dr, ok := info.(dataRanger)
 	if !ok {
 		t.Fatalf("FileInfo for %s does not implement DataRange()", name)
 	}
+
 	return dr.DataRange()
 }

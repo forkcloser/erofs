@@ -38,6 +38,7 @@ func imageSize(ra io.ReaderAt) (int64, bool) {
 		if err != nil {
 			return 0, false
 		}
+
 		return fi.Size(), true
 	}
 
@@ -56,6 +57,7 @@ func newMetaReader(ra io.ReaderAt, metaStart, totalBytes int64, blockSize int) f
 	if metaSize <= 0 {
 		return func(int64) []byte { return nil }
 	}
+
 	metaBuf := make([]byte, metaSize)
 	if n, err := ra.ReadAt(metaBuf, metaStart); err != nil || int64(n) != metaSize {
 		return func(int64) []byte { return nil }
@@ -70,25 +72,31 @@ func newMetaReader(ra io.ReaderAt, metaStart, totalBytes int64, blockSize int) f
 			if o >= int64(len(metaBuf)) {
 				return nil
 			}
+
 			return metaBuf[o:]
 		}
 		// Outside metadata — flat-plain data block. Load on demand.
 		if off < 0 || off >= totalBytes {
 			return nil
 		}
+
 		blkAddr := off - off%int64(blockSize)
 		if cached, ok := cache[blkAddr]; ok {
 			return cached[off-blkAddr:]
 		}
+
 		sz := int64(blockSize)
 		if blkAddr+sz > totalBytes {
 			sz = totalBytes - blkAddr
 		}
+
 		buf := make([]byte, sz)
 		if n, err := ra.ReadAt(buf, blkAddr); err != nil || int64(n) != sz {
 			return nil
 		}
+
 		cache[blkAddr] = buf
+
 		return buf[off-blkAddr:]
 	}
 }
@@ -106,6 +114,7 @@ type imgQEntry struct {
 // buffer. This reduces thousands of syscalls to a single ReadAt.
 func (fsys *Writer) copyFromImage(img *image) error {
 	metaStart := img.metaStartPos()
+
 	totalBytes := int64(img.sb.Blocks) << img.sb.BlkSizeBits
 	if totalBytes <= 0 {
 		return nil
@@ -119,6 +128,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		return fmt.Errorf("superblock declares %d bytes but image is %d bytes: %w",
 			totalBytes, actual, ErrInvalid)
 	}
+
 	if metaStart < 0 || metaStart >= totalBytes {
 		return fmt.Errorf("metadata start %d outside image of %d bytes: %w",
 			metaStart, totalBytes, ErrInvalid)
@@ -154,9 +164,11 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			return nil, fmt.Errorf("%d bytes at offset %d lie outside the %d byte image: %w",
 				n, off, totalBytes, ErrInvalid)
 		}
+
 		if b := at(off); int64(len(b)) >= n {
 			return b[:n], nil
 		}
+
 		buf := make([]byte, n)
 		if _, err := img.meta.ReadAt(buf, off); err != nil {
 			return nil, err
@@ -176,16 +188,20 @@ func (fsys *Writer) copyFromImage(img *image) error {
 	// what the metadata region can physically hold (one inode per 32-byte
 	// slot at minimum) and by maxQueuePrealloc.
 	maxInodes := (totalBytes - metaStart) / disk.SizeInodeCompact
+
 	inodeCount := int64(img.sb.Inos)
 	if inodeCount <= 0 || inodeCount > maxInodes {
 		inodeCount = maxInodes
 	}
+
 	if inodeCount > maxQueuePrealloc {
 		inodeCount = maxQueuePrealloc
 	}
+
 	if inodeCount < 64 {
 		inodeCount = 64
 	}
+
 	queue := make([]imgQEntry, 0, inodeCount)
 	queue = append(queue, imgQEntry{nid: uint64(img.sb.RootNid), path: "/"})
 
@@ -213,8 +229,10 @@ func (fsys *Writer) copyFromImage(img *image) error {
 					if path.Dir(cur.path) == "/" {
 						target = "/" + base[len(whiteoutPrefix):]
 					}
+
 					fsys.remove(target)
 				}
+
 				continue
 			}
 		}
@@ -227,7 +245,9 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			return fmt.Errorf("nid %d lies past the end of the %d byte image: %w",
 				cur.nid, totalBytes, ErrInvalid)
 		}
+
 		inodeAddr := metaStart + int64(cur.nid*disk.SizeInodeCompact)
+
 		buf := at(inodeAddr)
 		if len(buf) < disk.SizeInodeCompact {
 			return fmt.Errorf("inode %d out of range", cur.nid)
@@ -240,6 +260,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		if compact && len(buf) < disk.SizeInodeCompact {
 			return fmt.Errorf("compact inode %d out of range", cur.nid)
 		}
+
 		if !compact && len(buf) < disk.SizeInodeExtended {
 			return fmt.Errorf("extended inode %d out of range", cur.nid)
 		}
@@ -290,12 +311,15 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		if xcnt > 0 {
 			xattrSize = int(xcnt-1)*disk.SizeXattrEntry + disk.SizeXattrBodyHeader
 		}
+
 		var xattrs map[string]string
+
 		if xattrSize > 0 {
 			xb, err := span(inodeAddr+int64(icSize), int64(xattrSize))
 			if err != nil {
 				return fmt.Errorf("xattrs for nid %d: %w", cur.nid, err)
 			}
+
 			xattrs, err = parseXattrsFromBuf(xb, span, sharedXattrOff, img.getLongPrefix)
 			if err != nil {
 				return fmt.Errorf("xattrs for nid %d: %w", cur.nid, err)
@@ -315,6 +339,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				if err := fsys.addAlias(cur.path, prior); err != nil {
 					return err
 				}
+
 				continue
 			}
 		}
@@ -336,6 +361,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			fe.nlink = nlink
 			fe.nlinkSet = true
 		}
+
 		fe.fileClosed = true
 		if fsys.copyMetadataOnly {
 			fe.metadataOnly = true
@@ -370,6 +396,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				return fmt.Errorf("directory nid %d is reachable more than once (at %s): %w",
 					cur.nid, cur.path, ErrInvalid)
 			}
+
 			expanded[inodeAddr] = struct{}{}
 
 			dirSize := int(size)
@@ -378,10 +405,12 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				if layout == disk.LayoutFlatPlain {
 					dataAddr = int64(idata) << blkBits
 				}
+
 				dirData, err := span(dataAddr, int64(dirSize))
 				if err != nil {
 					return fmt.Errorf("read dir data for nid %d: %w", cur.nid, err)
 				}
+
 				if err := fsys.parseDirBlock(dirData, dirSize, blockSize, cur.path, &queue); err != nil {
 					return fmt.Errorf("dir nid %d: %w", cur.nid, err)
 				}
@@ -393,10 +422,12 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				if layout == disk.LayoutFlatPlain {
 					dataAddr = int64(idata) << blkBits
 				}
+
 				linkData, err := span(dataAddr, int64(size))
 				if err != nil {
 					return fmt.Errorf("read symlink data for nid %d: %w", cur.nid, err)
 				}
+
 				fe.linkTarget = string(linkData)
 			}
 
@@ -405,9 +436,11 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				chunkFmt := uint16(idata)
 				indexed := chunkFmt&disk.LayoutChunkFormatIndexes != 0
 				chunkAddr := trailingAddr
+
 				unit := int64(4)
 				if indexed {
 					unit = disk.SizeChunkIndex
+
 					if chunkAddr%8 != 0 {
 						chunkAddr = (chunkAddr + 7) & ^int64(7)
 					}
@@ -424,6 +457,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				if err != nil {
 					return fmt.Errorf("nid %d: %w", cur.nid, err)
 				}
+
 				if avail := int64(len(at(chunkAddr))); avail < need {
 					return fmt.Errorf("nid %d: chunk index truncated: have %d bytes, need %d for a %d byte file: %w",
 						cur.nid, avail, need, size, ErrInvalid)
@@ -436,9 +470,11 @@ func (fsys *Writer) copyFromImage(img *image) error {
 					if err != nil {
 						return fmt.Errorf("chunk index for nid %d: %w", cur.nid, err)
 					}
+
 					if err := fsys.remapChunkDevices(cur.path, chunks); err != nil {
 						return err
 					}
+
 					fe.chunks = chunks
 					// Only a single non-hole extent is contiguous. Claiming
 					// it for a fragmented or sparse file makes planLayout
@@ -471,6 +507,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -480,6 +517,7 @@ func (fsys *Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPat
 	pos := 0
 	for pos < dirSize {
 		blockEnd := min(pos+blockSize, dirSize)
+
 		blk := data[pos:blockEnd]
 		if len(blk) < disk.SizeDirent {
 			break
@@ -491,6 +529,7 @@ func (fsys *Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPat
 		// last name in a block may be NUL-padded. A dirent that fails is an
 		// error, not an entry to step over — the reader would refuse it.
 		firstNameOff := int(binary.LittleEndian.Uint16(blk[8:10]))
+
 		nEntries := firstNameOff / disk.SizeDirent
 		if nEntries == 0 || firstNameOff > len(blk) {
 			return fmt.Errorf("in %s: invalid dirent name offset %d (block size %d): %w",
@@ -506,6 +545,7 @@ func (fsys *Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPat
 			if i < nEntries-1 {
 				nameEnd = int(binary.LittleEndian.Uint16(blk[(i+1)*disk.SizeDirent+8 : (i+1)*disk.SizeDirent+10]))
 			}
+
 			if nameOff < firstNameOff || nameOff > nameEnd || nameEnd > len(blk) {
 				return fmt.Errorf("in %s: dirent %d name range [%d:%d] out of bounds (block size %d): %w",
 					parentPath, i, nameOff, nameEnd, len(blk), ErrInvalid)
@@ -517,6 +557,7 @@ func (fsys *Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPat
 					nameBytes = nameBytes[:j]
 				}
 			}
+
 			name := string(nameBytes)
 			// A name is one path element. Without this a nested dirent named
 			// "y/../../../.wh..wh..opq" builds a childPath that path.Dir
@@ -530,6 +571,7 @@ func (fsys *Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPat
 			if err := checkDirentName(nameBytes); err != nil {
 				return fmt.Errorf("in %s: %w", parentPath, err)
 			}
+
 			if name == "." || name == ".." {
 				continue
 			}
@@ -543,6 +585,7 @@ func (fsys *Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPat
 			if err := checkPathLen(childPath); err != nil {
 				return err
 			}
+
 			*queue = append(*queue, imgQEntry{nid: nid, path: childPath})
 		}
 
@@ -562,11 +605,14 @@ func chunkMapBytes(chunkFmt uint16, fileSize uint64, blkBits uint8, unit int64) 
 	if chunkBits >= 64 {
 		return 0, fmt.Errorf("chunk size of 2^%d bytes is out of range: %w", chunkBits, ErrInvalid)
 	}
+
 	cs := uint64(1) << chunkBits
+
 	nchunks := fileSize / cs
 	if fileSize%cs != 0 {
 		nchunks++
 	}
+
 	if nchunks > uint64(maxChunkIndexBytes/unit) {
 		return 0, fmt.Errorf("chunk index for a %d byte file exceeds the %d byte limit: %w",
 			fileSize, int64(maxChunkIndexBytes), ErrInvalid)
@@ -595,6 +641,7 @@ func (fsys *Writer) parseChunks(
 	if chunkFmt&^(disk.LayoutChunkFormatBits|disk.LayoutChunkFormatIndexes) != 0 {
 		return nil, fmt.Errorf("unsupported chunk format %#x: %w", chunkFmt, ErrNotImplemented)
 	}
+
 	chunkBits := blkBits + uint8(chunkFmt&disk.LayoutChunkFormatBits)
 	nchunks := int((fileSize-1)>>chunkBits) + 1
 	blocksPerChunk := 1 << (chunkBits - blkBits)
@@ -611,6 +658,7 @@ func (fsys *Writer) parseChunks(
 		return nil, fmt.Errorf("chunk index of %d bytes for a %d byte file exceeds the %d byte limit: %w",
 			needed, fileSize, int64(maxChunkIndexBytes), ErrInvalid)
 	}
+
 	if int64(len(data)) < needed {
 		return nil, fmt.Errorf("chunk index truncated: have %d bytes, need %d: %w",
 			len(data), needed, ErrInvalid)
@@ -622,8 +670,10 @@ func (fsys *Writer) parseChunks(
 	// then retains it: a valid image with 20000 hardlinks to one 480-chunk
 	// file reserved 9.6 M slots to hold 20001.
 	var chunks []builder.Chunk
+
 	for i := range nchunks {
 		off := i * disk.SizeChunkIndex
+
 		startBlkLo := binary.LittleEndian.Uint32(data[off+4 : off+8])
 		if ^startBlkLo == 0 {
 			// A hole. Its logical span has to be carried over: chunks
@@ -640,6 +690,7 @@ func (fsys *Writer) parseChunks(
 					continue
 				}
 			}
+
 			chunks = append(chunks, builder.Chunk{
 				PhysicalBlock: builder.NullPhysicalBlock,
 				Count:         uint16(blocksPerChunk),
@@ -665,6 +716,7 @@ func (fsys *Writer) parseChunks(
 				continue
 			}
 		}
+
 		chunks = append(chunks, builder.Chunk{
 			PhysicalBlock: physBlock,
 			Count:         uint16(blocksPerChunk),
@@ -704,6 +756,7 @@ func parseXattrsFromBuf(
 
 	var xh disk.XattrHeader
 	xh.Unmarshal(buf)
+
 	pos := disk.SizeXattrBodyHeader
 
 	xattrs := make(map[string]string)
@@ -711,6 +764,7 @@ func parseXattrsFromBuf(
 		if _, dup := xattrs[name]; dup {
 			return fmt.Errorf("duplicate xattr %q: %w", name, ErrInvalid)
 		}
+
 		xattrs[name] = value
 
 		return nil
@@ -721,26 +775,32 @@ func parseXattrsFromBuf(
 		if pos+4 > len(buf) {
 			return nil, fmt.Errorf("xattr shared block too small: %w", ErrInvalid)
 		}
+
 		idx := binary.LittleEndian.Uint32(buf[pos : pos+4])
 		pos += 4
 
 		// idx counts 4-byte units from the shared area; widened before
 		// scaling so the multiply cannot wrap.
 		sharedAddr := sharedOff + int64(idx)*4
+
 		head, err := span(sharedAddr, disk.SizeXattrEntry)
 		if err != nil {
 			return nil, fmt.Errorf("shared xattr %d: %w", idx, err)
 		}
+
 		var xe disk.XattrEntry
 		xe.Unmarshal(head)
+
 		body, err := span(sharedAddr+disk.SizeXattrEntry, int64(xe.NameLen)+int64(xe.ValueLen))
 		if err != nil {
 			return nil, fmt.Errorf("shared xattr %d: %w", idx, err)
 		}
+
 		name, err := xattrName(xe, body[:xe.NameLen], longPrefix)
 		if err != nil {
 			return nil, fmt.Errorf("shared xattr %d: %w", idx, err)
 		}
+
 		if err := set(name, string(body[xe.NameLen:])); err != nil {
 			return nil, err
 		}
@@ -751,6 +811,7 @@ func parseXattrsFromBuf(
 		if pos+disk.SizeXattrEntry > len(buf) {
 			return nil, fmt.Errorf("xattr block too small for entry at pos %d: %w", pos, ErrInvalid)
 		}
+
 		var xe disk.XattrEntry
 		xe.Unmarshal(buf[pos:])
 		pos += disk.SizeXattrEntry
@@ -764,6 +825,7 @@ func parseXattrsFromBuf(
 		if err != nil {
 			return nil, fmt.Errorf("inline xattr: %w", err)
 		}
+
 		pos += int(xe.NameLen)
 		value := string(buf[pos : pos+int(xe.ValueLen)])
 		pos += int(xe.ValueLen)
@@ -777,9 +839,11 @@ func parseXattrsFromBuf(
 			pos += 4 - rem
 		}
 	}
+
 	if len(xattrs) == 0 {
 		return nil, nil
 	}
+
 	return xattrs, nil
 }
 
@@ -788,22 +852,27 @@ func parseXattrsFromBuf(
 // set. An index the format does not define is an error, as in the reader.
 func xattrName(xe disk.XattrEntry, rawName []byte, longPrefix func(uint8) (string, error)) (string, error) {
 	var prefix string
+
 	if xe.NameIndex&0x80 != 0 {
 		// Long prefix: high bit set, low 7 bits index the prefix table.
 		if longPrefix == nil {
 			return "", fmt.Errorf("long xattr prefix %d without a prefix table: %w", xe.NameIndex&0x7F, ErrInvalid)
 		}
+
 		p, err := longPrefix(xe.NameIndex & 0x7F)
 		if err != nil {
 			return "", err
 		}
+
 		prefix = p
 	} else {
 		p, err := xattrIndex(xe.NameIndex).prefix()
 		if err != nil {
 			return "", err
 		}
+
 		prefix = p
 	}
+
 	return prefix + string(rawName), nil
 }

@@ -38,6 +38,7 @@ type Converter func(t testing.TB, wt WriterToTar) fs.FS
 func MkfsErofs(opts ...string) Converter {
 	return func(t testing.TB, wt WriterToTar) fs.FS {
 		t.Helper()
+
 		tarStream := TarFromWriterTo(wt)
 		defer func() { _ = tarStream.Close() }()
 
@@ -45,6 +46,7 @@ func MkfsErofs(opts ...string) Converter {
 		if err := ConvertTarErofs(context.Background(), tarStream, path, "", opts); err != nil {
 			t.Fatal(err)
 		}
+
 		return openEroFS(t, path)
 	}
 }
@@ -55,11 +57,13 @@ func MkfsErofs(opts ...string) Converter {
 func MkfsErofsBlobDev(chunkSize int, extraOpts ...string) Converter {
 	return func(t testing.TB, wt WriterToTar) fs.FS {
 		t.Helper()
+
 		tarStream := TarFromWriterTo(wt)
 		defer func() { _ = tarStream.Close() }()
 
 		path := filepath.Join(t.TempDir(), "test.erofs")
 		blobPath := path + ".blob"
+
 		opts := append([]string{
 			fmt.Sprintf("--blobdev=%s", blobPath),
 			fmt.Sprintf("--chunksize=%d", chunkSize),
@@ -67,11 +71,14 @@ func MkfsErofsBlobDev(chunkSize int, extraOpts ...string) Converter {
 		if err := ConvertTarErofs(context.Background(), tarStream, path, "", opts); err != nil {
 			t.Fatal(err)
 		}
+
 		bf, err := os.Open(blobPath)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		t.Cleanup(func() { _ = bf.Close() })
+
 		return openEroFS(t, path, erofs.WithExtraDevices(bf))
 	}
 }
@@ -81,6 +88,7 @@ func MkfsErofsBlobDev(chunkSize int, extraOpts ...string) Converter {
 func MkfsErofsMaxSize(maxBytes int64, opts ...string) Converter {
 	return func(t testing.TB, wt WriterToTar) fs.FS {
 		t.Helper()
+
 		tarStream := TarFromWriterTo(wt)
 		defer func() { _ = tarStream.Close() }()
 
@@ -88,13 +96,16 @@ func MkfsErofsMaxSize(maxBytes int64, opts ...string) Converter {
 		if err := ConvertTarErofs(context.Background(), tarStream, path, "", opts); err != nil {
 			t.Fatal(err)
 		}
+
 		fi, err := os.Stat(path)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if fi.Size() > maxBytes {
 			t.Errorf("image size %d exceeds limit %d", fi.Size(), maxBytes)
 		}
+
 		return openEroFS(t, path)
 	}
 }
@@ -102,23 +113,29 @@ func MkfsErofsMaxSize(maxBytes int64, opts ...string) Converter {
 // openEroFS opens an EROFS image file and returns an fs.FS.
 func openEroFS(t testing.TB, path string, opts ...erofs.OpenOpt) fs.FS {
 	t.Helper()
+
 	f, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	t.Cleanup(func() { _ = f.Close() })
+
 	efs, err := erofs.Open(f, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return efs
 }
 
 func (tc *testCase) Run(t testing.TB, conv Converter) {
 	t.Helper()
+
 	if conv == nil {
 		conv = MkfsErofs()
 	}
+
 	efs := conv(t, tc.tar())
 	tc.verify(t, efs)
 }
@@ -131,10 +148,12 @@ var Basic TestCase = &testCase{
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
 		lotsOfFilesC := make(chan WriterToTar)
+
 		go func() {
 			for i := range 5000 {
 				lotsOfFilesC <- tc.File(fmt.Sprintf("/usr/lib/testdir/lotsoffiles/%d", i), []byte{}, 0o600)
 			}
+
 			close(lotsOfFilesC)
 		}()
 
@@ -298,6 +317,7 @@ const (
 var LongXattrs TestCase = &testCase{
 	tar: func() WriterToTar {
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+
 		return TarAll(
 			tc.Dir("/usr", 0o755),
 			tc.Dir("/usr/lib", 0o755),
@@ -332,6 +352,7 @@ var LongXattrs TestCase = &testCase{
 var SpecialModeBits TestCase = &testCase{
 	tar: func() WriterToTar {
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+
 		return TarAll(
 			tc.Dir("/bin", 0o755),
 			tc.File("/bin/su", []byte("setuid\n"), 0o755|fs.ModeSetuid),
@@ -368,6 +389,7 @@ var SpecialModeBits TestCase = &testCase{
 		if err != nil {
 			t.Fatalf("stat bin/su: %v", err)
 		}
+
 		if fi.Mode()&fs.ModeSetuid == 0 {
 			t.Errorf("bin/su: mode %v (%#o) has no fs.ModeSetuid", fi.Mode(), uint32(fi.Mode()))
 		}
@@ -382,6 +404,7 @@ var SpecialModeBits TestCase = &testCase{
 var FileSizes TestCase = &testCase{
 	tar: func() WriterToTar {
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+
 		return TarAll(
 			tc.File("/exact-block.bin", generateContent(4096), 0o644),
 			tc.File("/block-plus-one.bin", generateContent(4097), 0o644),
@@ -438,7 +461,9 @@ var uidgidTestValues = []struct{ uid, gid int }{
 var UIDGIDValues TestCase = &testCase{
 	tar: func() WriterToTar {
 		base := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+
 		var entries []WriterToTar
+
 		for _, id := range uidgidTestValues {
 			tc := base.WithUIDGID(id.uid, id.gid)
 			prefix := fmt.Sprintf("/id-%d-%d", id.uid, id.gid)
@@ -449,10 +474,12 @@ var UIDGIDValues TestCase = &testCase{
 				tc.Symlink("file.txt", prefix+"/link"),
 			)
 		}
+
 		return TarAll(entries...)
 	},
 	verify: func(t testing.TB, fsys fs.FS) {
 		t.Helper()
+
 		for _, id := range uidgidTestValues {
 			prefix := fmt.Sprintf("id-%d-%d", id.uid, id.gid)
 			wantUID := uint32(id.uid)
@@ -482,17 +509,20 @@ func generateContent(size int) []byte {
 	for i := range data {
 		data[i] = byte(i % 251)
 	}
+
 	return data
 }
 
 // verifyContent checks a file matches the expected deterministic pattern.
 func verifyContent(t testing.TB, fsys fs.FS, name string, size int) {
 	t.Helper()
+
 	f, err := fsys.Open(name)
 	if err != nil {
 		t.Errorf("open %s: %v", name, err)
 		return
 	}
+
 	defer func() { _ = f.Close() }()
 
 	fi, err := f.Stat()
@@ -500,6 +530,7 @@ func verifyContent(t testing.TB, fsys fs.FS, name string, size int) {
 		t.Errorf("stat %s: %v", name, err)
 		return
 	}
+
 	if fi.Size() != int64(size) {
 		t.Errorf("%s: size %d, want %d", name, fi.Size(), size)
 		return
@@ -508,6 +539,7 @@ func verifyContent(t testing.TB, fsys fs.FS, name string, size int) {
 	// Read in chunks and verify against expected pattern.
 	buf := make([]byte, 64*1024)
 	offset := 0
+
 	for {
 		n, err := f.Read(buf)
 		for i := range n {
@@ -516,11 +548,14 @@ func verifyContent(t testing.TB, fsys fs.FS, name string, size int) {
 				return
 			}
 		}
+
 		offset += n
+
 		if err != nil {
 			break
 		}
 	}
+
 	if offset != size {
 		t.Errorf("%s: read %d bytes, want %d", name, offset, size)
 	}
@@ -539,6 +574,7 @@ var SparseFiles TestCase = &testCase{
 	tar: func() WriterToTar {
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 		marker := []byte("hello sparse world!\n")
+
 		return TarAll(
 			// 10MB file with a marker at offset 5MB.
 			tc.SparseFile("/sparse-10m.bin", 10*1024*1024, marker, 5*1024*1024, 0o644),
@@ -548,6 +584,7 @@ var SparseFiles TestCase = &testCase{
 	},
 	verify: func(t testing.TB, fsys fs.FS) {
 		t.Helper()
+
 		marker := "hello sparse world!\n"
 
 		verifySparse(t, fsys, "sparse-10m.bin", 10*1024*1024, 5*1024*1024, marker)
@@ -560,11 +597,13 @@ var SparseFiles TestCase = &testCase{
 // Set markerOff to -1 to skip the marker check.
 func verifySparse(t testing.TB, fsys fs.FS, name string, size, markerOff int64, marker string) {
 	t.Helper()
+
 	f, err := fsys.Open(name)
 	if err != nil {
 		t.Errorf("open %s: %v", name, err)
 		return
 	}
+
 	defer func() { _ = f.Close() }()
 
 	fi, err := f.Stat()
@@ -572,6 +611,7 @@ func verifySparse(t testing.TB, fsys fs.FS, name string, size, markerOff int64, 
 		t.Errorf("stat %s: %v", name, err)
 		return
 	}
+
 	if fi.Size() != size {
 		t.Errorf("%s: size %d, want %d", name, fi.Size(), size)
 		return
@@ -579,7 +619,9 @@ func verifySparse(t testing.TB, fsys fs.FS, name string, size, markerOff int64, 
 
 	// Sample a 4KB block every 1MB to verify zeros.
 	const step = 1024 * 1024
+
 	buf := make([]byte, 4096)
+
 	offset := int64(0)
 	for sampleOff := int64(0); sampleOff < size; sampleOff += step {
 		// Skip to the sample offset.
@@ -589,9 +631,12 @@ func verifySparse(t testing.TB, fsys fs.FS, name string, size, markerOff int64, 
 				t.Errorf("%s: skip to offset %d: %v", name, sampleOff, err)
 				return
 			}
+
 			offset += skipped
 		}
+
 		toRead := min(int64(len(buf)), size-offset)
+
 		n, err := io.ReadFull(f, buf[:toRead])
 		if err != nil && int64(n) != toRead {
 			t.Errorf("%s: read at offset %d: got %d bytes, want %d: %v", name, offset, n, toRead, err)
@@ -602,12 +647,14 @@ func verifySparse(t testing.TB, fsys fs.FS, name string, size, markerOff int64, 
 			offset += int64(n)
 			continue
 		}
+
 		for i := range n {
 			if buf[i] != 0 {
 				t.Errorf("%s: non-zero byte at offset %d", name, offset+int64(i))
 				return
 			}
 		}
+
 		offset += int64(n)
 	}
 
@@ -619,15 +666,18 @@ func verifySparse(t testing.TB, fsys fs.FS, name string, size, markerOff int64, 
 			return
 		}
 		defer func() { _ = f2.Close() }()
+
 		if _, err := io.CopyN(io.Discard, f2, markerOff); err != nil {
 			t.Errorf("%s: skip to marker at %d: %v", name, markerOff, err)
 			return
 		}
+
 		mbuf := make([]byte, len(marker))
 		if _, err := io.ReadFull(f2, mbuf); err != nil {
 			t.Errorf("%s: read marker at %d: %v", name, markerOff, err)
 			return
 		}
+
 		if string(mbuf) != marker {
 			t.Errorf("%s at offset %d: got %q, want %q", name, markerOff, mbuf, marker)
 		}
@@ -642,6 +692,7 @@ func XattrPrefixFlags() []string {
 	if err != nil || tooOld {
 		return nil
 	}
+
 	return []string{
 		"--xattr-prefix=user.short",
 		"--xattr-prefix=" + longXattrPrefix,
@@ -651,11 +702,13 @@ func XattrPrefixFlags() []string {
 // CheckFile verifies that the named file has the expected string content.
 func CheckFile(t testing.TB, fsys fs.FS, name, expected string) {
 	t.Helper()
+
 	f, err := fsys.Open(name)
 	if err != nil {
 		t.Errorf("open %s: %v", name, err)
 		return
 	}
+
 	defer func() { _ = f.Close() }()
 
 	data, err := io.ReadAll(f)
@@ -676,11 +729,13 @@ func CheckFile(t testing.TB, fsys fs.FS, name, expected string) {
 // CheckFileBytes verifies that the named file has the expected byte content.
 func CheckFileBytes(t testing.TB, fsys fs.FS, name string, expected []byte) {
 	t.Helper()
+
 	f, err := fsys.Open(name)
 	if err != nil {
 		t.Errorf("open %s: %v", name, err)
 		return
 	}
+
 	defer func() { _ = f.Close() }()
 
 	data, err := io.ReadAll(f)
@@ -698,6 +753,7 @@ func CheckFileBytes(t testing.TB, fsys fs.FS, name string, expected []byte) {
 // expected entries (sorted by name).
 func CheckDirEntries(t testing.TB, fsys fs.FS, name string, expected []string) {
 	t.Helper()
+
 	entries, err := fs.ReadDir(fsys, name)
 	if err != nil {
 		t.Errorf("readdir %s: %v", name, err)
@@ -713,6 +769,7 @@ func CheckDirEntries(t testing.TB, fsys fs.FS, name string, expected []string) {
 		t.Errorf("readdir %s: got %d entries %v, want %d entries %v", name, len(names), names, len(expected), expected)
 		return
 	}
+
 	for i, n := range names {
 		if n != expected[i] {
 			t.Errorf("readdir %s[%d]: got %q, want %q", name, i, n, expected[i])
@@ -723,11 +780,13 @@ func CheckDirEntries(t testing.TB, fsys fs.FS, name string, expected []string) {
 // CheckDirSize verifies that the named directory contains exactly n entries.
 func CheckDirSize(t testing.TB, fsys fs.FS, name string, n int) {
 	t.Helper()
+
 	entries, err := fs.ReadDir(fsys, name)
 	if err != nil {
 		t.Errorf("readdir %s: %v", name, err)
 		return
 	}
+
 	if len(entries) != n {
 		t.Errorf("readdir %s: got %d entries, want %d", name, len(entries), n)
 	}
@@ -743,11 +802,13 @@ func CheckSymlink(t testing.TB, fsys fs.FS, name, expectedTarget string) {
 // CheckNotExists verifies that the named path does not exist.
 func CheckNotExists(t testing.TB, fsys fs.FS, name string) {
 	t.Helper()
+
 	f, err := fsys.Open(name)
 	if err == nil {
 		if err = f.Close(); err != nil {
 			t.Errorf("close %s: %v", name, err)
 		}
+
 		t.Errorf("expected error opening %s, but succeeded", name)
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("open %s: got %v, want fs.ErrNotExist", name, err)
@@ -763,16 +824,19 @@ type readLinkFS interface {
 // CheckReadLink verifies that ReadLink returns the expected target.
 func CheckReadLink(t testing.TB, fsys fs.FS, name, target string) {
 	t.Helper()
+
 	rlfs, ok := fsys.(readLinkFS)
 	if !ok {
 		t.Errorf("FS does not implement ReadLink")
 		return
 	}
+
 	got, err := rlfs.ReadLink(name)
 	if err != nil {
 		t.Errorf("ReadLink(%s): %v", name, err)
 		return
 	}
+
 	if got != target {
 		t.Errorf("ReadLink(%s) = %q, want %q", name, got, target)
 	}
@@ -781,16 +845,19 @@ func CheckReadLink(t testing.TB, fsys fs.FS, name, target string) {
 // CheckLstat verifies that Lstat returns the expected file type.
 func CheckLstat(t testing.TB, fsys fs.FS, name string, wantType fs.FileMode) {
 	t.Helper()
+
 	rlfs, ok := fsys.(readLinkFS)
 	if !ok {
 		t.Errorf("FS does not implement Lstat")
 		return
 	}
+
 	fi, err := rlfs.Lstat(name)
 	if err != nil {
 		t.Errorf("Lstat(%s): %v", name, err)
 		return
 	}
+
 	gotType := fi.Mode() & fs.ModeType
 	if gotType != wantType {
 		t.Errorf("Lstat(%s) type = %v, want %v", name, gotType, wantType)
@@ -800,11 +867,13 @@ func CheckLstat(t testing.TB, fsys fs.FS, name string, wantType fs.FileMode) {
 // CheckReadFile verifies fs.ReadFile returns the expected content.
 func CheckReadFile(t testing.TB, fsys fs.FS, name, expected string) {
 	t.Helper()
+
 	got, err := fs.ReadFile(fsys, name)
 	if err != nil {
 		t.Errorf("ReadFile(%s): %v", name, err)
 		return
 	}
+
 	if string(got) != expected {
 		t.Errorf("ReadFile(%s) = %q, want %q", name, got, expected)
 	}
@@ -813,6 +882,7 @@ func CheckReadFile(t testing.TB, fsys fs.FS, name, expected string) {
 // CheckReadFileDir verifies that fs.ReadFile fails on a directory.
 func CheckReadFileDir(t testing.TB, fsys fs.FS, name string) {
 	t.Helper()
+
 	_, err := fs.ReadFile(fsys, name)
 	if err == nil {
 		t.Errorf("ReadFile(%s) should fail on directory", name)
@@ -824,11 +894,13 @@ func CheckReadFileDir(t testing.TB, fsys fs.FS, name string) {
 // CheckReadDirSorted verifies that fs.ReadDir returns entries in sorted order.
 func CheckReadDirSorted(t testing.TB, fsys fs.FS, name string) {
 	t.Helper()
+
 	entries, err := fs.ReadDir(fsys, name)
 	if err != nil {
 		t.Errorf("ReadDir(%s): %v", name, err)
 		return
 	}
+
 	for i := 1; i < len(entries); i++ {
 		if entries[i-1].Name() >= entries[i].Name() {
 			t.Errorf("ReadDir(%s) not sorted: %q >= %q at index %d", name, entries[i-1].Name(), entries[i].Name(), i)
@@ -840,9 +912,11 @@ func CheckReadDirSorted(t testing.TB, fsys fs.FS, name string) {
 // CheckOpenError verifies that Open returns an error matching target.
 func CheckOpenError(t testing.TB, fsys fs.FS, name string, target error) {
 	t.Helper()
+
 	f, err := fsys.Open(name)
 	if err == nil {
 		_ = f.Close()
+
 		t.Errorf("Open(%s): expected error %v, got nil", name, target)
 	} else if !errors.Is(err, target) {
 		t.Errorf("Open(%s): got %v, want %v", name, err, target)
@@ -852,14 +926,17 @@ func CheckOpenError(t testing.TB, fsys fs.FS, name string, target error) {
 // CheckReadDirFile verifies that ReadDir on a non-directory returns ErrNotDirectory.
 func CheckReadDirFile(t testing.TB, fsys fs.FS, name string) {
 	t.Helper()
+
 	type readDirFS interface {
 		ReadDir(name string) ([]fs.DirEntry, error)
 	}
+
 	rdfs, ok := fsys.(readDirFS)
 	if !ok {
 		t.Errorf("FS does not implement ReadDir")
 		return
 	}
+
 	_, err := rdfs.ReadDir(name)
 	if err == nil {
 		t.Errorf("ReadDir(%s) should fail on non-directory", name)
@@ -871,11 +948,13 @@ func CheckReadDirFile(t testing.TB, fsys fs.FS, name string) {
 // CheckReadLinkFile verifies that ReadLink on a non-symlink returns fs.ErrInvalid.
 func CheckReadLinkFile(t testing.TB, fsys fs.FS, name string) {
 	t.Helper()
+
 	rlfs, ok := fsys.(readLinkFS)
 	if !ok {
 		t.Errorf("FS does not implement ReadLink")
 		return
 	}
+
 	_, err := rlfs.ReadLink(name)
 	if err == nil {
 		t.Errorf("ReadLink(%s) should fail on non-symlink", name)
@@ -888,11 +967,13 @@ func CheckReadLinkFile(t testing.TB, fsys fs.FS, name string) {
 // without reading does not panic.
 func CheckOpenClose(t testing.TB, fsys fs.FS, name string) {
 	t.Helper()
+
 	f, err := fsys.Open(name)
 	if err != nil {
 		t.Errorf("Open(%s): %v", name, err)
 		return
 	}
+
 	if err := f.Close(); err != nil {
 		t.Errorf("Close(%s): %v", name, err)
 	}

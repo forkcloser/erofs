@@ -25,6 +25,7 @@ import (
 func TestParentMustBeADirectory(t *testing.T) {
 	newWriterWithFile := func(t *testing.T) *Writer {
 		t.Helper()
+
 		w := Create(&seekBuf{}, WithBuildTime(1000, 0))
 		writeFile(t, w, "/a", []byte("x"))
 
@@ -35,6 +36,7 @@ func TestParentMustBeADirectory(t *testing.T) {
 		w := newWriterWithFile(t)
 		if f, err := w.Create("/a/b"); err == nil {
 			_ = f.Close()
+
 			t.Error("Create under a regular file succeeded")
 		} else if !errors.Is(err, ErrNotDirectory) {
 			t.Errorf("err = %v; want ErrNotDirectory", err)
@@ -81,6 +83,7 @@ func TestParentMustBeADirectory(t *testing.T) {
 		if err := w.Symlink("elsewhere", "/link"); err != nil {
 			t.Fatal(err)
 		}
+
 		if err := w.Mkdir("/link/sub", 0o755); !errors.Is(err, ErrNotDirectory) {
 			t.Errorf("err = %v; want ErrNotDirectory", err)
 		}
@@ -91,17 +94,21 @@ func TestParentMustBeADirectory(t *testing.T) {
 		out := &seekBuf{}
 		w := Create(out, WithBuildTime(1000, 0))
 		writeFile(t, w, "/x/y/z.txt", []byte("deep"))
+
 		if err := w.Close(); err != nil {
 			t.Fatal(err)
 		}
+
 		img, err := Open(bytes.NewReader(out.buf))
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		got, err := fs.ReadFile(img, "x/y/z.txt")
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if string(got) != "deep" {
 			t.Errorf("got %q, want %q", got, "deep")
 		}
@@ -120,6 +127,7 @@ func (s *shortReader) Read(p []byte) (int, error) {
 	if s.pos >= len(s.data) {
 		return 0, io.EOF
 	}
+
 	n := copy(p, s.data[s.pos:])
 	s.pos += n
 
@@ -161,9 +169,11 @@ func TestShortInlineReadIsRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("Close accepted a source that delivered 10 of 100 declared bytes")
 	}
+
 	if !strings.Contains(err.Error(), "short read") {
 		t.Errorf("err = %v; want it to mention a short read", err)
 	}
+
 	t.Logf("rejected with: %v", err)
 }
 
@@ -182,6 +192,7 @@ func TestShortFlatPlainReadIsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Close(); err == nil {
 		t.Fatal("Close accepted a short flat-plain source")
 	} else if !strings.Contains(err.Error(), "short read") {
@@ -213,10 +224,12 @@ func TestCompactInodeKeepsSubSecondMtime(t *testing.T) {
 			out := &seekBuf{}
 			w := Create(out, WithBuildTime(tc.buildSec, tc.buildNs))
 			writeFile(t, w, "/f.txt", []byte("hello"))
+
 			mt := time.Unix(int64(tc.mtimeSec), int64(tc.mtimeNs))
 			if err := w.Chtimes("/f.txt", mt, mt); err != nil {
 				t.Fatal(err)
 			}
+
 			if err := w.Close(); err != nil {
 				t.Fatal(err)
 			}
@@ -225,10 +238,12 @@ func TestCompactInodeKeepsSubSecondMtime(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			fi, err := fs.Stat(img, "f.txt")
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			st := fi.Sys().(*Stat)
 			if st.Mtime != tc.wantSec || uint64(st.MtimeNs) != tc.wantNs {
 				t.Errorf("mtime = (%d,%d), want (%d,%d) — %s",
@@ -249,6 +264,7 @@ func TestXattrLimits(t *testing.T) {
 		if err := w.Mkdir("/d", 0o755); err != nil {
 			t.Fatal(err)
 		}
+
 		if err := w.Setxattr("/d", longName, "v"); !errors.Is(err, ErrInvalid) {
 			t.Errorf("err = %v; want ErrInvalid", err)
 		}
@@ -259,6 +275,7 @@ func TestXattrLimits(t *testing.T) {
 		if err := w.Mkdir("/d", 0o755); err != nil {
 			t.Fatal(err)
 		}
+
 		if err := w.Setxattr("/d", "user.big", bigValue); !errors.Is(err, ErrInvalid) {
 			t.Errorf("err = %v; want ErrInvalid", err)
 		}
@@ -266,30 +283,38 @@ func TestXattrLimits(t *testing.T) {
 
 	t.Run("BoundaryValuesAccepted", func(t *testing.T) {
 		out := &seekBuf{}
+
 		w := Create(out, WithBuildTime(1000, 0))
 		if err := w.Mkdir("/d", 0o755); err != nil {
 			t.Fatal(err)
 		}
+
 		name := "user." + strings.Repeat("n", 255)
+
 		value := strings.Repeat("v", 65535)
 		if err := w.Setxattr("/d", name, value); err != nil {
 			t.Fatalf("boundary xattr rejected: %v", err)
 		}
+
 		if err := w.Close(); err != nil {
 			t.Fatal(err)
 		}
+
 		img, err := Open(bytes.NewReader(out.buf))
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		fi, err := fs.Stat(img, "d")
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		got := fi.Sys().(*Stat).Xattrs[name]
 		if got != value {
 			t.Errorf("xattr round-trip failed: got %d bytes, want %d", len(got), len(value))
 		}
+
 		fsckImage(t, out.buf)
 	})
 
@@ -297,6 +322,7 @@ func TestXattrLimits(t *testing.T) {
 	t.Run("CopyFromRejectsOversized", func(t *testing.T) {
 		out := &seekBuf{}
 		w := Create(out, WithBuildTime(1000, 0))
+
 		err := w.add("/d", &xattrInfo{
 			name:   "d",
 			mode:   fs.ModeDir | 0o755,
@@ -305,6 +331,7 @@ func TestXattrLimits(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if err := w.Close(); !errors.Is(err, ErrInvalid) {
 			t.Errorf("Close err = %v; want ErrInvalid", err)
 		} else {
@@ -336,6 +363,7 @@ func (i *xattrInfo) Sys() any {
 // the feature.
 func TestChunkedFeatureFlagDeclared(t *testing.T) {
 	const bs = 4096
+
 	blob := sparseBlob(bs)
 
 	// A source that cannot describe where its data lives: the entry still
@@ -345,10 +373,12 @@ func TestChunkedFeatureFlagDeclared(t *testing.T) {
 	src.noRanges = true
 
 	out := &seekBuf{}
+
 	w := Create(out, WithBlockSize(bs), WithBuildTime(1000, 0))
 	if err := w.CopyFrom(src, MetadataOnly()); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -357,15 +387,18 @@ func TestChunkedFeatureFlagDeclared(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	i := img.(*image)
 
 	fi, err := fs.Stat(img, "f")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if layout := fi.(*fileInfo).layout; layout != disk.LayoutChunkBased {
 		t.Fatalf("test premise broken: layout = %d, want chunk-based", layout)
 	}
+
 	if i.sb.FeatureIncompat&disk.FeatureIncompatChunkedFile == 0 {
 		t.Errorf("image holds chunk-based inodes but FeatureIncompat = %#x lacks the chunked-file bit",
 			i.sb.FeatureIncompat)
@@ -379,10 +412,12 @@ func fsckImage(t *testing.T, image []byte) {
 	if _, err := exec.LookPath("fsck.erofs"); err != nil {
 		return
 	}
+
 	p := filepath.Join(t.TempDir(), "img.erofs")
 	if err := os.WriteFile(p, image, 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	if out, err := exec.Command("fsck.erofs", p).CombinedOutput(); err != nil {
 		t.Errorf("fsck.erofs rejected the image: %v\n%s", err, out)
 	}
@@ -407,10 +442,12 @@ func TestDataFileSeekErrorIsSticky(t *testing.T) {
 
 	if f, err := w.Create("/a"); err == nil {
 		_ = f.Close()
+
 		t.Error("Create succeeded although the data file could not be seeked")
 	} else {
 		t.Logf("Create rejected with: %v", err)
 	}
+
 	if err := w.Close(); err == nil {
 		t.Error("Close succeeded although the data file could not be seeked")
 	}

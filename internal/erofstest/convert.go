@@ -28,12 +28,15 @@ func ConvertTarErofs(ctx context.Context, r io.Reader, layerPath, uuid string, m
 	if uuid != "" {
 		args = append(args, []string{"-U", uuid}...)
 	}
+
 	args = append(args, layerPath)
 	cmd := exec.CommandContext(ctx, "mkfs.erofs", args...)
 	cmd.Stdin = r
+
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("erofs apply failed: %s: %w", out, err)
 	}
+
 	return nil
 }

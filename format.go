@@ -29,6 +29,7 @@ func xattrSplit(name string) (uint8, string) {
 			return p.index, name[len(p.prefix):]
 		}
 	}
+
 	return 0, name
 }
 
@@ -54,6 +55,7 @@ func validateXattr(name, value string) error {
 		return fmt.Errorf("xattr name %q is %d bytes after its prefix, over the %d byte on-disk limit: %w",
 			name, len(suffix), maxXattrNameLen, ErrInvalid)
 	}
+
 	if len(value) > maxXattrValueLen {
 		return fmt.Errorf("xattr %q has a %d byte value, over the %d byte on-disk limit: %w",
 			name, len(value), maxXattrValueLen, ErrInvalid)
@@ -65,10 +67,12 @@ func validateXattr(name, value string) error {
 // xattrEntrySize returns the on-disk size of a single xattr entry, padded to 4 bytes.
 func xattrEntrySize(name, value string) int {
 	_, suffix := xattrSplit(name)
+
 	sz := disk.SizeXattrEntry + len(suffix) + len(value)
 	if sz%4 != 0 {
 		sz = (sz + 3) & ^3
 	}
+
 	return sz
 }
 
@@ -77,10 +81,12 @@ func calcXattrSize(e *erofsEntry) int {
 	if len(e.xattrs) == 0 {
 		return 0
 	}
+
 	entriesSize := 0
 	for name, value := range e.xattrs {
 		entriesSize += xattrEntrySize(name, value)
 	}
+
 	return disk.SizeXattrBodyHeader + entriesSize
 }
 
@@ -107,7 +113,9 @@ func sortedXattrKeys(m map[string]string) []string {
 	for k := range m {
 		keys = append(keys, k)
 	}
+
 	sort.Strings(keys)
+
 	return keys
 }
 
@@ -117,6 +125,7 @@ func inodeFormat(layout uint8, compact bool) uint16 {
 	if !compact {
 		f |= 1 // bit 0 = extended
 	}
+
 	return f
 }
 
@@ -127,9 +136,11 @@ func goModeToUnixMode(m fs.FileMode) uint16 {
 	if m&fs.ModeSetuid != 0 {
 		mode |= disk.StatTypeIsUID
 	}
+
 	if m&fs.ModeSetgid != 0 {
 		mode |= disk.StatTypeIsGID
 	}
+
 	if m&fs.ModeSticky != 0 {
 		mode |= disk.StatTypeIsVTX
 	}

@@ -25,29 +25,36 @@ import (
 // resolved to the wrong device block.
 func TestChunkBasedXattrAlignment(t *testing.T) {
 	dataPath := filepath.Join(t.TempDir(), "data.bin")
+
 	df, err := os.Create(dataPath)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = df.Close() }()
 
 	var metaBuf testBuffer
+
 	fsys := erofs.Create(&metaBuf, erofs.WithDataFile(df))
 
 	f, err := fsys.Create("/file.bin")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	want := bytes.Repeat([]byte{0xAB}, 4096) // exactly one chunk
 	if _, err := f.Write(want); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := fsys.Setxattr("/file.bin", "user.t", "abc"); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := fsys.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
@@ -67,6 +74,7 @@ func TestChunkBasedXattrAlignment(t *testing.T) {
 	if err != nil {
 		t.Fatal("ReadFile:", err)
 	}
+
 	if !bytes.Equal(got, want) {
 		t.Fatalf(
 			"file data mismatch: chunk-index map misaligned after xattr area (got %d bytes, first=0x%02x)",
@@ -80,12 +88,14 @@ func TestChunkBasedXattrAlignment(t *testing.T) {
 	if err != nil {
 		t.Fatal("Stat:", err)
 	}
+
 	xg, ok := fi.(interface {
 		GetXattr(string) (string, bool)
 	})
 	if !ok {
 		t.Fatal("FileInfo does not expose GetXattr")
 	}
+
 	if v, ok := xg.GetXattr("user.t"); !ok || v != "abc" {
 		t.Fatalf("user.t = %q (ok=%v), want %q", v, ok, "abc")
 	}
@@ -95,6 +105,7 @@ func firstByte(b []byte) byte {
 	if len(b) == 0 {
 		return 0
 	}
+
 	return b[0]
 }
 
@@ -178,12 +189,16 @@ func TestMetadataOnlyChunkDeviceZero(t *testing.T) {
 	if err := os.WriteFile(srcDataPath, bytes.Repeat([]byte{0x11}, 4096), 0o644); err != nil {
 		t.Fatal(err)
 	}
+
 	srcDF, err := os.OpenFile(srcDataPath, os.O_RDWR, 0o644)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	var srcBuf testBuffer
+
 	sw := erofs.Create(&srcBuf, erofs.WithDataFile(srcDF))
+
 	src := chunkSourceFS{
 		name:   "target",
 		chunks: []builder.Chunk{{PhysicalBlock: 0, Count: 1, DeviceID: 0}},
@@ -191,9 +206,11 @@ func TestMetadataOnlyChunkDeviceZero(t *testing.T) {
 	if err := sw.CopyFrom(src, erofs.MetadataOnly()); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := sw.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	_ = srcDF.Close()
 
 	srcDFR, err := os.Open(srcDataPath)
@@ -201,6 +218,7 @@ func TestMetadataOnlyChunkDeviceZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = srcDFR.Close() }()
+
 	srcImg, err := erofs.Open(bytes.NewReader(srcBuf.Bytes()), erofs.WithExtraDevices(srcDFR))
 	if err != nil {
 		t.Fatal(err)
@@ -213,15 +231,20 @@ func TestMetadataOnlyChunkDeviceZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = dstDF.Close() }()
+
 	var dstBuf testBuffer
+
 	dw := erofs.Create(&dstBuf, erofs.WithDataFile(dstDF))
+
 	other, err := dw.Create("/other")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := other.Write(bytes.Repeat([]byte{0xEE}, 4096)); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := other.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -230,11 +253,14 @@ func TestMetadataOnlyChunkDeviceZero(t *testing.T) {
 	if err == nil {
 		err = dw.Close()
 	}
+
 	if err == nil {
 		t.Fatal("metadata-only copy accepted a chunk naming the source's own device")
 	}
+
 	if !errors.Is(err, erofs.ErrInvalid) {
 		t.Fatalf("got %v, want ErrInvalid", err)
 	}
+
 	t.Logf("rejected: %v", err)
 }
