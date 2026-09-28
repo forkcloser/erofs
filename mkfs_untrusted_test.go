@@ -62,19 +62,19 @@ func buildTamperableImage(t *testing.T) ([]byte, uint64) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("hello")); err != nil {
+	if _, err = f.Write([]byte("hello")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Chtimes("/f", time.Unix(2000, 0), time.Unix(2000, 0)); err != nil {
+	if err = w.Chtimes("/f", time.Unix(2000, 0), time.Unix(2000, 0)); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -542,23 +542,23 @@ func TestEmptySymlinkTargetRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("TOPSECRET")); err != nil {
+	if _, err = f.Write([]byte("TOPSECRET")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Mkdir("/sub", 0o755); err != nil {
+	if err = w.Mkdir("/sub", 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Symlink("x", "/sub/el"); err != nil {
+	if err = w.Symlink("x", "/sub/el"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -779,15 +779,15 @@ func TestDirentNameIsABaseName(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("pwned")); err != nil {
+	if _, err = f.Write([]byte("pwned")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -798,7 +798,8 @@ func TestDirentNameIsABaseName(t *testing.T) {
 		t.Fatalf("tampered image failed to open: %v", err)
 	}
 
-	if ents, err := fs.ReadDir(img, "."); err == nil {
+	var ents []fs.DirEntry
+	if ents, err = fs.ReadDir(img, "."); err == nil {
 		for _, e := range ents {
 			t.Errorf("ReadDir returned name %q, want an error", e.Name())
 		}
@@ -857,15 +858,15 @@ func TestMergeWhiteoutCannotEscapeItsDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := keep.Write([]byte("PRIOR LAYER DATA")); err != nil {
+	if _, err = keep.Write([]byte("PRIOR LAYER DATA")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := keep.Close(); err != nil {
+	if err = keep.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := dst.Mkdir("/etc", 0o755); err != nil {
+	if err = dst.Mkdir("/etc", 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -990,19 +991,19 @@ func TestUntrustedChunkAddrStaysInBounds(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("hello")); err != nil {
+	if _, err = f.Write([]byte("hello")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Chtimes("/f", time.Unix(2000, 0), time.Unix(2000, 0)); err != nil {
+	if err = w.Chtimes("/f", time.Unix(2000, 0), time.Unix(2000, 0)); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1134,25 +1135,25 @@ func TestCopyFromImageSharesChunkMaps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write(bytes.Repeat([]byte{0xAB}, blocks*4096)); err != nil {
+	if _, err = f.Write(bytes.Repeat([]byte{0xAB}, blocks*4096)); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Mkdir("/d", 0o755); err != nil {
+	if err = w.Mkdir("/d", 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	for i := range links {
-		if err := w.Link("/f0", fmt.Sprintf("/d/l%06d", i)); err != nil {
+		if err = w.Link("/f0", fmt.Sprintf("/d/l%06d", i)); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1229,15 +1230,15 @@ func TestUnalignedDataFileStart(t *testing.T) {
 	}
 
 	want := bytes.Repeat([]byte{0xCD}, 4096)
-	if _, err := f.Write(want); err != nil {
+	if _, err = f.Write(want); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1311,15 +1312,15 @@ func TestXattrPrefixAndDuplicates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Setxattr("/f", "security.capability", "real"); err != nil {
+	if err = w.Setxattr("/f", "security.capability", "real"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1330,7 +1331,8 @@ func TestXattrPrefixAndDuplicates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if fi, err := fs.Stat(img0, "f"); err != nil {
+	var fi fs.FileInfo
+	if fi, err = fs.Stat(img0, "f"); err != nil {
 		t.Fatal(err)
 	} else if st := fi.Sys().(*Stat); st.Xattrs["security.capability"] != "real" {
 		t.Fatalf("xattr did not round-trip: %v", st.Xattrs)
@@ -1531,7 +1533,8 @@ func TestEmptyDirentNameIsRejected(t *testing.T) {
 		t.Fatalf("tampered image failed to open: %v", err)
 	}
 
-	if ents, err := fs.ReadDir(img, "."); err == nil {
+	var ents []fs.DirEntry
+	if ents, err = fs.ReadDir(img, "."); err == nil {
 		names := make([]string, 0, len(ents))
 		for _, e := range ents {
 			names = append(names, e.Name())
@@ -1564,15 +1567,15 @@ func buildFlatPlainImage(t *testing.T) ([]byte, int64) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write(bytes.Repeat([]byte("x"), 2*4096)); err != nil {
+	if _, err = f.Write(bytes.Repeat([]byte("x"), 2*4096)); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1680,7 +1683,8 @@ func TestCopyFromImageInlineCrossingBlock(t *testing.T) {
 		t.Fatalf("tampered image failed to open: %v", err)
 	}
 
-	if target, err := img.(interface {
+	var target string
+	if target, err = img.(interface {
 		ReadLink(string) (string, error)
 	}).ReadLink("l"); err == nil {
 		t.Errorf("ReadLink returned %q, want an error", target)
@@ -1706,15 +1710,15 @@ func TestCopyFromImageTruncatedXattr(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Setxattr("/f", "security.capability", "real"); err != nil {
+	if err = w.Setxattr("/f", "security.capability", "real"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1733,7 +1737,7 @@ func TestCopyFromImageTruncatedXattr(t *testing.T) {
 		t.Fatalf("tampered image failed to open: %v", err)
 	}
 
-	if _, err := fs.Stat(img, "f"); err == nil {
+	if _, err = fs.Stat(img, "f"); err == nil {
 		t.Error("Stat accepted an xattr running past its area")
 	}
 

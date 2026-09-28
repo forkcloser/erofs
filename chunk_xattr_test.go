@@ -43,19 +43,19 @@ func TestChunkBasedXattrAlignment(t *testing.T) {
 	}
 
 	want := bytes.Repeat([]byte{0xAB}, 4096) // exactly one chunk
-	if _, err := f.Write(want); err != nil {
+	if _, err = f.Write(want); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Setxattr("/file.bin", "user.t", "abc"); err != nil {
+	if err = fsys.Setxattr("/file.bin", "user.t", "abc"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Close(); err != nil {
+	if err = fsys.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
@@ -203,11 +203,11 @@ func TestMetadataOnlyChunkDeviceZero(t *testing.T) {
 		name:   "target",
 		chunks: []builder.Chunk{{PhysicalBlock: 0, Count: 1, DeviceID: 0}},
 	}
-	if err := sw.CopyFrom(src, erofs.MetadataOnly()); err != nil {
+	if err = sw.CopyFrom(src, erofs.MetadataOnly()); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := sw.Close(); err != nil {
+	if err = sw.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -241,11 +241,11 @@ func TestMetadataOnlyChunkDeviceZero(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := other.Write(bytes.Repeat([]byte{0xEE}, 4096)); err != nil {
+	if _, err = other.Write(bytes.Repeat([]byte{0xEE}, 4096)); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := other.Close(); err != nil {
+	if err = other.Close(); err != nil {
 		t.Fatal(err)
 	}
 

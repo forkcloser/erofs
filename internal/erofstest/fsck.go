@@ -37,13 +37,13 @@ func FsckErofsBytes(t testing.TB, buf []byte) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write(buf); err != nil {
+	if _, err = f.Write(buf); err != nil {
 		_ = f.Close()
 
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 

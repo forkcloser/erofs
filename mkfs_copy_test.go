@@ -232,11 +232,11 @@ func TestCopyFromImageHardlinks(t *testing.T) {
 		var buf testBuffer
 
 		w := erofs.Create(&buf, erofs.WithDataFile(dataFile))
-		if err := w.CopyFrom(srcFS, erofs.MetadataOnly()); err != nil {
+		if err = w.CopyFrom(srcFS, erofs.MetadataOnly()); err != nil {
 			t.Fatal("CopyFrom:", err)
 		}
 
-		if err := w.Close(); err != nil {
+		if err = w.Close(); err != nil {
 			t.Fatal(err)
 		}
 
@@ -258,29 +258,32 @@ func TestCopyFromHardlinkScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Same shape as srcA — its nids coincide — but different names.
-	var bbuf testBuffer
+	var (
+		bbuf testBuffer
+		f    *erofs.File
+	)
 
 	wb := erofs.Create(&bbuf)
 	for name, content := range map[string]string{"/b-original": "distinct b content", "/b-other": "b unrelated"} {
-		f, err := wb.Create(name)
+		f, err = wb.Create(name)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		if _, err := f.Write([]byte(content)); err != nil {
+		if _, err = f.Write([]byte(content)); err != nil {
 			t.Fatal(err)
 		}
 
-		if err := f.Close(); err != nil {
+		if err = f.Close(); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	if err := wb.Link("/b-original", "/b-hardlink"); err != nil {
+	if err = wb.Link("/b-original", "/b-hardlink"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := wb.Close(); err != nil {
+	if err = wb.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -292,15 +295,15 @@ func TestCopyFromHardlinkScope(t *testing.T) {
 	var buf testBuffer
 
 	w := erofs.Create(&buf)
-	if err := w.CopyFrom(srcA); err != nil {
+	if err = w.CopyFrom(srcA); err != nil {
 		t.Fatal("CopyFrom A:", err)
 	}
 
-	if err := w.CopyFrom(srcB); err != nil {
+	if err = w.CopyFrom(srcB); err != nil {
 		t.Fatal("CopyFrom B:", err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -401,15 +404,15 @@ func TestCopyFromHardlinkOverwrite(t *testing.T) {
 	var buf testBuffer
 
 	w := erofs.Create(&buf)
-	if err := w.CopyFrom(srcA); err != nil {
+	if err = w.CopyFrom(srcA); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.CopyFrom(over, erofs.Merge()); err != nil {
+	if err = w.CopyFrom(over, erofs.Merge()); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -491,27 +494,27 @@ func TestChownRange(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := f.Chown(-1, 0); !errors.Is(err, erofs.ErrInvalid) {
+	if err = f.Chown(-1, 0); !errors.Is(err, erofs.ErrInvalid) {
 		t.Errorf("File.Chown(-1, 0) = %v, want ErrInvalid", err)
 	}
 
-	if err := f.Chown(1, 2); err != nil {
+	if err = f.Chown(1, 2); err != nil {
 		t.Errorf("File.Chown(1, 2) = %v", err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Chown("/f", 0, -1); !errors.Is(err, erofs.ErrInvalid) {
+	if err = w.Chown("/f", 0, -1); !errors.Is(err, erofs.ErrInvalid) {
 		t.Errorf("Writer.Chown(0, -1) = %v, want ErrInvalid", err)
 	}
 
-	if err := w.Chown("/f", 1<<32, 0); !errors.Is(err, erofs.ErrInvalid) {
+	if err = w.Chown("/f", 1<<32, 0); !errors.Is(err, erofs.ErrInvalid) {
 		t.Errorf("Writer.Chown(1<<32, 0) = %v, want ErrInvalid", err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
 

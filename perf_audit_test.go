@@ -115,7 +115,7 @@ func BenchmarkPerfSequentialRead(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	if _, err := tmp.Write(buildPerfImage(b, size)); err != nil {
+	if _, err = tmp.Write(buildPerfImage(b, size)); err != nil {
 		b.Fatal(err)
 	}
 

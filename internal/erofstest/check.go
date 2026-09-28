@@ -96,7 +96,7 @@ func CheckMode(t testing.TB, fsys fs.FS, name string, want fs.FileMode) {
 
 	// Stat follows symlinks, so it reports the target's mode instead.
 	if want&fs.ModeSymlink == 0 {
-		fi, err := fs.Stat(fsys, name)
+		fi, err = fs.Stat(fsys, name)
 		if err != nil {
 			t.Errorf("stat %s: %v", name, err)
 		} else {

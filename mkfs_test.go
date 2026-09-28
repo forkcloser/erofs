@@ -30,16 +30,16 @@ func TestCreateFSSpool(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("hello world\n")); err != nil {
+	if _, err = f.Write([]byte("hello world\n")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create a directory and a file inside it.
-	if err := fsys.Mkdir("/subdir", 0o755); err != nil {
+	if err = fsys.Mkdir("/subdir", 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -48,16 +48,16 @@ func TestCreateFSSpool(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f2.Write([]byte("nested\n")); err != nil {
+	if _, err = f2.Write([]byte("nested\n")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f2.Close(); err != nil {
+	if err = f2.Close(); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create a symlink.
-	if err := fsys.Symlink("hello.txt", "/link"); err != nil {
+	if err = fsys.Symlink("hello.txt", "/link"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -67,11 +67,11 @@ func TestCreateFSSpool(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := f3.Close(); err != nil {
+	if err = f3.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Close(); err != nil {
+	if err = fsys.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
@@ -113,11 +113,11 @@ func TestCreateFSDataFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("data file mode\n")); err != nil {
+	if _, err = f.Write([]byte("data file mode\n")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -127,15 +127,15 @@ func TestCreateFSDataFile(t *testing.T) {
 	}
 
 	data := bytes.Repeat([]byte("ABCDEFGH"), 1024) // 8KB
-	if _, err := f2.Write(data); err != nil {
+	if _, err = f2.Write(data); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f2.Close(); err != nil {
+	if err = f2.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Close(); err != nil {
+	if err = fsys.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
@@ -166,43 +166,43 @@ func TestCreateFSMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("content\n")); err != nil {
+	if _, err = f.Write([]byte("content\n")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Chmod(0o755); err != nil {
+	if err = f.Chmod(0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Chown(1000, 2000); err != nil {
+	if err = f.Chown(1000, 2000); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Setxattr("/file.txt", "user.test", "value123"); err != nil {
+	if err = fsys.Setxattr("/file.txt", "user.test", "value123"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Chtimes("/file.txt", time.Time{}, time.Unix(1700000000, 123456789)); err != nil {
+	if err = fsys.Chtimes("/file.txt", time.Time{}, time.Unix(1700000000, 123456789)); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Mkdir("/mydir", 0o755); err != nil {
+	if err = fsys.Mkdir("/mydir", 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Chmod("/mydir", 0o700); err != nil {
+	if err = fsys.Chmod("/mydir", 0o700); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Chown("/mydir", 500, 600); err != nil {
+	if err = fsys.Chown("/mydir", 500, 600); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Close(); err != nil {
+	if err = fsys.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
@@ -291,15 +291,15 @@ func TestCreateFSLargeFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write(data); err != nil {
+	if _, err = f.Write(data); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Close(); err != nil {
+	if err = fsys.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
@@ -340,15 +340,15 @@ func TestCreateFSLargeFileDataFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write(data); err != nil {
+	if _, err = f.Write(data); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Close(); err != nil {
+	if err = fsys.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
@@ -378,7 +378,7 @@ func TestCreateFSErrors(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if err := f.Close(); err != nil {
+		if err = f.Close(); err != nil {
 			t.Fatal(err)
 		}
 
@@ -398,11 +398,11 @@ func TestCreateFSErrors(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if _, err := f.Write([]byte("data")); err != nil {
+		if _, err = f.Write([]byte("data")); err != nil {
 			t.Fatal(err)
 		}
 
-		if err := f.Close(); err != nil {
+		if err = f.Close(); err != nil {
 			t.Fatal(err)
 		}
 
@@ -422,7 +422,7 @@ func TestCreateFSErrors(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if err := f.Close(); err != nil {
+		if err = f.Close(); err != nil {
 			t.Fatal(err)
 		}
 
@@ -473,15 +473,15 @@ func TestCreateFSImplicitDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("deep\n")); err != nil {
+	if _, err = f.Write([]byte("deep\n")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Close(); err != nil {
+	if err = fsys.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
@@ -638,19 +638,19 @@ func TestCreateFSBlockSize(t *testing.T) {
 			}
 			// Write enough data to span multiple blocks at the smallest size.
 			data := bytes.Repeat([]byte("X"), bs+1)
-			if _, err := f.Write(data); err != nil {
+			if _, err = f.Write(data); err != nil {
 				t.Fatal(err)
 			}
 
-			if err := f.Close(); err != nil {
+			if err = f.Close(); err != nil {
 				t.Fatal(err)
 			}
 
-			if err := fsys.Mkdir("/dir", 0o755); err != nil {
+			if err = fsys.Mkdir("/dir", 0o755); err != nil {
 				t.Fatal(err)
 			}
 
-			if err := fsys.Close(); err != nil {
+			if err = fsys.Close(); err != nil {
 				t.Fatal("Close:", err)
 			}
 
@@ -666,7 +666,7 @@ func TestCreateFSBlockSize(t *testing.T) {
 			var sb disk.SuperBlock
 
 			r := bytes.NewReader(buf.Bytes()[disk.SuperBlockOffset:])
-			if err := binary.Read(r, binary.LittleEndian, &sb); err != nil {
+			if err = binary.Read(r, binary.LittleEndian, &sb); err != nil {
 				t.Fatal("decode superblock:", err)
 			}
 
@@ -739,11 +739,11 @@ func TestCreateFSBlockSize(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if _, err := f.Write(data); err != nil {
+		if _, err = f.Write(data); err != nil {
 			t.Fatal(err)
 		}
 
-		if err := f.Close(); err != nil {
+		if err = f.Close(); err != nil {
 			t.Fatal(err)
 		}
 
@@ -755,15 +755,15 @@ func TestCreateFSBlockSize(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if _, err := f2.Write(small); err != nil {
+		if _, err = f2.Write(small); err != nil {
 			t.Fatal(err)
 		}
 
-		if err := f2.Close(); err != nil {
+		if err = f2.Close(); err != nil {
 			t.Fatal(err)
 		}
 
-		if err := fsys.Close(); err != nil {
+		if err = fsys.Close(); err != nil {
 			t.Fatal("Close:", err)
 		}
 
@@ -804,19 +804,19 @@ func TestCreateFSSetNlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("data")); err != nil {
+	if _, err = f.Write([]byte("data")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.SetNlink("/file.txt", 42); err != nil {
+	if err = fsys.SetNlink("/file.txt", 42); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Close(); err != nil {
+	if err = fsys.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
@@ -856,11 +856,11 @@ func TestCreateFSDirNlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Close(); err != nil {
+	if err = fsys.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
@@ -891,15 +891,15 @@ func TestCreateFSWithTempDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("hello")); err != nil {
+	if _, err = f.Write([]byte("hello")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Close(); err != nil {
+	if err = fsys.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
@@ -1010,11 +1010,11 @@ func TestWriterOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("hello world\n")); err != nil {
+	if _, err = f.Write([]byte("hello world\n")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1055,11 +1055,11 @@ func TestWriterOpenDataFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("data file content\n")); err != nil {
+	if _, err = f.Write([]byte("data file content\n")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1090,7 +1090,7 @@ func TestWriterOpenEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1121,31 +1121,31 @@ func TestWriterStat(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("content\n")); err != nil {
+	if _, err = f.Write([]byte("content\n")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Chmod(0o755); err != nil {
+	if err = f.Chmod(0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Chtimes("/file.txt", time.Time{}, time.Unix(1700000000, 123456789)); err != nil {
+	if err = fsys.Chtimes("/file.txt", time.Time{}, time.Unix(1700000000, 123456789)); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Mkdir("/dir", 0o700); err != nil {
+	if err = fsys.Mkdir("/dir", 0o700); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Symlink("file.txt", "/link"); err != nil {
+	if err = fsys.Symlink("file.txt", "/link"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Mknod("/null", fs.ModeDevice|fs.ModeCharDevice|0o666, 1<<8|3); err != nil {
+	if err = fsys.Mknod("/null", fs.ModeDevice|fs.ModeCharDevice|0o666, 1<<8|3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1245,11 +1245,11 @@ func TestWriterReadDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f1.Write([]byte("hello")); err != nil {
+	if _, err = f1.Write([]byte("hello")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f1.Close(); err != nil {
+	if err = f1.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1258,15 +1258,15 @@ func TestWriterReadDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f2.Write([]byte("nested")); err != nil {
+	if _, err = f2.Write([]byte("nested")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f2.Close(); err != nil {
+	if err = f2.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Symlink("hello.txt", "/link"); err != nil {
+	if err = fsys.Symlink("hello.txt", "/link"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1350,7 +1350,7 @@ func TestWriterOpenErrors(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if _, err := f.Write([]byte("data")); err != nil {
+		if _, err = f.Write([]byte("data")); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1359,7 +1359,7 @@ func TestWriterOpenErrors(t *testing.T) {
 			t.Fatal("expected error opening file still being written")
 		}
 
-		if err := f.Close(); err != nil {
+		if err = f.Close(); err != nil {
 			t.Fatal(err)
 		}
 
@@ -1442,15 +1442,15 @@ func TestMetadataOnlyNoFileData(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if _, err := f.Write(marker); err != nil {
+		if _, err = f.Write(marker); err != nil {
 			t.Fatal(err)
 		}
 
-		if err := f.Close(); err != nil {
+		if err = f.Close(); err != nil {
 			t.Fatal(err)
 		}
 
-		if err := w.Close(); err != nil {
+		if err = w.Close(); err != nil {
 			t.Fatal("Close:", err)
 		}
 
@@ -1491,11 +1491,11 @@ func TestMetadataOnlyNoFileData(t *testing.T) {
 		// Build a source FS where entries carry pre-existing chunks.
 		srcFS := newChunkedFS(marker)
 
-		if err := w.CopyFrom(srcFS, erofs.MetadataOnly()); err != nil {
+		if err = w.CopyFrom(srcFS, erofs.MetadataOnly()); err != nil {
 			t.Fatal("CopyFrom:", err)
 		}
 
-		if err := w.Close(); err != nil {
+		if err = w.Close(); err != nil {
 			t.Fatal("Close:", err)
 		}
 
@@ -1857,37 +1857,37 @@ func TestCreateFSUIDGID(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if _, err := f.Write([]byte("hello")); err != nil {
+			if _, err = f.Write([]byte("hello")); err != nil {
 				t.Fatal(err)
 			}
 
-			if err := f.Chown(tc.uid, tc.gid); err != nil {
+			if err = f.Chown(tc.uid, tc.gid); err != nil {
 				t.Fatal(err)
 			}
 
-			if err := f.Close(); err != nil {
+			if err = f.Close(); err != nil {
 				t.Fatal(err)
 			}
 
 			// Test UID/GID on a directory via Writer.Chown.
-			if err := fsys.Mkdir("/dir", 0o755); err != nil {
+			if err = fsys.Mkdir("/dir", 0o755); err != nil {
 				t.Fatal(err)
 			}
 
-			if err := fsys.Chown("/dir", tc.uid, tc.gid); err != nil {
+			if err = fsys.Chown("/dir", tc.uid, tc.gid); err != nil {
 				t.Fatal(err)
 			}
 
 			// Test UID/GID on a symlink.
-			if err := fsys.Symlink("file.txt", "/link"); err != nil {
+			if err = fsys.Symlink("file.txt", "/link"); err != nil {
 				t.Fatal(err)
 			}
 
-			if err := fsys.Chown("/link", tc.uid, tc.gid); err != nil {
+			if err = fsys.Chown("/link", tc.uid, tc.gid); err != nil {
 				t.Fatal(err)
 			}
 
-			if err := fsys.Close(); err != nil {
+			if err = fsys.Close(); err != nil {
 				t.Fatal("Close:", err)
 			}
 
@@ -1961,28 +1961,28 @@ func TestCopyFromStatSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("content")); err != nil {
+	if _, err = f.Write([]byte("content")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Chown("/mydir/file.txt", 2000, 2000); err != nil {
+	if err = w.Chown("/mydir/file.txt", 2000, 2000); err != nil {
 		t.Fatal(err)
 	}
 
 	// Add a character device with custom ownership.
-	if err := w.Mknod("/mydir/null", fs.ModeDevice|fs.ModeCharDevice|0o666, 1<<8|3); err != nil {
+	if err = w.Mknod("/mydir/null", fs.ModeDevice|fs.ModeCharDevice|0o666, 1<<8|3); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Chown("/mydir/null", 3000, 3000); err != nil {
+	if err = w.Chown("/mydir/null", 3000, 3000); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1996,11 +1996,11 @@ func TestCopyFromStatSource(t *testing.T) {
 	var dstBuf erofstest.TestBuffer
 
 	w2 := erofs.Create(&dstBuf)
-	if err := w2.CopyFrom(srcFS); err != nil {
+	if err = w2.CopyFrom(srcFS); err != nil {
 		t.Fatal("CopyFrom:", err)
 	}
 
-	if err := w2.Close(); err != nil {
+	if err = w2.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
