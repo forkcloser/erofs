@@ -23,11 +23,11 @@ func TestWriterRemoveFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("keep\n")); err != nil {
+	if _, err = f.Write([]byte("keep\n")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -36,19 +36,19 @@ func TestWriterRemoveFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f2.Write([]byte("drop\n")); err != nil {
+	if _, err = f2.Write([]byte("drop\n")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f2.Close(); err != nil {
+	if err = f2.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Remove("/drop.txt"); err != nil {
+	if err = w.Remove("/drop.txt"); err != nil {
 		t.Fatal("Remove:", err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
@@ -111,7 +111,7 @@ func TestWriterRemoveNonEmptyDirFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -164,23 +164,23 @@ func TestWriterRemoveSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("x\n")); err != nil {
+	if _, err = f.Write([]byte("x\n")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Symlink("target", "/link"); err != nil {
+	if err = w.Symlink("target", "/link"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Remove("/link"); err != nil {
+	if err = w.Remove("/link"); err != nil {
 		t.Fatal("Remove symlink:", err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -206,27 +206,27 @@ func TestWriterRemoveHardlinkAlias(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("hardlink payload\n")); err != nil {
+	if _, err = f.Write([]byte("hardlink payload\n")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Link("/orig", "/alias1"); err != nil {
+	if err = w.Link("/orig", "/alias1"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Link("/orig", "/alias2"); err != nil {
+	if err = w.Link("/orig", "/alias2"); err != nil {
 		t.Fatal(err)
 	}
 	// Remove one alias.
-	if err := w.Remove("/alias1"); err != nil {
+	if err = w.Remove("/alias1"); err != nil {
 		t.Fatal("Remove alias:", err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -266,28 +266,28 @@ func TestWriterRemoveHardlinkCanonicalPromotes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("promote me\n")); err != nil {
+	if _, err = f.Write([]byte("promote me\n")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Link("/orig", "/alias1"); err != nil {
+	if err = w.Link("/orig", "/alias1"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Link("/orig", "/alias2"); err != nil {
+	if err = w.Link("/orig", "/alias2"); err != nil {
 		t.Fatal(err)
 	}
 
 	// Remove the canonical entry; data should survive via the aliases.
-	if err := w.Remove("/orig"); err != nil {
+	if err = w.Remove("/orig"); err != nil {
 		t.Fatal("Remove canonical:", err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -326,27 +326,27 @@ func TestWriterRemoveHardlinkAllAliases(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("doomed\n")); err != nil {
+	if _, err = f.Write([]byte("doomed\n")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Link("/orig", "/alias"); err != nil {
+	if err = w.Link("/orig", "/alias"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Remove("/orig"); err != nil {
+	if err = w.Remove("/orig"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Remove("/alias"); err != nil {
+	if err = w.Remove("/alias"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -399,15 +399,15 @@ func TestWriterRemoveAllRecursive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.RemoveAll("/dir"); err != nil {
+	if err = w.RemoveAll("/dir"); err != nil {
 		t.Fatal("RemoveAll:", err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -447,7 +447,7 @@ func TestWriterRemoveAllNonDirectoryAncestor(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -479,15 +479,15 @@ func TestWriterRemoveAllFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.RemoveAll("/drop.txt"); err != nil {
+	if err = w.RemoveAll("/drop.txt"); err != nil {
 		t.Fatal("RemoveAll file:", err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -518,27 +518,27 @@ func TestWriterRemoveAllHardlinkInside(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("payload\n")); err != nil {
+	if _, err = f.Write([]byte("payload\n")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Mkdir("/scratch", 0o755); err != nil {
+	if err = w.Mkdir("/scratch", 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Link("/keep/orig", "/scratch/alias"); err != nil {
+	if err = w.Link("/keep/orig", "/scratch/alias"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.RemoveAll("/scratch"); err != nil {
+	if err = w.RemoveAll("/scratch"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -572,26 +572,26 @@ func TestMergeWhiteoutHardlinkTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("linked\n")); err != nil {
+	if _, err = f.Write([]byte("linked\n")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w.Link("/orig", "/dir/alias"); err != nil {
+	if err = w.Link("/orig", "/dir/alias"); err != nil {
 		t.Fatal(err)
 	}
 
 	overlay := fstest.MapFS{
 		".wh.orig": {Data: []byte{}, Mode: 0o644},
 	}
-	if err := w.CopyFrom(overlay, erofs.Merge()); err != nil {
+	if err = w.CopyFrom(overlay, erofs.Merge()); err != nil {
 		t.Fatal("CopyFrom overlay:", err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 

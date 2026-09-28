@@ -57,7 +57,7 @@ func buildExampleImage() string {
 	}
 
 	w := erofs.Create(out)
-	if err := w.Mkdir("/usr", 0o755); err != nil {
+	if err = w.Mkdir("/usr", 0o755); err != nil {
 		log.Fatal(err)
 	}
 
@@ -95,19 +95,19 @@ func ExampleCreate() {
 		log.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("hello world\n")); err != nil {
+	if _, err = f.Write([]byte("hello world\n")); err != nil {
 		log.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		log.Fatal(err)
 	}
 
-	if err := w.Mkdir("/dir", 0o755); err != nil {
+	if err = w.Mkdir("/dir", 0o755); err != nil {
 		log.Fatal(err)
 	}
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		log.Fatal(err)
 	}
 

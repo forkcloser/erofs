@@ -53,7 +53,7 @@ func TestCreateRejectsSecondOpenFile(t *testing.T) {
 	t.Logf("rejected with: %v", err)
 
 	// Closing the first file releases the slot.
-	if err := f1.Close(); err != nil {
+	if err = f1.Close(); err != nil {
 		t.Fatal(err)
 	}
 

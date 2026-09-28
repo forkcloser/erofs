@@ -213,11 +213,11 @@ func TestChunkMapSurvivesReindex(t *testing.T) {
 	out2 := &seekBuf{}
 
 	w2 := Create(out2, WithBuildTime(1000, 0))
-	if err := w2.CopyFrom(img1, MetadataOnly()); err != nil {
+	if err = w2.CopyFrom(img1, MetadataOnly()); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := w2.Close(); err != nil {
+	if err = w2.Close(); err != nil {
 		t.Fatal(err)
 	}
 

@@ -32,11 +32,11 @@ func buildAndVerify(t *testing.T, build func(w *erofs.Writer)) fs.FS {
 	w := erofs.Create(f)
 	build(w)
 
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 

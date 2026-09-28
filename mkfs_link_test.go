@@ -48,47 +48,47 @@ func TestWriterLink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := f.Write([]byte("shared content\n")); err != nil {
+	if _, err = f.Write([]byte("shared content\n")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := f.Close(); err != nil {
+	if err = f.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Chmod("/data.txt", 0o640); err != nil {
+	if err = fsys.Chmod("/data.txt", 0o640); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Chown("/data.txt", 12, 34); err != nil {
+	if err = fsys.Chown("/data.txt", 12, 34); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Setxattr("/data.txt", "user.tag", "v"); err != nil {
+	if err = fsys.Setxattr("/data.txt", "user.tag", "v"); err != nil {
 		t.Fatal(err)
 	}
 
 	mtime := time.Unix(1700000000, 0)
-	if err := fsys.Chtimes("/data.txt", mtime, mtime); err != nil {
+	if err = fsys.Chtimes("/data.txt", mtime, mtime); err != nil {
 		t.Fatal(err)
 	}
 
 	// One link beside the target, one in a (implicitly created) subdir, and
 	// one through an existing link (must resolve to the same inode, not chain).
-	if err := fsys.Link("/data.txt", "/hard.txt"); err != nil {
+	if err = fsys.Link("/data.txt", "/hard.txt"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Link("/data.txt", "/dir/hard2.txt"); err != nil {
+	if err = fsys.Link("/data.txt", "/dir/hard2.txt"); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := fsys.Link("/hard.txt", "/hard3.txt"); err != nil {
+	if err = fsys.Link("/hard.txt", "/hard3.txt"); err != nil {
 		t.Fatal(err)
 	}
 
 	// Metadata through an alias must hit the shared inode.
-	if err := fsys.Chown("/hard.txt", 56, 78); err != nil {
+	if err = fsys.Chown("/hard.txt", 56, 78); err != nil {
 		t.Fatal(err)
 	}
 
@@ -102,7 +102,7 @@ func TestWriterLink(t *testing.T) {
 		t.Errorf("writer stat via alias: mode %v, want 0640", wfi.Mode())
 	}
 
-	if err := fsys.Close(); err != nil {
+	if err = fsys.Close(); err != nil {
 		t.Fatal("Close:", err)
 	}
 

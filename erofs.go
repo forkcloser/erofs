@@ -914,7 +914,6 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 		}
 
 		var (
-			addr     int64
 			deviceID uint16
 			err      error
 		)
@@ -1498,7 +1497,7 @@ func (b *file) readInfo() (ino *inode, err error) {
 	// Every read path — loadBlock, openDirect, buildChunkDataRanges, the xattr
 	// area — derives its offsets from an *inode this returns, so bounding the
 	// nid here is what keeps all of that arithmetic in range.
-	if err := b.img.checkNid(b.nid); err != nil {
+	if err = b.img.checkNid(b.nid); err != nil {
 		return nil, err
 	}
 
@@ -2168,7 +2167,10 @@ func (d *dir) lookup(target string) (uint64, fs.FileMode, error) {
 	// entry of each block to find which block may contain the target.
 	// The last loaded block is retained to avoid reloading it for the
 	// intra-block search.
-	var lastBlk *block
+	var (
+		lastBlk, b *block
+		firstName  []byte
+	)
 
 	lastIdx := -1
 
@@ -2177,7 +2179,7 @@ func (d *dir) lookup(target string) (uint64, fs.FileMode, error) {
 		mid := lo + (hi-lo)/2
 		pos := int64(mid) * blkSize
 
-		b, err := d.img.loadBlock(fi, pos)
+		b, err = d.img.loadBlock(fi, pos)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				hi = mid
@@ -2193,7 +2195,7 @@ func (d *dir) lookup(target string) (uint64, fs.FileMode, error) {
 
 		buf := b.bytes()
 
-		firstName, err := blockFirstName(buf)
+		firstName, err = blockFirstName(buf)
 		if err != nil {
 			d.img.putBlock(b)
 

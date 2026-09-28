@@ -204,7 +204,7 @@ func buildFuzzImage(t testing.TB, entries []erofstest.WriterToTar, files, dirs [
 	}
 
 	path := filepath.Join(dir, "fuzz.erofs")
-	if err := erofstest.ConvertTarErofs(context.Background(), tarStream, path, "", nil); err != nil {
+	if err = erofstest.ConvertTarErofs(context.Background(), tarStream, path, "", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -554,12 +554,12 @@ func fuzzPartialReadDir(f *testing.F, img fuzzImage) {
 			return
 		}
 
-		var all []fs.DirEntry
+		var all, entries []fs.DirEntry
 
 		sawEOF := false
 
 		for {
-			entries, err := rdf.ReadDir(n)
+			entries, err = rdf.ReadDir(n)
 			all = append(all, entries...)
 
 			if err == io.EOF {

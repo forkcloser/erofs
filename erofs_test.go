@@ -92,7 +92,7 @@ func TestErofs(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer func() {
-			if err := f.Close(); err != nil {
+			if err = f.Close(); err != nil {
 				t.Fatal(err)
 			}
 		}()
