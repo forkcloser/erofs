@@ -123,7 +123,9 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 		// widened before scaling: the multiply would otherwise wrap in uint32.
 		sharedAddr := int64(b.img.sb.XattrBlkAddr)<<b.img.sb.BlkSizeBits + int64(xattrAddr)*4
 
-		sblk, err := b.img.loadAt(sharedAddr, int64(1<<b.img.sb.BlkSizeBits))
+		var sblk *block
+
+		sblk, err = b.img.loadAt(sharedAddr, int64(1<<b.img.sb.BlkSizeBits))
 		if err != nil {
 			return fmt.Errorf("failed to read shared xattr body for nid %d: %w", b.nid, err)
 		}
@@ -161,7 +163,7 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 		name := prefix + string(sb[:xattrEntry.NameLen])
 
 		sb = sb[xattrEntry.NameLen:]
-		if err := setXattr(stat, b.nid, name, string(sb[:xattrEntry.ValueLen])); err != nil {
+		if err = setXattr(stat, b.nid, name, string(sb[:xattrEntry.ValueLen])); err != nil {
 			b.img.putBlock(sblk)
 			return err
 		}
