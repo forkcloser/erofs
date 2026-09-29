@@ -1,15 +1,11 @@
-# `verify` and `gate` follow limen's canonical ci.yaml — keep them in sync.
-# The erofs-utils step and the mkfs-windows / verify-windows-image jobs are
-# INTERIM: see .github/scripts/build-erofs-utils.sh for what retires them.
+# `verify`, `fuzz`, `tools` and `gate` follow limen's canonical ci.yaml — keep
+# them in sync. The erofs-utils steps and the mkfs-windows /
+# verify-windows-image jobs are INTERIM: see .github/scripts/build-erofs-utils.sh
+# for what retires them.
 #
-# Design: minimal GitHub glue around the same tooling every developer runs
-# locally. The only marketplace action is GitHub's own checkout, pinned by
-# commit SHA (a tag can be moved to malicious code; a SHA cannot). Everything
-# else is pinned, checksum-verified shell: aqua installs the repo's tools at
-# the versions aqua.yaml pins, and `just` runs the exact recipes a laptop
-# runs — CI green means the same thing as local green, by construction.
-# Deliberately absent: runner egress filtering — the available options are
-# third-party actions, which this workflow avoids on principle.
+# Minimal glue: GitHub's own actions pinned by SHA, aqua at aqua.yaml's pins,
+# `just` running the recipes a laptop runs. No third-party actions, hence no
+# egress-filtering action either.
 name: ci
 
 on:
@@ -27,11 +23,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Every run step is bash on every runner: without this, windows defaults to
-# PowerShell, which never sees the git-bash environment setup-aqua prepares
-# (the whole matrix is designed to run the recipes under git-bash). Explicit
-# bash also means `-eo pipefail` everywhere, which the implicit linux/macos
-# default lacks.
+# Explicit bash everywhere: windows defaults to PowerShell and never sees
+# git-bash's environment; explicit bash also brings -eo pipefail.
 defaults:
   run:
     shell: bash
@@ -41,20 +34,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Pinned images, not -latest: a runner bump is a reviewed change.
-        # macOS is not redundant: its /bin/bash is 3.2, the portability floor
-        # the shared recipes target. arm64 (ubuntu-24.04-arm, windows-11-arm)
-        # and windows cover the rest of the supported release matrix — both
-        # windows legs run the recipes under git-bash (native arm64 tools
-        # where upstream ships them, Prism-emulated amd64 via aqua's
-        # windows_arm_emulation where it does not).
-        # These names are NOT the ruleset's required contexts — the `gate` job
-        # below is, precisely so this list can change without touching any
-        # repository's branch protection.
+        # Pinned images, never -latest. macOS is not redundant: its /bin/bash is
+        # 3.2, the floor the recipes target. Both windows legs run under
+        # git-bash. These names are NOT the ruleset's required contexts —
+        # `gate` is, so this list can change freely.
         os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-2025, windows-11-arm]
     runs-on: ${{ matrix.os }}
-    # Generous for the windows legs: those runners are markedly slower, and the
-    # per-GOOS lint recipes now run three legs each.
+    # Generous for the windows legs, which are markedly slower.
     timeout-minutes: 45
     permissions:
       contents: read
@@ -71,11 +57,49 @@ jobs:
       - name: Install aqua (pinned, checksum-verified)
         uses: ./.github/actions/setup-aqua
 
+      # Not here: turning Defender's real-time scan off. Tried on the windows
+      # legs, before the caches, and measured neutral twice against the same
+      # commit without it — the slowness is process creation and small-file
+      # writes under git-bash, not the scanner.
+
+      # aqua's package store, keyed on the exact pins and per architecture
+      # (the store holds native binaries). A warm store turns every lazy first
+      # use below into a link; the fallback key keeps the tools a pin bump did
+      # not touch, and the changed one downloads and verifies as before.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.AQUA_ROOT_DIR }}/pkgs
+          key: aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('aqua.yaml', 'aqua-checksums.json', '.limen/aqua-registry.yaml') }}
+          restore-keys: |
+            aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Install pinned tools
-        # Link-only: the shims download each tool lazily on first use (and it
-        # is verified against the committed aqua-checksums.json then), so a
-        # job only ever pays for the tools its recipes actually run.
+        # Link-only: tools download lazily on first use, checksum-verified; a
+        # job pays only for what its recipes run.
         run: aqua install --only-link
+
+      # The Go build and module caches, plus the linter's (build/cache/, see
+      # main.just). The per-platform analysis legs compile the whole module
+      # graph five times, cold, on every run without this. Paths come from the
+      # pinned go itself — they differ per OS — and the key carries its version
+      # and every go.sum; a stale restore is harmless (the build cache is
+      # content-addressed, the module cache is checksum-verified), so the
+      # fallback key is always worth taking.
+      - id: gocache
+        run: |
+          echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "mod=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          echo "version=$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.gocache.outputs.build }}
+            ${{ steps.gocache.outputs.mod }}
+            build/cache
+          key: go-${{ runner.os }}-${{ runner.arch }}-${{ steps.gocache.outputs.version }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            go-${{ runner.os }}-${{ runner.arch }}-${{ steps.gocache.outputs.version }}-
+            go-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Lint
         run: just lint
@@ -110,6 +134,14 @@ jobs:
       # pinned limen must be on PATH here as in every other job that runs it.
       - name: Install aqua (pinned, checksum-verified)
         uses: ./.github/actions/setup-aqua
+
+      # The verify legs' aqua store, same key.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.AQUA_ROOT_DIR }}/pkgs
+          key: aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('aqua.yaml', 'aqua-checksums.json', '.limen/aqua-registry.yaml') }}
+          restore-keys: |
+            aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install pinned tools
         run: aqua install --only-link
@@ -147,8 +179,33 @@ jobs:
       - name: Install aqua (pinned, checksum-verified)
         uses: ./.github/actions/setup-aqua
 
+      # The verify legs' aqua store and Go caches, same keys: this is the
+      # windows-2025 leg again, with an image.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.AQUA_ROOT_DIR }}/pkgs
+          key: aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('aqua.yaml', 'aqua-checksums.json', '.limen/aqua-registry.yaml') }}
+          restore-keys: |
+            aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Install pinned tools
         run: aqua install --only-link
+
+      - id: gocache
+        run: |
+          echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "mod=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          echo "version=$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ steps.gocache.outputs.build }}
+            ${{ steps.gocache.outputs.mod }}
+            build/cache
+          key: go-${{ runner.os }}-${{ runner.arch }}-${{ steps.gocache.outputs.version }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            go-${{ runner.os }}-${{ runner.arch }}-${{ steps.gocache.outputs.version }}-
+            go-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Test
         env:
@@ -157,8 +214,11 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         run: just test
 
-  # The canonical fuzz job plus the interim erofs-utils build step (several
-  # targets round-trip through mkfs.erofs).
+  # One linux leg, not the matrix: fuzzing explores the same corpus wherever
+  # it runs, so more legs cost CPU and add nothing. The recipe passes on a
+  # tree with no targets or no Go module, so this job is safe in every
+  # repository. Here it also builds erofs-utils (interim): several targets
+  # round-trip through mkfs.erofs.
   fuzz:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -178,18 +238,15 @@ jobs:
       - name: Build erofs-utils (interim)
         run: .github/scripts/build-erofs-utils.sh native
 
-      # The generated corpus is what makes fuzzing cumulative: each run
-      # starts from every input earlier runs found interesting rather than
-      # from the seeds, so a short budget per run compounds into depth over
-      # months. Keyed on the fuzz sources so a changed target restarts its
-      # own corpus; restore-keys keep the rest. GitHub's own action, pinned
-      # by SHA like checkout.
+      # The cached corpus is what makes fuzzing cumulative across runs. Keyed
+      # on the fuzz sources so a changed target restarts its corpus;
+      # restore-keys keep the rest.
       - id: fuzzdir
         run: echo "dir=$(go env GOCACHE)/fuzz" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.fuzzdir.outputs.dir }}
-          key: fuzz-corpus-${{ runner.os }}-${{ hashFiles('**/*_fuzz_test.go') }}
+          key: fuzz-corpus-${{ runner.os }}-${{ hashFiles('**/*_fuzz_test.go', '**/fuzz_test.go') }}
           restore-keys: |
             fuzz-corpus-${{ runner.os }}-
 
@@ -207,23 +264,52 @@ jobs:
         if: failure()
         with:
           name: fuzz-crashers
-          path: testdata/fuzz/
+          path: '**/testdata/fuzz/'
           if-no-files-found: ignore
 
-  # The ONE required status check (see defaultRequiredChecks in
-  # internal/github/audit.go). Branch protection names contexts as strings, so
-  # requiring the matrix legs directly would bake this workflow's runner list
-  # into every repository's ruleset — and a project whose matrix differs then
-  # waits forever on checks that never report. This job collapses the matrix,
-  # whatever its shape, to a single stable name: change the legs above freely,
-  # the ruleset never moves.
+  # Every pin resolves. The verify legs link only, and a link verifies
+  # nothing: an asset that is missing from a release, or that fails its
+  # checksum, would merge green and fail at first use. One linux leg pays for
+  # the real install; aqua's package store is cached on the exact pins, so a
+  # warm key costs seconds and a changed pin is always a real install. (The
+  # Go-built tools are tools/go.mod directives, built by the verify legs.)
+  tools:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install aqua (pinned, checksum-verified)
+        uses: ./.github/actions/setup-aqua
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.AQUA_ROOT_DIR }}/pkgs
+          # The same key as the verify legs', so this job and the linux leg
+          # share one store — and no fallback key here: a changed pin must be
+          # a real install, which is what this job exists to prove.
+          key: aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('aqua.yaml', 'aqua-checksums.json', '.limen/aqua-registry.yaml') }}
+
+      - name: Install every pinned tool
+        run: aqua install
+
+  # The ONE required status check (defaultRequiredChecks in
+  # internal/github/audit.go). Requiring the matrix legs by name would bake
+  # this runner list into every ruleset; this job collapses the matrix to one
+  # stable name.
   gate:
-    needs: [verify, verify-windows-image, fuzz]
+    needs: [verify, verify-windows-image, fuzz, tools]
     # always(), and the result asserted explicitly. Without always() a failed
     # or cancelled dependency SKIPS this job instead of failing it, and a
     # skipped required check does not block a merge — branch protection that
     # quietly stops protecting. `needs.verify.result` is success only when
-    # every matrix leg succeeded.
+    # every matrix leg succeeded; verify-windows-image, fuzz and tools are
+    # asserted alongside so an image test, a crasher, or a pin that does not
+    # build blocks a merge the same way a failing test does.
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -236,8 +322,11 @@ jobs:
           RESULT: ${{ needs.verify.result }}
           RESULT_WINDOWS_IMAGE: ${{ needs.verify-windows-image.result }}
           RESULT_FUZZ: ${{ needs.fuzz.result }}
+          RESULT_TOOLS: ${{ needs.tools.result }}
         run: |
           printf 'verify: %s\n' "$RESULT"
           printf 'verify-windows-image: %s\n' "$RESULT_WINDOWS_IMAGE"
           printf 'fuzz: %s\n' "$RESULT_FUZZ"
-          [ "$RESULT" = "success" ] && [ "$RESULT_WINDOWS_IMAGE" = "success" ] && [ "$RESULT_FUZZ" = "success" ]
+          printf 'tools: %s\n' "$RESULT_TOOLS"
+          [ "$RESULT" = "success" ] && [ "$RESULT_WINDOWS_IMAGE" = "success" ] \
+            && [ "$RESULT_FUZZ" = "success" ] && [ "$RESULT_TOOLS" = "success" ]
