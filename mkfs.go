@@ -770,6 +770,8 @@ func (e *fsEntry) inSubtreeOf(d *fsEntry) bool {
 // Opens files for data when Entry.Data is nil.
 // Reads symlink targets via readLinker interface when Entry.LinkTarget is empty.
 // If src implements blockSizer, the image block size is set accordingly.
+//
+//nolint:gocognit // the walk callback: one case per entry kind, each with its own metadata and data source
 func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
@@ -1491,6 +1493,8 @@ func (de *dirEntry) Info() (fs.FileInfo, error) { return &writerFileInfo{entry: 
 // the source did not hand over in be: as chunk indexes in metadata-only
 // mode, through a direct section reader when the source is an EROFS image,
 // and by opening the file otherwise.
+//
+//nolint:gocognit // one case per data source, each with its own checks, as the doc says
 func (fsys *Writer) addRegular(src fs.FS, fpath, p string, info fs.FileInfo, be *builder.Entry) error {
 	// In metadata-only mode, data is referenced via chunk indexes
 	// from the source — no need to open the file.
@@ -1560,6 +1564,8 @@ func (fsys *Writer) addRegular(src fs.FS, fpath, p string, info fs.FileInfo, be 
 // add adds a single entry. Mode and Size come from info; extended metadata
 // comes from info.Sys(). Checks Sys() for *builder.Entry first, then
 // platform-specific stat types as a fallback for plain fs.FS sources.
+//
+//nolint:gocognit // one entry's registration: root, hardlink alias, placement, then where its data goes
 func (fsys *Writer) add(p string, info fs.FileInfo) error {
 	p = cleanPath(p)
 	if err := checkPathLen(p); err != nil {
@@ -1867,6 +1873,8 @@ func (fsys *Writer) unlinkEntry(e *fsEntry) {
 // list on every entry would tax the common case for the exceptional one.
 // The lowest path wins so the outcome — and thus the image — is
 // deterministic regardless of link creation order.
+//
+//nolint:gocognit // the alias search and the heir's takeover belong together
 func (fsys *Writer) promoteAlias(target *fsEntry) {
 	var (
 		aliases []*fsEntry
@@ -1927,6 +1935,8 @@ func (fsys *Writer) promoteAlias(target *fsEntry) {
 
 // buildErofsTree converts the fsEntry tree into an erofsEntry tree via BFS.
 // Children are sorted for deterministic output. The Writer is consumed.
+//
+//nolint:gocognit // the BFS conversion, aliases wired once every target is converted
 func (fsys *Writer) buildErofsTree() *erofsEntry {
 	type pair struct {
 		fs *fsEntry
@@ -2222,6 +2232,8 @@ func (fsys *Writer) remapChunkDevices(p string, chunks []builder.Chunk) error {
 //   - For data entries: r.Offset >= 0 and block-aligned; r.Device == 0.
 //   - For non-final data entries: r.Size must be a multiple of blockSize.
 //     The final entry may have a partial last block to match the file tail.
+//
+//nolint:gocognit // one loop validating each range and emitting its chunks, hole or data
 func (fsys *Writer) chunksFromRanges(ranges []DataRange, fileSize int64) ([]builder.Chunk, error) {
 	blockSize := uint64(fsys.resolveBlockSize())
 

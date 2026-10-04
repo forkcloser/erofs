@@ -114,6 +114,8 @@ func (w *erofsWriter) chunkCount(e *erofsEntry) int {
 // checkLimits rejects entries the on-disk format cannot represent. It runs
 // before any serialization, so an entry that would be silently truncated into
 // a narrower field never reaches the metadata buffer.
+//
+//nolint:gocognit // one loop over the entries, each on-disk limit checked in place
 func (w *erofsWriter) checkLimits() error {
 	for _, e := range w.entries {
 		// A zero-length target is not a resolvable symlink: readers fold it
@@ -296,25 +298,24 @@ func (w *erofsWriter) assignDataBlocks() {
 
 		metaBlocks := (totalMetaBytes + w.blockSize - 1) / w.blockSize
 
-		addr := uint32(w.sbAreaBlocks() + metaBlocks)
-		for _, e := range w.entries {
-			if ds := w.flatPlainDataSize(e); ds > 0 {
-				e.dataBlkAddr = addr
-				addr += uint32((ds + w.blockSize - 1) / w.blockSize)
-			}
-		}
+		w.assignFlatPlainAddrs(uint32(w.sbAreaBlocks() + metaBlocks))
 	} else {
 		// Data-first: data starts after superblock area.
-		addr := uint32(w.sbAreaBlocks())
-		for _, e := range w.entries {
-			if ds := w.flatPlainDataSize(e); ds > 0 {
-				e.dataBlkAddr = addr
-				addr += uint32((ds + w.blockSize - 1) / w.blockSize)
-			}
-		}
-
-		w.metaBlkAddr = addr // metadata follows data
+		w.metaBlkAddr = w.assignFlatPlainAddrs(uint32(w.sbAreaBlocks())) // metadata follows data
 	}
+}
+
+// assignFlatPlainAddrs hands out consecutive block addresses from addr to
+// every flat-plain entry with data, and returns the first block after them.
+func (w *erofsWriter) assignFlatPlainAddrs(addr uint32) uint32 {
+	for _, e := range w.entries {
+		if ds := w.flatPlainDataSize(e); ds > 0 {
+			e.dataBlkAddr = addr
+			addr += uint32((ds + w.blockSize - 1) / w.blockSize)
+		}
+	}
+
+	return addr
 }
 
 // sbAreaSize returns the number of bytes needed for the superblock area
@@ -436,6 +437,8 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 
 // writeMetadataInodes writes inode metadata. Data block addresses must
 // already be assigned on each entry before calling this method.
+//
+//nolint:gocognit // the metadata serialization: each inode's slot, xattrs, trailing data and padding, accounted in one place
 func (w *erofsWriter) writeMetadataInodes(buf io.Writer) error {
 	metaStart := 0
 
@@ -660,6 +663,8 @@ func (w *erofsWriter) writeXattrs(buf io.Writer, e *erofsEntry) error {
 
 // writeChunkIndexes writes chunk index entries for a regular file.
 // Each index entry covers one logical chunk (chunkSize bytes).
+//
+//nolint:gocognit // one loop over logical chunks, stepping through the source chunks as it goes
 func (w *erofsWriter) writeChunkIndexes(buf io.Writer, e *erofsEntry) error {
 	cs := w.entryChunkSize(e)
 	blocksPerChunk := cs / w.blockSize
@@ -729,6 +734,8 @@ func (w *erofsWriter) writeChunkIndexes(buf io.Writer, e *erofsEntry) error {
 }
 
 // writeDirents writes EROFS directory entries packed into block-sized chunks.
+//
+//nolint:gocognit // packs dirents block by block: how many fit, then their serialization
 func (w *erofsWriter) writeDirents(buf io.Writer, e *erofsEntry) (int, error) {
 	type direntInfo struct {
 		name     string
@@ -824,6 +831,8 @@ func (w *erofsWriter) writeDirents(buf io.Writer, e *erofsEntry) (int, error) {
 }
 
 // writeDataBlocks writes data blocks for flat-plain entries directly to out.
+//
+//nolint:gocognit // one case per entry type, each data source copied and padded in place
 func (w *erofsWriter) writeDataBlocks(out io.Writer) error {
 	for _, e := range w.entries {
 		ds := w.flatPlainDataSize(e)

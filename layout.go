@@ -28,6 +28,8 @@ func (w *erofsWriter) inodeFileSize(e *erofsEntry) uint64 {
 }
 
 // planLayout assigns NIDs and determines trailing data sizes for all entries.
+//
+//nolint:gocognit // one pass handing out nids: the layout choice and the block-boundary fallback share its offset arithmetic
 func (w *erofsWriter) planLayout(root *erofsEntry) {
 	// Collect all entries in a deterministic order (DFS, pre-order).
 	// DFS keeps directory contents close to their parent inode,
