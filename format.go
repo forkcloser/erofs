@@ -9,24 +9,12 @@ import (
 	"github.com/forkcloser/erofs/internal/disk"
 )
 
-// Standard xattr name prefix table (index → on-disk NameIndex).
-var xattrPrefixes = [...]struct {
-	index  uint8
-	prefix string
-}{
-	{1, "user."},
-	{2, "system.posix_acl_access"},
-	{3, "system.posix_acl_default"},
-	{4, "trusted."},
-	{5, "lustre."},
-	{6, "security."},
-}
-
-// xattrSplit splits a full xattr name into (NameIndex, suffix).
+// xattrSplit splits a full xattr name into (NameIndex, suffix). The prefixes
+// are the ones xattrIndex spells, so the two directions cannot drift.
 func xattrSplit(name string) (uint8, string) {
-	for _, p := range xattrPrefixes {
-		if strings.HasPrefix(name, p.prefix) {
-			return p.index, name[len(p.prefix):]
+	for idx := xattrIndex(1); idx <= xattrIndexLast; idx++ {
+		if p := idx.String(); strings.HasPrefix(name, p) {
+			return uint8(idx), name[len(p):]
 		}
 	}
 

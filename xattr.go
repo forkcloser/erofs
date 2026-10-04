@@ -18,6 +18,10 @@ import (
 
 type xattrIndex uint8
 
+// xattrIndexLast is the highest name index the format defines (security.).
+// Untyped: a typed constant would turn xattrIndex into an enum.
+const xattrIndexLast = 6
+
 func (idx xattrIndex) String() string {
 	switch idx {
 	case 1:
