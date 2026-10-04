@@ -103,7 +103,7 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 	xh.Unmarshal(xb)
 	xb = xb[disk.SizeXattrBodyHeader:]
 
-	for i := 0; i < int(xh.SharedCount); i++ {
+	for i := range int(xh.SharedCount) {
 		if len(xb) < 4 {
 			pos := disk.SizeXattrBodyHeader + int64(i)*4
 

@@ -771,7 +771,7 @@ func parseXattrsFromBuf(
 	}
 
 	// Resolve shared xattr references.
-	for i := 0; i < int(xh.SharedCount); i++ {
+	for range int(xh.SharedCount) {
 		if pos+4 > len(buf) {
 			return nil, fmt.Errorf("xattr shared block too small: %w", ErrInvalid)
 		}
