@@ -183,11 +183,11 @@ var Basic TestCase = &testCase{ //nolint:gochecknoglobals // immutable fixture: 
 			tc.Symlink("/links/dir-link", "/links/file-via-dirs"),
 			tc.WithXattrs(map[string]string{
 				"user.custom":      "value1",
-				"user.xdg.comment": "some random comment",
+				"user.xdg.comment": "some random comment", //nolint:goconst // fixture data reads as literals
 			}).Dir("/usr/lib/withxattr", 0o600),
 			tc.WithXattrs(map[string]string{
 				"user.xdg.comment": "comment for f1",
-				"user.common":      "same-value",
+				"user.common":      "same-value", //nolint:goconst // fixture data reads as literals
 			}).File("/usr/lib/withxattr/f1", []byte{}, 0o600),
 			tc.WithXattrs(map[string]string{
 				"user.xdg.comment": "comment for f2",

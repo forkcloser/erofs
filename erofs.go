@@ -1376,6 +1376,7 @@ func (img *image) ReadFile(name string) ([]byte, error) {
 	}
 
 	if ftype.IsDir() {
+		//nolint:goconst // PathError.Op is spelled as the os package spells it
 		return nil, &fs.PathError{Op: "read", Path: name, Err: ErrIsDirectory}
 	}
 
