@@ -830,10 +830,12 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 		return nil, fmt.Errorf("block position larger than number of blocks for inode: %w", io.EOF)
 	}
 
-	var addr int64
+	var (
+		addr        int64
+		blockOffset int
+	)
 
 	blockSize := int(1 << img.sb.BlkSizeBits)
-	blockOffset := 0
 	blockEnd := blockSize
 
 	switch fi.inodeLayout {

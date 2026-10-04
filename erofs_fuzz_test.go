@@ -556,14 +556,14 @@ func fuzzPartialReadDir(f *testing.F, img fuzzImage) {
 
 		var all, entries []fs.DirEntry
 
-		sawEOF := false
-
 		for {
 			entries, err = rdf.ReadDir(n)
 			all = append(all, entries...)
 
+			// Per fs.ReadDirFile contract, ReadDir(n>0) returns io.EOF
+			// once the directory is exhausted; any other error ends the
+			// case.
 			if err == io.EOF {
-				sawEOF = true
 				break
 			}
 
@@ -574,12 +574,6 @@ func fuzzPartialReadDir(f *testing.F, img fuzzImage) {
 			if len(all) > 10000 {
 				return
 			}
-		}
-
-		// Per fs.ReadDirFile contract, ReadDir(n>0) must return io.EOF
-		// when the directory is exhausted.
-		if !sawEOF {
-			t.Fatal("ReadDir(n) never returned io.EOF")
 		}
 
 		// After EOF, another call must also return io.EOF with no entries.
