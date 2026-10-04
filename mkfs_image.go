@@ -230,7 +230,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 						target = "/" + base[len(whiteoutPrefix):]
 					}
 
-					fsys.remove(target)
+					fsys.removeTree(target)
 				}
 
 				continue

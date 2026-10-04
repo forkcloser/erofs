@@ -654,7 +654,7 @@ func (fsys *Writer) RemoveAll(name string) error {
 		return fsys.checkNotOpen(fsys.openFile.entry, "remove")
 	}
 
-	fsys.remove(name)
+	fsys.removeTree(name)
 
 	return nil
 }
@@ -860,7 +860,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 				} else {
 					// File whiteout: remove the named entry.
 					target := path.Join(path.Dir(p), base[len(whiteoutPrefix):])
-					fsys.remove(target)
+					fsys.removeTree(target)
 				}
 
 				return nil
@@ -1779,9 +1779,9 @@ func (fsys *Writer) addChild(e *fsEntry) {
 	fsys.byPath[e.path] = e
 }
 
-// remove marks an entry and all its descendants as removed.
+// removeTree marks an entry and all its descendants as removed.
 // Used by Merge to process whiteout deletions.
-func (fsys *Writer) remove(p string) {
+func (fsys *Writer) removeTree(p string) {
 	p = cleanPath(p)
 
 	e, ok := fsys.byPath[p]
