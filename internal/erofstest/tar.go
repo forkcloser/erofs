@@ -292,9 +292,13 @@ func typeFlag(ftype os.FileMode) byte {
 	return tar.TypeBlock
 }
 
+// errContentLength is a tar header whose Size disagrees with the bytes
+// handed over for the entry.
+var errContentLength = errors.New("bad content length")
+
 func writeHeaderAndContent(tw *tar.Writer, h *tar.Header, b []byte) error {
 	if h.Size != int64(len(b)) {
-		return errors.New("bad content length")
+		return errContentLength
 	}
 
 	if err := tw.WriteHeader(h); err != nil {

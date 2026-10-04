@@ -40,11 +40,11 @@ func (b *testBuffer) Seek(offset int64, whence int) (int64, error) {
 	case io.SeekEnd:
 		abs = int64(len(b.buf)) + offset
 	default:
-		return 0, fmt.Errorf("testbuf: invalid whence %d", whence)
+		return 0, fmt.Errorf("testbuf: invalid whence %d", whence) //nolint:err113 // a fake's failure fixture
 	}
 
 	if abs < 0 {
-		return 0, fmt.Errorf("testbuf: negative position %d", abs)
+		return 0, fmt.Errorf("testbuf: negative position %d", abs) //nolint:err113 // a fake's failure fixture
 	}
 
 	b.pos = int(abs)

@@ -236,7 +236,7 @@ func (fsys *Writer) Create(name string) (*File, error) {
 
 	name = cleanPath(name)
 	if name == "/" {
-		return nil, errors.New("mkfs: cannot create file at root")
+		return nil, fmt.Errorf("mkfs: cannot create file at root: %w", fs.ErrExist)
 	}
 
 	if err := fsys.checkPath(name); err != nil {
@@ -287,8 +287,8 @@ func (fsys *Writer) checkNoOpenFile(action string) error {
 		return nil
 	}
 
-	return fmt.Errorf("mkfs: %q is still open for writing; close it before you %s",
-		fsys.openFile.entry.path, action)
+	return fmt.Errorf("mkfs: %q is %w; close it before you %s",
+		fsys.openFile.entry.path, errFileOpen, action)
 }
 
 // Mkdir creates a directory. Only permission bits from perm are used,
@@ -332,7 +332,7 @@ func (fsys *Writer) Symlink(oldname, newname string) error {
 
 	newname = cleanPath(newname)
 	if newname == "/" {
-		return errors.New("mkfs: cannot create symlink at root")
+		return fmt.Errorf("mkfs: cannot create symlink at root: %w", fs.ErrExist)
 	}
 
 	if oldname == "" {
@@ -373,7 +373,7 @@ func (fsys *Writer) Link(oldname, newname string) error {
 
 	newname = cleanPath(newname)
 	if newname == "/" {
-		return errors.New("mkfs: cannot link at root")
+		return fmt.Errorf("mkfs: cannot link at root: %w", fs.ErrExist)
 	}
 
 	target, ok := fsys.byPath[oldname]
@@ -386,7 +386,7 @@ func (fsys *Writer) Link(oldname, newname string) error {
 	}
 
 	if target.mode&disk.StatTypeMask == disk.StatTypeDir {
-		return fmt.Errorf("mkfs: cannot hardlink directory %q", oldname)
+		return fmt.Errorf("mkfs: cannot hardlink directory %q: %w", oldname, ErrIsDirectory)
 	}
 
 	if err := fsys.checkPath(newname); err != nil {
@@ -423,7 +423,7 @@ func (fsys *Writer) Mknod(name string, mode fs.FileMode, rdev uint32) error {
 
 	name = cleanPath(name)
 	if name == "/" {
-		return errors.New("mkfs: cannot mknod at root")
+		return fmt.Errorf("mkfs: cannot mknod at root: %w", fs.ErrExist)
 	}
 
 	if err := fsys.checkPath(name); err != nil {
@@ -659,16 +659,22 @@ func (fsys *Writer) RemoveAll(name string) error {
 	return nil
 }
 
-// ErrDirNotEmpty is returned (wrapped in an *fs.PathError) by Remove when
-// the named directory still has children. Use RemoveAll to remove a
-// directory together with its contents.
-var ErrDirNotEmpty = errors.New("directory not empty")
+var (
+	// ErrDirNotEmpty is returned (wrapped in an *fs.PathError) by Remove when
+	// the named directory still has children. Use RemoveAll to remove a
+	// directory together with its contents.
+	ErrDirNotEmpty = errors.New("directory not empty")
+
+	// errFileOpen is the state of the one file a Writer has open from
+	// Create: until it is closed, nothing else may touch the image.
+	errFileOpen = errors.New("still open for writing")
+)
 
 // checkNotOpen refuses to act on the file currently open from Create.
 func (fsys *Writer) checkNotOpen(e *fsEntry, action string) error {
 	if fsys.openFile != nil && fsys.openFile.entry == e {
-		return fmt.Errorf("mkfs: %q is still open for writing; close it before you %s it",
-			e.path, action)
+		return fmt.Errorf("mkfs: %q is %w; close it before you %s it",
+			e.path, errFileOpen, action)
 	}
 
 	return nil
@@ -952,7 +958,7 @@ func (fsys *Writer) Close() error {
 	}
 
 	if fsys.closed {
-		return errors.New("mkfs: FS already closed")
+		return fmt.Errorf("mkfs: FS already closed: %w", fs.ErrClosed)
 	}
 	// A file's size is recorded by File.Close. Serializing now would emit it
 	// as empty and drop whatever was already written to it.
@@ -1047,7 +1053,7 @@ func (fsys *Writer) Open(name string) (fs.File, error) {
 
 	case disk.StatTypeReg:
 		if !e.fileClosed {
-			return nil, &fs.PathError{Op: "open", Path: name, Err: errors.New("file not yet closed for writing")}
+			return nil, &fs.PathError{Op: "open", Path: name, Err: errFileOpen}
 		}
 
 		var sr *io.SectionReader
@@ -1070,7 +1076,7 @@ func (fsys *Writer) Open(name string) (fs.File, error) {
 // Write appends data to the file.
 func (f *File) Write(p []byte) (int, error) {
 	if f.closed {
-		return 0, errors.New("mkfs: write to closed file")
+		return 0, fmt.Errorf("mkfs: write to closed file: %w", fs.ErrClosed)
 	}
 
 	if f.fs.dataFile != nil {
@@ -1120,7 +1126,7 @@ func (f *File) ReadFrom(r io.Reader) (int64, error) {
 // boundary and records chunk indexes.
 func (f *File) Close() error {
 	if f.closed {
-		return errors.New("mkfs: file already closed")
+		return fmt.Errorf("mkfs: %w", fs.ErrClosed)
 	}
 
 	f.closed = true
@@ -1369,7 +1375,7 @@ func (f *readFile) Stat() (fs.FileInfo, error) {
 
 func (f *readFile) Read(p []byte) (int, error) {
 	if f.closed {
-		return 0, errors.New("mkfs: read from closed file")
+		return 0, fmt.Errorf("mkfs: read from closed file: %w", fs.ErrClosed)
 	}
 
 	if f.reader == nil {
@@ -1381,7 +1387,7 @@ func (f *readFile) Read(p []byte) (int, error) {
 
 func (f *readFile) Close() error {
 	if f.closed {
-		return errors.New("mkfs: file already closed")
+		return fmt.Errorf("mkfs: %w", fs.ErrClosed)
 	}
 
 	f.closed = true
@@ -1403,12 +1409,12 @@ func (d *readDir) Stat() (fs.FileInfo, error) {
 }
 
 func (d *readDir) Read([]byte) (int, error) {
-	return 0, &fs.PathError{Op: "read", Path: d.entry.path, Err: errors.New("is a directory")}
+	return 0, &fs.PathError{Op: "read", Path: d.entry.path, Err: ErrIsDirectory}
 }
 
 func (d *readDir) Close() error {
 	if d.closed {
-		return errors.New("mkfs: dir already closed")
+		return fmt.Errorf("mkfs: dir already closed: %w", fs.ErrClosed)
 	}
 
 	d.closed = true
@@ -1418,7 +1424,7 @@ func (d *readDir) Close() error {
 
 func (d *readDir) ReadDir(n int) ([]fs.DirEntry, error) {
 	if d.closed {
-		return nil, errors.New("mkfs: read from closed dir")
+		return nil, fmt.Errorf("mkfs: read from closed dir: %w", fs.ErrClosed)
 	}
 
 	if d.children == nil {
@@ -1563,7 +1569,7 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 	// converts to a near-2^64 e.size that the layout planner then sees as a
 	// small negative int, producing a plausible-looking but misaligned image.
 	if info.Size() < 0 {
-		return fmt.Errorf("mkfs: %s: negative size %d", p, info.Size())
+		return fmt.Errorf("mkfs: %s: negative size %d: %w", p, info.Size(), ErrInvalid)
 	}
 
 	size := uint64(info.Size())
@@ -1698,7 +1704,7 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 // checkPath validates that a path hasn't already been registered.
 func (fsys *Writer) checkPath(name string) error {
 	if fsys.closed {
-		return errors.New("mkfs: FS is closed")
+		return fmt.Errorf("mkfs: FS is closed: %w", fs.ErrClosed)
 	}
 
 	if err := checkPathLen(name); err != nil {
@@ -1706,7 +1712,7 @@ func (fsys *Writer) checkPath(name string) error {
 	}
 
 	if _, ok := fsys.byPath[name]; ok {
-		return fmt.Errorf("mkfs: duplicate path %q", name)
+		return fmt.Errorf("mkfs: duplicate path %q: %w", name, fs.ErrExist)
 	}
 
 	return nil
@@ -2026,7 +2032,8 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 		if !ok {
 			// The target name was removed (or never converted) while links
 			// to it remain — the inode has no owner to serialize.
-			fsys.wErr = fmt.Errorf("mkfs: hardlink %s: target %s no longer exists", a.er.path, a.target.path)
+			fsys.wErr = fmt.Errorf("mkfs: hardlink %s: target %s no longer exists: %w",
+				a.er.path, a.target.path, fs.ErrNotExist)
 
 			continue
 		}
@@ -2086,11 +2093,12 @@ func (fsys *Writer) fsToErofs(e *fsEntry) erofsEntry {
 // value, it returns an error. Safe to call multiple times with the same value.
 func (fsys *Writer) setBlockSize(n int) error {
 	if n < minBlockSize || n > maxBlockSize {
-		return fmt.Errorf("mkfs: invalid block size %d: must be between %d and %d", n, minBlockSize, maxBlockSize)
+		return fmt.Errorf("mkfs: invalid block size %d: must be between %d and %d: %w",
+			n, minBlockSize, maxBlockSize, ErrInvalid)
 	}
 
 	if bits.OnesCount(uint(n)) != 1 {
-		return fmt.Errorf("mkfs: invalid block size %d: must be a power of two", n)
+		return fmt.Errorf("mkfs: invalid block size %d: must be a power of two: %w", n, ErrInvalid)
 	}
 
 	if fsys.blockSize == 0 {
@@ -2099,7 +2107,7 @@ func (fsys *Writer) setBlockSize(n int) error {
 	}
 
 	if fsys.blockSize != n {
-		return fmt.Errorf("mkfs: block size conflict: already %d, requested %d", fsys.blockSize, n)
+		return fmt.Errorf("mkfs: block size conflict: already %d, requested %d: %w", fsys.blockSize, n, ErrInvalid)
 	}
 
 	return nil
@@ -2222,7 +2230,7 @@ func (fsys *Writer) chunksFromRanges(ranges []DataRange, fileSize int64) ([]buil
 	}
 
 	if total != fileSize {
-		return nil, fmt.Errorf("DataRange total size %d does not match file size %d", total, fileSize)
+		return nil, fmt.Errorf("DataRange total size %d does not match file size %d: %w", total, fileSize, ErrInvalid)
 	}
 
 	last := len(ranges) - 1
@@ -2231,16 +2239,17 @@ func (fsys *Writer) chunksFromRanges(ranges []DataRange, fileSize int64) ([]buil
 
 	for i, r := range ranges {
 		if r.Size <= 0 {
-			return nil, fmt.Errorf("DataRange[%d]: non-positive Size %d", i, r.Size)
+			return nil, fmt.Errorf("DataRange[%d]: non-positive Size %d: %w", i, r.Size, ErrInvalid)
 		}
 		// Non-final entries must be block-aligned in size; the final entry may
 		// end mid-block to match the file tail.
 		if i < last && uint64(r.Size)%blockSize != 0 {
 			return nil, fmt.Errorf(
-				"DataRange[%d]: non-final Size %d is not block-aligned (block size %d)",
+				"DataRange[%d]: non-final Size %d is not block-aligned (block size %d): %w",
 				i,
 				r.Size,
 				blockSize,
+				ErrInvalid,
 			)
 		}
 
@@ -2260,15 +2269,16 @@ func (fsys *Writer) chunksFromRanges(ranges []DataRange, fileSize int64) ([]buil
 		}
 
 		if r.Offset < 0 {
-			return nil, fmt.Errorf("DataRange[%d]: negative Offset %d", i, r.Offset)
+			return nil, fmt.Errorf("DataRange[%d]: negative Offset %d: %w", i, r.Offset, ErrInvalid)
 		}
 
 		if uint64(r.Offset)%blockSize != 0 {
 			return nil, fmt.Errorf(
-				"DataRange[%d]: Offset %d is not block-aligned (block size %d)",
+				"DataRange[%d]: Offset %d is not block-aligned (block size %d): %w",
 				i,
 				r.Offset,
 				blockSize,
+				ErrInvalid,
 			)
 		}
 		// Non-EROFS sources register exactly one device via DeviceBlocks();
@@ -2276,9 +2286,10 @@ func (fsys *Writer) chunksFromRanges(ranges []DataRange, fileSize int64) ([]buil
 		// (the primary image), producing an invalid mapping.
 		if r.Device != 0 {
 			return nil, fmt.Errorf(
-				"DataRange[%d]: Device %d out of range (source declared one device, only Device=0 is valid)",
+				"DataRange[%d]: Device %d out of range (source declared one device, only Device=0 is valid): %w",
 				i,
 				r.Device,
+				ErrInvalid,
 			)
 		}
 
@@ -2323,7 +2334,7 @@ func (fsys *Writer) lookup(name string) (*fsEntry, error) {
 
 	e, ok := fsys.byPath[name]
 	if !ok {
-		return nil, fmt.Errorf("mkfs: path not found %q", name)
+		return nil, fmt.Errorf("mkfs: path not found %q: %w", name, fs.ErrNotExist)
 	}
 	// A hardlink name IS its target's inode: metadata operations through
 	// either name must hit the shared entry.
