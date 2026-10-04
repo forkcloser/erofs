@@ -1032,6 +1032,7 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 }
 
 func (img *image) getBlock() *block {
+	//revive:disable-next-line:unchecked-type-assertion New and putBlock are the pool's only sources, both *block
 	return img.blkPool.Get().(*block)
 }
 

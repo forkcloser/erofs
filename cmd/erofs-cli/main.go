@@ -60,8 +60,7 @@ func run(path string) error {
 		fmt.Printf("\tMode: %o\n", fi.Mode())
 		fmt.Printf("\tModTime: %s\n", fi.ModTime())
 
-		st := fi.Sys().(*erofs.Stat)
-		if len(st.Xattrs) > 0 {
+		if st, ok := fi.Sys().(*erofs.Stat); ok && len(st.Xattrs) > 0 {
 			fmt.Println("\tXattrs:")
 
 			for k, v := range st.Xattrs {

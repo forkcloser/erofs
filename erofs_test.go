@@ -187,8 +187,11 @@ func checkDataRangeCoverage(t *testing.T, fsys fs.FS, name string, fileSize int)
 	if info.Size() != int64(fileSize) {
 		t.Fatalf("Size = %d, want %d", info.Size(), fileSize)
 	}
-	// All erofs.fileInfo values implement DataRange(); no type-assert guard needed.
-	dr := info.(dataRanger)
+
+	dr, ok := info.(dataRanger)
+	if !ok {
+		t.Fatalf("Stat %s returned %T, which has no DataRange", name, info)
+	}
 
 	ranges := dr.DataRange()
 	if len(ranges) == 0 {
@@ -335,7 +338,11 @@ func TestDataRangeSparseChunkBased(t *testing.T) {
 			return fmt.Errorf("Stat %s: %w", p, err)
 		}
 
-		dr := info.(dataRanger)
+		dr, ok := info.(dataRanger)
+		if !ok {
+			t.Fatalf("Stat %s returned %T, which has no DataRange", p, info)
+		}
+
 		ranges := dr.DataRange()
 
 		// Every non-empty regular file must have at least one range.

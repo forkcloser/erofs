@@ -952,7 +952,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 				}
 			}
 
-			be.Data = f.(io.Reader)
+			be.Data = f
 
 			return fsys.add(p, &entryFileInfo{info: info, sys: be})
 		}

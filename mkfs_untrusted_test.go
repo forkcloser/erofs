@@ -283,7 +283,10 @@ func buildCyclicImage(t *testing.T, nameLen int) []byte {
 		t.Fatal(err)
 	}
 
-	i := img.(*image)
+	i, ok := img.(*image)
+	if !ok {
+		t.Fatalf("Open returned %T, want *image", img)
+	}
 
 	dNid, _, _, err := i.resolve("x", d, false)
 	if err != nil {
@@ -654,7 +657,10 @@ func buildSymlinkCycleImage(t *testing.T, target string) []byte {
 		t.Fatal(err)
 	}
 
-	i := img.(*image)
+	i, ok := img.(*image)
+	if !ok {
+		t.Fatalf("Open returned %T, want *image", img)
+	}
 
 	aNid, _, _, err := i.resolve("x", "a", false)
 	if err != nil {
@@ -1334,7 +1340,14 @@ func TestXattrPrefixAndDuplicates(t *testing.T) {
 	var fi fs.FileInfo
 	if fi, err = fs.Stat(img0, "f"); err != nil {
 		t.Fatal(err)
-	} else if st := fi.Sys().(*Stat); st.Xattrs["security.capability"] != "real" {
+	}
+
+	st, ok := fi.Sys().(*Stat)
+	if !ok {
+		t.Fatalf("Sys returned %T, want *Stat", fi.Sys())
+	}
+
+	if st.Xattrs["security.capability"] != "real" {
 		t.Fatalf("xattr did not round-trip: %v", st.Xattrs)
 	}
 

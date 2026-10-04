@@ -244,7 +244,11 @@ func TestCompactInodeKeepsSubSecondMtime(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			st := fi.Sys().(*Stat)
+			st, ok := fi.Sys().(*Stat)
+			if !ok {
+				t.Fatalf("Sys returned %T, want *Stat", fi.Sys())
+			}
+
 			if st.Mtime != tc.wantSec || uint64(st.MtimeNs) != tc.wantNs {
 				t.Errorf("mtime = (%d,%d), want (%d,%d) — %s",
 					st.Mtime, st.MtimeNs, tc.wantSec, tc.wantNs, tc.descriptionOfFix)
@@ -388,7 +392,10 @@ func TestChunkedFeatureFlagDeclared(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	i := img.(*image)
+	i, ok := img.(*image)
+	if !ok {
+		t.Fatalf("Open returned %T, want *image", img)
+	}
 
 	fi, err := fs.Stat(img, "f")
 	if err != nil {
