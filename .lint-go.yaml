@@ -27,8 +27,6 @@ golangci:
           linters: [forbidigo]
         - path: ^(erofs\.go|internal/erofstest/tar\.go|mkfs\.go)$
           linters: [funcorder]
-        - path: ^(erofs_fuzz_test\.go|format\.go|internal/erofstest/testcase\.go)$
-          linters: [gochecknoglobals]
         - path: ^(erofs\.go|internal/erofstest/testcase\.go|layout\.go|mkfs\.go|mkfs_image\.go|writer\.go|xattr\.go)$
           linters: [gocognit]
         - path: ^(erofs\.go|internal/erofstest/testcase\.go|mkfs\.go)$
