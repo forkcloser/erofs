@@ -2,6 +2,7 @@ package erofs
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -84,7 +85,7 @@ func TestPerfReadCallCount(t *testing.T) {
 	dst := make([]byte, size)
 
 	got, rerr := fh2.Read(dst)
-	if rerr != nil && rerr != io.EOF {
+	if rerr != nil && !errors.Is(rerr, io.EOF) {
 		t.Fatal(rerr)
 	}
 

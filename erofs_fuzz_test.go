@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -586,7 +587,7 @@ func fuzzPartialReadDir(f *testing.F, img fuzzImage) {
 			// Per fs.ReadDirFile contract, ReadDir(n>0) returns io.EOF
 			// once the directory is exhausted; any other error ends the
 			// case.
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 
@@ -605,7 +606,7 @@ func fuzzPartialReadDir(f *testing.F, img fuzzImage) {
 			t.Fatalf("ReadDir after EOF returned %d entries", len(extra))
 		}
 
-		if err != io.EOF {
+		if !errors.Is(err, io.EOF) {
 			t.Fatalf("ReadDir after EOF returned err=%v, want io.EOF", err)
 		}
 
