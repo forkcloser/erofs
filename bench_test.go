@@ -301,7 +301,7 @@ func buildErofsFromDir(b *testing.B, dirPath, outPath string, opts ...erofs.Copy
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer outFile.Close() //nolint:errcheck
+	defer func() { _ = outFile.Close() }()
 
 	w := erofs.Create(outFile)
 	if err := w.CopyFrom(&benchDirFS{root: dirPath}, opts...); err != nil {
