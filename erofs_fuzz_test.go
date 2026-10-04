@@ -40,7 +40,9 @@ var (
 	fuzzWideOnce sync.Once
 )
 
-func initFuzzFlat(t testing.TB) fuzzImage {
+func initFuzzFlat(tb testing.TB) fuzzImage {
+	tb.Helper()
+
 	fuzzFlatOnce.Do(func() {
 		tc := erofstest.TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
@@ -60,14 +62,16 @@ func initFuzzFlat(t testing.TB) fuzzImage {
 		entries = append(entries, tc.File("/empty", []byte{}, 0o644))
 		files = append(files, "empty")
 
-		fuzzFlat = buildFuzzImage(t, entries, files, []string{"."})
+		fuzzFlat = buildFuzzImage(tb, entries, files, []string{"."})
 	})
-	skipIfFuzzImageUnavailable(t, fuzzFlat)
+	skipIfFuzzImageUnavailable(tb, fuzzFlat)
 
 	return fuzzFlat
 }
 
-func initFuzzNested(t testing.TB) fuzzImage {
+func initFuzzNested(tb testing.TB) fuzzImage {
+	tb.Helper()
+
 	fuzzNestedOnce.Do(func() {
 		tc := erofstest.TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
@@ -92,14 +96,16 @@ func initFuzzNested(t testing.TB) fuzzImage {
 			}
 		}
 
-		fuzzNested = buildFuzzImage(t, entries, files, append([]string{"."}, dirs...))
+		fuzzNested = buildFuzzImage(tb, entries, files, append([]string{"."}, dirs...))
 	})
-	skipIfFuzzImageUnavailable(t, fuzzNested)
+	skipIfFuzzImageUnavailable(tb, fuzzNested)
 
 	return fuzzNested
 }
 
-func initFuzzDeep(t testing.TB) fuzzImage {
+func initFuzzDeep(tb testing.TB) fuzzImage {
+	tb.Helper()
+
 	fuzzDeepOnce.Do(func() {
 		tc := erofstest.TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
@@ -134,14 +140,16 @@ func initFuzzDeep(t testing.TB) fuzzImage {
 		entries = append(entries, tc.Symlink("d4/d5/file0.dat", "/d0/d1/d2/d3/link"))
 		files = append(files, "d0/d1/d2/d3/link")
 
-		fuzzDeep = buildFuzzImage(t, entries, files, append([]string{"."}, dirs...))
+		fuzzDeep = buildFuzzImage(tb, entries, files, append([]string{"."}, dirs...))
 	})
-	skipIfFuzzImageUnavailable(t, fuzzDeep)
+	skipIfFuzzImageUnavailable(tb, fuzzDeep)
 
 	return fuzzDeep
 }
 
-func initFuzzWide(t testing.TB) fuzzImage {
+func initFuzzWide(tb testing.TB) fuzzImage {
+	tb.Helper()
+
 	fuzzWideOnce.Do(func() {
 		tc := erofstest.TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
@@ -161,9 +169,9 @@ func initFuzzWide(t testing.TB) fuzzImage {
 			files = append(files, fname)
 		}
 
-		fuzzWide = buildFuzzImage(t, entries, files, append([]string{"."}, dirs...))
+		fuzzWide = buildFuzzImage(tb, entries, files, append([]string{"."}, dirs...))
 	})
-	skipIfFuzzImageUnavailable(t, fuzzWide)
+	skipIfFuzzImageUnavailable(tb, fuzzWide)
 
 	return fuzzWide
 }
@@ -171,22 +179,22 @@ func initFuzzWide(t testing.TB) fuzzImage {
 // skipIfFuzzImageUnavailable handles the edge case where a previous fuzz
 // target already triggered the shared sync.Once and was skipped (e.g.
 // mkfs.erofs is missing). Once.Do marks itself done even when its function
-// calls t.Skipf via runtime.Goexit, leaving the shared fuzzImage zero. A
+// calls tb.Skipf via runtime.Goexit, leaving the shared fuzzImage zero. A
 // later target's seeds would then dereference a nil fs.FS and panic, so any
 // remaining caller skips here instead.
-func skipIfFuzzImageUnavailable(t testing.TB, img fuzzImage) {
-	t.Helper()
+func skipIfFuzzImageUnavailable(tb testing.TB, img fuzzImage) {
+	tb.Helper()
 
 	if img.fsys == nil {
-		t.Skip("fuzz image unavailable (mkfs.erofs missing or earlier init skipped)")
+		tb.Skip("fuzz image unavailable (mkfs.erofs missing or earlier init skipped)")
 	}
 }
 
-func buildFuzzImage(t testing.TB, entries []erofstest.WriterToTar, files, dirs []string) fuzzImage {
-	t.Helper()
+func buildFuzzImage(tb testing.TB, entries []erofstest.WriterToTar, files, dirs []string) fuzzImage {
+	tb.Helper()
 
 	if _, err := erofstest.CheckMkfsVersion("1.0"); err != nil {
-		t.Skipf("skipping: %v", err)
+		tb.Skipf("skipping: %v", err)
 	}
 
 	wt := erofstest.TarAll(entries...)
@@ -194,28 +202,28 @@ func buildFuzzImage(t testing.TB, entries []erofstest.WriterToTar, files, dirs [
 	tarStream := erofstest.TarFromWriterTo(wt)
 	defer func() { _ = tarStream.Close() }()
 
-	// Use os.MkdirTemp instead of t.TempDir() because the opened file
+	// Use os.MkdirTemp instead of tb.TempDir() because the opened file
 	// handle must outlive the test that calls buildFuzzImage (the fuzzImage
-	// is shared across tests via sync.Once). On Windows, t.TempDir()'s
+	// is shared across tests via sync.Once). On Windows, tb.TempDir()'s
 	// automatic cleanup fails because the file is still open.
 	dir, err := os.MkdirTemp("", "fuzz-erofs-*")
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 
 	path := filepath.Join(dir, "fuzz.erofs")
 	if err = erofstest.ConvertTarErofs(context.Background(), tarStream, path, "", nil); err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 
 	f, err := os.Open(path)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 
 	fsys, err := erofs.Open(f)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 
 	return fuzzImage{fsys: fsys, files: files, dirs: dirs}
@@ -252,6 +260,8 @@ func pathSeeds() []string {
 // fuzzOpen exercises Open with arbitrary path strings.
 // Valid paths must succeed; arbitrary paths must not panic.
 func fuzzOpen(f *testing.F, img fuzzImage) {
+	f.Helper()
+
 	for _, p := range img.files {
 		f.Add(p)
 	}
@@ -300,6 +310,8 @@ func fuzzOpen(f *testing.F, img fuzzImage) {
 
 // fuzzReadFile exercises ReadFile with arbitrary paths.
 func fuzzReadFile(f *testing.F, img fuzzImage) {
+	f.Helper()
+
 	for _, p := range img.files {
 		f.Add(p)
 	}
@@ -322,6 +334,8 @@ func fuzzReadFile(f *testing.F, img fuzzImage) {
 
 // fuzzStat exercises Stat with arbitrary paths.
 func fuzzStat(f *testing.F, img fuzzImage) {
+	f.Helper()
+
 	for _, p := range img.files {
 		f.Add(p)
 	}
@@ -353,6 +367,8 @@ func fuzzStat(f *testing.F, img fuzzImage) {
 
 // fuzzReadDir exercises ReadDir with arbitrary paths.
 func fuzzReadDir(f *testing.F, img fuzzImage) {
+	f.Helper()
+
 	for _, d := range img.dirs {
 		f.Add(d)
 	}
@@ -396,6 +412,8 @@ func fuzzReadDir(f *testing.F, img fuzzImage) {
 
 // fuzzWalk exercises fs.WalkDir from an arbitrary starting path.
 func fuzzWalk(f *testing.F, img fuzzImage) {
+	f.Helper()
+
 	for _, d := range img.dirs {
 		f.Add(d)
 	}
@@ -519,6 +537,8 @@ func FuzzWideWalk(f *testing.F) {
 // This enforces the fs.ReadDirFile contract: ReadDir(n) must eventually
 // return io.EOF when the directory is exhausted.
 func fuzzPartialReadDir(f *testing.F, img fuzzImage) {
+	f.Helper()
+
 	for _, d := range img.dirs {
 		f.Add(d, 1)
 		f.Add(d, 2)
@@ -642,6 +662,8 @@ func FuzzDeepPartialReadDir(f *testing.F) {
 // fuzzReadAfterClose verifies that operating on a closed file/dir does
 // not panic.
 func fuzzReadAfterClose(f *testing.F, img fuzzImage) {
+	f.Helper()
+
 	for _, p := range img.files {
 		f.Add(p)
 	}
@@ -683,6 +705,8 @@ func FuzzDeepReadAfterClose(f *testing.F) {
 // fuzzOpenStatReadConsistency verifies that Stat via Open().Stat() and
 // fs.Stat return consistent information for the same path.
 func fuzzOpenStatConsistency(f *testing.F, img fuzzImage) {
+	f.Helper()
+
 	for _, p := range img.files {
 		f.Add(p)
 	}
@@ -750,6 +774,8 @@ func FuzzDeepOpenStatConsistency(f *testing.F) {
 // fuzzReadFileSize verifies that ReadFile returns data whose length
 // matches the size reported by Stat.
 func fuzzReadFileSize(f *testing.F, img fuzzImage) {
+	f.Helper()
+
 	for _, p := range img.files {
 		f.Add(p)
 	}
@@ -791,11 +817,11 @@ func FuzzDeepReadFileSize(f *testing.F) {
 
 // buildMinimalImage creates a small valid erofs image to use as a seed for
 // raw image fuzzing. Returns the raw bytes.
-func buildMinimalImage(t testing.TB) []byte {
-	t.Helper()
+func buildMinimalImage(tb testing.TB) []byte {
+	tb.Helper()
 
 	if _, err := erofstest.CheckMkfsVersion("1.0"); err != nil {
-		t.Skipf("skipping: %v", err)
+		tb.Skipf("skipping: %v", err)
 	}
 
 	tc := erofstest.TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
@@ -809,14 +835,14 @@ func buildMinimalImage(t testing.TB) []byte {
 	tarStream := erofstest.TarFromWriterTo(wt)
 	defer func() { _ = tarStream.Close() }()
 
-	path := filepath.Join(t.TempDir(), "minimal.erofs")
+	path := filepath.Join(tb.TempDir(), "minimal.erofs")
 	if err := erofstest.ConvertTarErofs(context.Background(), tarStream, path, "", nil); err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 
 	return data

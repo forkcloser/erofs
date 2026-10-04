@@ -13,24 +13,24 @@ import (
 
 // linkStat fetches the raw erofs stat for a path in a read-back image,
 // without following symlinks (link groups can be symlink inodes too).
-func linkStat(t testing.TB, fsys fs.FS, name string) *erofs.Stat {
-	t.Helper()
+func linkStat(tb testing.TB, fsys fs.FS, name string) *erofs.Stat {
+	tb.Helper()
 
 	lfs, ok := fsys.(interface {
 		Lstat(name string) (fs.FileInfo, error)
 	})
 	if !ok {
-		t.Fatal("FS does not implement Lstat")
+		tb.Fatal("FS does not implement Lstat")
 	}
 
 	fi, err := lfs.Lstat(name)
 	if err != nil {
-		t.Fatalf("lstat %s: %v", name, err)
+		tb.Fatalf("lstat %s: %v", name, err)
 	}
 
 	st, ok := fi.Sys().(*erofs.Stat)
 	if !ok {
-		t.Fatalf("lstat %s: Sys() is %T, want *erofs.Stat", name, fi.Sys())
+		tb.Fatalf("lstat %s: Sys() is %T, want *erofs.Stat", name, fi.Sys())
 	}
 
 	return st
