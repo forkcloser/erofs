@@ -90,7 +90,7 @@ func TestChunkBasedXattrAlignment(t *testing.T) {
 	}
 
 	xg, ok := fi.(interface {
-		GetXattr(string) (string, bool)
+		GetXattr(name string) (string, bool)
 	})
 	if !ok {
 		t.Fatal("FileInfo does not expose GetXattr")

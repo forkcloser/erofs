@@ -61,7 +61,7 @@ func TestCopyFromPreservesModTime(t *testing.T) {
 		t.Helper()
 
 		fi, err := efs.(interface {
-			Lstat(string) (fs.FileInfo, error)
+			Lstat(name string) (fs.FileInfo, error)
 		}).Lstat(name)
 		if err != nil {
 			t.Fatalf("lstat %s: %v", name, err)

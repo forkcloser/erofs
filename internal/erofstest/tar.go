@@ -28,7 +28,7 @@ import (
 // WriterToTar is a type which writes to a tar writer
 type WriterToTar interface {
 	// WriteTo writes the entry to tw.
-	WriteTo(*tar.Writer) error
+	WriteTo(tw *tar.Writer) error
 }
 
 type writerToFn func(*tar.Writer) error
