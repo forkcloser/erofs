@@ -22,7 +22,7 @@ import (
 // without a recognised Stat_t — can carry it. Every entry used to read back
 // as the epoch.
 func TestCopyFromPreservesModTime(t *testing.T) {
-	when := time.Date(2024, 3, 4, 5, 6, 7, 890, time.UTC)
+	when := time.Date(2024, time.March, 4, 5, 6, 7, 890, time.UTC)
 	src := fstest.MapFS{
 		"dir":   &fstest.MapFile{Mode: fs.ModeDir | 0o755, ModTime: when},
 		"dir/f": &fstest.MapFile{Data: []byte("x"), Mode: 0o644, ModTime: when.Add(time.Hour)},
