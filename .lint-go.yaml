@@ -78,8 +78,7 @@ golangci:
 
 nilaway:
   exclude-errors-in-files:
-    # ONBOARDING BACKLOG, as above: the files NilAway reports in, not yet read.
-    - bench_test.go
-    - block.go
-    - erofs.go
+    # Slicing the result of a ReadDir whose error the fuzz target deliberately
+    # ignores: a nil slice bounded by min(len, 16) cannot panic. NilAway has no
+    # per-line directive, so the whole file is excluded.
     - erofs_fuzz_test.go
