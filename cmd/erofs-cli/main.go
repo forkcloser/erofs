@@ -33,7 +33,7 @@ func run(path string) error {
 		return err
 	}
 
-	fmt.Printf("Found valid image...\n")
+	fmt.Println("Found valid image...")
 
 	err = fs.WalkDir(img, ".", func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -45,9 +45,9 @@ func run(path string) error {
 		fmt.Printf("\tType: %o\n", entry.Type())
 
 		if entry.IsDir() {
-			fmt.Printf("\tIs a directory: yes\n")
+			fmt.Println("\tIs a directory: yes")
 		} else {
-			fmt.Printf("\tIs a directory: no\n")
+			fmt.Println("\tIs a directory: no")
 		}
 
 		fi, err := entry.Info()
@@ -60,7 +60,7 @@ func run(path string) error {
 
 		st := fi.Sys().(*erofs.Stat)
 		if len(st.Xattrs) > 0 {
-			fmt.Printf("\tXattrs:\n")
+			fmt.Println("\tXattrs:")
 
 			for k, v := range st.Xattrs {
 				fmt.Printf("\t\t%s: %q\n", k, v)

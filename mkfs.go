@@ -236,7 +236,7 @@ func (fsys *Writer) Create(name string) (*File, error) {
 
 	name = cleanPath(name)
 	if name == "/" {
-		return nil, fmt.Errorf("mkfs: cannot create file at root")
+		return nil, errors.New("mkfs: cannot create file at root")
 	}
 
 	if err := fsys.checkPath(name); err != nil {
@@ -332,7 +332,7 @@ func (fsys *Writer) Symlink(oldname, newname string) error {
 
 	newname = cleanPath(newname)
 	if newname == "/" {
-		return fmt.Errorf("mkfs: cannot create symlink at root")
+		return errors.New("mkfs: cannot create symlink at root")
 	}
 
 	if oldname == "" {
@@ -373,7 +373,7 @@ func (fsys *Writer) Link(oldname, newname string) error {
 
 	newname = cleanPath(newname)
 	if newname == "/" {
-		return fmt.Errorf("mkfs: cannot link at root")
+		return errors.New("mkfs: cannot link at root")
 	}
 
 	target, ok := fsys.byPath[oldname]
@@ -423,7 +423,7 @@ func (fsys *Writer) Mknod(name string, mode fs.FileMode, rdev uint32) error {
 
 	name = cleanPath(name)
 	if name == "/" {
-		return fmt.Errorf("mkfs: cannot mknod at root")
+		return errors.New("mkfs: cannot mknod at root")
 	}
 
 	if err := fsys.checkPath(name); err != nil {
@@ -1014,7 +1014,7 @@ func (fsys *Writer) Close() error {
 	}
 
 	if fsys.closed {
-		return fmt.Errorf("mkfs: FS already closed")
+		return errors.New("mkfs: FS already closed")
 	}
 	// A file's size is recorded by File.Close. Serializing now would emit it
 	// as empty and drop whatever was already written to it.
@@ -1109,7 +1109,7 @@ func (fsys *Writer) Open(name string) (fs.File, error) {
 
 	case disk.StatTypeReg:
 		if !e.fileClosed {
-			return nil, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("file not yet closed for writing")}
+			return nil, &fs.PathError{Op: "open", Path: name, Err: errors.New("file not yet closed for writing")}
 		}
 
 		var sr *io.SectionReader
@@ -1132,7 +1132,7 @@ func (fsys *Writer) Open(name string) (fs.File, error) {
 // Write appends data to the file.
 func (f *File) Write(p []byte) (int, error) {
 	if f.closed {
-		return 0, fmt.Errorf("mkfs: write to closed file")
+		return 0, errors.New("mkfs: write to closed file")
 	}
 
 	if f.fs.dataFile != nil {
@@ -1182,7 +1182,7 @@ func (f *File) ReadFrom(r io.Reader) (int64, error) {
 // boundary and records chunk indexes.
 func (f *File) Close() error {
 	if f.closed {
-		return fmt.Errorf("mkfs: file already closed")
+		return errors.New("mkfs: file already closed")
 	}
 
 	f.closed = true
@@ -1431,7 +1431,7 @@ func (f *readFile) Stat() (fs.FileInfo, error) {
 
 func (f *readFile) Read(p []byte) (int, error) {
 	if f.closed {
-		return 0, fmt.Errorf("mkfs: read from closed file")
+		return 0, errors.New("mkfs: read from closed file")
 	}
 
 	if f.reader == nil {
@@ -1443,7 +1443,7 @@ func (f *readFile) Read(p []byte) (int, error) {
 
 func (f *readFile) Close() error {
 	if f.closed {
-		return fmt.Errorf("mkfs: file already closed")
+		return errors.New("mkfs: file already closed")
 	}
 
 	f.closed = true
@@ -1465,12 +1465,12 @@ func (d *readDir) Stat() (fs.FileInfo, error) {
 }
 
 func (d *readDir) Read([]byte) (int, error) {
-	return 0, &fs.PathError{Op: "read", Path: d.entry.path, Err: fmt.Errorf("is a directory")}
+	return 0, &fs.PathError{Op: "read", Path: d.entry.path, Err: errors.New("is a directory")}
 }
 
 func (d *readDir) Close() error {
 	if d.closed {
-		return fmt.Errorf("mkfs: dir already closed")
+		return errors.New("mkfs: dir already closed")
 	}
 
 	d.closed = true
@@ -1480,7 +1480,7 @@ func (d *readDir) Close() error {
 
 func (d *readDir) ReadDir(n int) ([]fs.DirEntry, error) {
 	if d.closed {
-		return nil, fmt.Errorf("mkfs: read from closed dir")
+		return nil, errors.New("mkfs: read from closed dir")
 	}
 
 	if d.children == nil {
@@ -1690,7 +1690,7 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 // checkPath validates that a path hasn't already been registered.
 func (fsys *Writer) checkPath(name string) error {
 	if fsys.closed {
-		return fmt.Errorf("mkfs: FS is closed")
+		return errors.New("mkfs: FS is closed")
 	}
 
 	if err := checkPathLen(name); err != nil {

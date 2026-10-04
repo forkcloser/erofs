@@ -3,6 +3,7 @@ package erofs_test
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -1168,7 +1169,7 @@ func TestWriterStat(t *testing.T) {
 	}
 
 	if !fi.Mode().IsRegular() {
-		t.Errorf("expected regular file mode")
+		t.Error("expected regular file mode")
 	}
 
 	if fi.ModTime() != time.Unix(1700000000, 123456789) {
@@ -1552,7 +1553,7 @@ func (*chunkedDir) Stat() (fs.FileInfo, error) {
 }
 
 func (*chunkedDir) Read([]byte) (int, error) {
-	return 0, &fs.PathError{Op: "read", Path: ".", Err: fmt.Errorf("is a directory")}
+	return 0, &fs.PathError{Op: "read", Path: ".", Err: errors.New("is a directory")}
 }
 func (*chunkedDir) Close() error { return nil }
 func (d *chunkedDir) ReadDir(int) ([]fs.DirEntry, error) {
@@ -2105,7 +2106,7 @@ func (*dataRangerDir) Stat() (fs.FileInfo, error) {
 }
 
 func (*dataRangerDir) Read([]byte) (int, error) {
-	return 0, &fs.PathError{Op: "read", Path: ".", Err: fmt.Errorf("is a directory")}
+	return 0, &fs.PathError{Op: "read", Path: ".", Err: errors.New("is a directory")}
 }
 func (*dataRangerDir) Close() error { return nil }
 func (d *dataRangerDir) ReadDir(int) ([]fs.DirEntry, error) {

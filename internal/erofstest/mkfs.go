@@ -1,6 +1,7 @@
 package erofstest
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -54,7 +55,7 @@ func parseVersion(s string) (semver, error) {
 	)
 
 	if len(parts) < 1 {
-		return v, fmt.Errorf("empty version string")
+		return v, errors.New("empty version string")
 	}
 
 	v.major, err = strconv.Atoi(parts[0])

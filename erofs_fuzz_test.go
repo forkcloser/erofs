@@ -178,7 +178,7 @@ func skipIfFuzzImageUnavailable(t testing.TB, img fuzzImage) {
 	t.Helper()
 
 	if img.fsys == nil {
-		t.Skipf("fuzz image unavailable (mkfs.erofs missing or earlier init skipped)")
+		t.Skip("fuzz image unavailable (mkfs.erofs missing or earlier init skipped)")
 	}
 }
 

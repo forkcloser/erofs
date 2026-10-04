@@ -144,7 +144,7 @@ func TestUntrustedChunkSizeIsBounded(t *testing.T) {
 			grew := after.TotalAlloc - before.TotalAlloc
 
 			if err == nil {
-				t.Fatalf("CopyFrom accepted an inode claiming a 1 PiB chunk-based file")
+				t.Fatal("CopyFrom accepted an inode claiming a 1 PiB chunk-based file")
 			}
 
 			if !errors.Is(err, ErrInvalid) {
@@ -1727,7 +1727,7 @@ func TestCopyFromImageTruncatedXattr(t *testing.T) {
 	// then the little-endian value length.
 	i := bytes.Index(buf, []byte("capability"))
 	if i < 0 || buf[i-3] != 6 {
-		t.Fatalf("could not locate the stored xattr entry")
+		t.Fatal("could not locate the stored xattr entry")
 	}
 
 	binary.LittleEndian.PutUint16(buf[i-2:], 4000)

@@ -82,7 +82,7 @@ func CheckMode(t testing.TB, fsys fs.FS, name string, want fs.FileMode) {
 
 	lfs, ok := fsys.(lstatFS)
 	if !ok {
-		t.Errorf("FS does not implement Lstat")
+		t.Error("FS does not implement Lstat")
 		return
 	}
 
@@ -190,7 +190,7 @@ func Lstat(t testing.TB, fsys fs.FS, name string) *erofs.Stat {
 
 	lfs, ok := fsys.(lstatFS)
 	if !ok {
-		t.Fatalf("FS does not implement Lstat")
+		t.Fatal("FS does not implement Lstat")
 	}
 
 	fi, err := lfs.Lstat(name)
