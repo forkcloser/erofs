@@ -462,9 +462,9 @@ func (i badSizeInfo) Mode() fs.FileMode {
 
 	return 0o644
 }
-func (i badSizeInfo) ModTime() time.Time { return time.Unix(0, 0) }
-func (i badSizeInfo) IsDir() bool        { return i.dir }
-func (i badSizeInfo) Sys() any           { return nil }
+func (badSizeInfo) ModTime() time.Time { return time.Unix(0, 0) }
+func (i badSizeInfo) IsDir() bool      { return i.dir }
+func (badSizeInfo) Sys() any           { return nil }
 
 type badSizeDirent struct{ info badSizeInfo }
 
@@ -477,7 +477,7 @@ type badSizeDir struct{ fsys badSizeFS }
 
 func (badSizeDir) Close() error             { return nil }
 func (badSizeDir) Read([]byte) (int, error) { return 0, fs.ErrInvalid }
-func (d badSizeDir) Stat() (fs.FileInfo, error) {
+func (badSizeDir) Stat() (fs.FileInfo, error) {
 	return badSizeInfo{name: ".", size: 4096, dir: true}, nil
 }
 

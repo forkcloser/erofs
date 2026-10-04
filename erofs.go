@@ -662,7 +662,7 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 	}
 }
 
-func (img *image) readMetadata(r io.Reader) ([]byte, error) {
+func (*image) readMetadata(r io.Reader) ([]byte, error) {
 	// - A 2-byte little-endian length field, which is aligned to a 4-byte boundary
 	// - The length bytes of payload data
 	var lenBuf [2]byte
@@ -1944,7 +1944,7 @@ func (b *file) WriteTo(w io.Writer) (int64, error) {
 	return total, nil
 }
 
-func (b *file) Close() error {
+func (*file) Close() error {
 	return nil
 }
 

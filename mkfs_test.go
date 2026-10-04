@@ -1528,7 +1528,7 @@ func newChunkedFS(data []byte) *chunkedFS {
 	return &chunkedFS{data: data}
 }
 
-func (cfs *chunkedFS) DeviceBlocks() uint64 { return 1024 }
+func (*chunkedFS) DeviceBlocks() uint64 { return 1024 }
 
 func (cfs *chunkedFS) Open(name string) (fs.File, error) {
 	if name == "." {
@@ -1547,15 +1547,15 @@ type chunkedDir struct {
 	didRead bool
 }
 
-func (d *chunkedDir) Stat() (fs.FileInfo, error) {
+func (*chunkedDir) Stat() (fs.FileInfo, error) {
 	return &chunkedDirInfo{}, nil
 }
 
-func (d *chunkedDir) Read([]byte) (int, error) {
+func (*chunkedDir) Read([]byte) (int, error) {
 	return 0, &fs.PathError{Op: "read", Path: ".", Err: fmt.Errorf("is a directory")}
 }
-func (d *chunkedDir) Close() error { return nil }
-func (d *chunkedDir) ReadDir(n int) ([]fs.DirEntry, error) {
+func (*chunkedDir) Close() error { return nil }
+func (d *chunkedDir) ReadDir(int) ([]fs.DirEntry, error) {
 	if d.didRead {
 		return nil, io.EOF
 	}
@@ -1567,20 +1567,20 @@ func (d *chunkedDir) ReadDir(n int) ([]fs.DirEntry, error) {
 
 type chunkedDirInfo struct{}
 
-func (i *chunkedDirInfo) Name() string       { return "." }
-func (i *chunkedDirInfo) Size() int64        { return 0 }
-func (i *chunkedDirInfo) Mode() fs.FileMode  { return fs.ModeDir | 0o755 }
-func (i *chunkedDirInfo) ModTime() time.Time { return time.Time{} }
-func (i *chunkedDirInfo) IsDir() bool        { return true }
-func (i *chunkedDirInfo) Sys() any           { return nil }
+func (*chunkedDirInfo) Name() string       { return "." }
+func (*chunkedDirInfo) Size() int64        { return 0 }
+func (*chunkedDirInfo) Mode() fs.FileMode  { return fs.ModeDir | 0o755 }
+func (*chunkedDirInfo) ModTime() time.Time { return time.Time{} }
+func (*chunkedDirInfo) IsDir() bool        { return true }
+func (*chunkedDirInfo) Sys() any           { return nil }
 
 type chunkedDirEntry struct {
 	data []byte
 }
 
-func (e *chunkedDirEntry) Name() string      { return "testfile.bin" }
-func (e *chunkedDirEntry) IsDir() bool       { return false }
-func (e *chunkedDirEntry) Type() fs.FileMode { return 0 }
+func (*chunkedDirEntry) Name() string      { return "testfile.bin" }
+func (*chunkedDirEntry) IsDir() bool       { return false }
+func (*chunkedDirEntry) Type() fs.FileMode { return 0 }
 func (e *chunkedDirEntry) Info() (fs.FileInfo, error) {
 	return &chunkedFileInfo{size: int64(len(e.data))}, nil
 }
@@ -1589,11 +1589,11 @@ type chunkedFileInfo struct {
 	size int64
 }
 
-func (i *chunkedFileInfo) Name() string       { return "testfile.bin" }
-func (i *chunkedFileInfo) Size() int64        { return i.size }
-func (i *chunkedFileInfo) Mode() fs.FileMode  { return 0o644 }
-func (i *chunkedFileInfo) ModTime() time.Time { return time.Time{} }
-func (i *chunkedFileInfo) IsDir() bool        { return false }
+func (*chunkedFileInfo) Name() string       { return "testfile.bin" }
+func (i *chunkedFileInfo) Size() int64      { return i.size }
+func (*chunkedFileInfo) Mode() fs.FileMode  { return 0o644 }
+func (*chunkedFileInfo) ModTime() time.Time { return time.Time{} }
+func (*chunkedFileInfo) IsDir() bool        { return false }
 func (i *chunkedFileInfo) Sys() any {
 	nblocks := (i.size + 4095) / 4096
 
@@ -1627,7 +1627,7 @@ func (f *chunkedFile) Read(p []byte) (int, error) {
 
 	return n, nil
 }
-func (f *chunkedFile) Close() error { return nil }
+func (*chunkedFile) Close() error { return nil }
 
 // --- Merge tests ---
 
@@ -2066,10 +2066,10 @@ type dataRangerFileInfo struct {
 
 func (fi *dataRangerFileInfo) Name() string                 { return fi.name }
 func (fi *dataRangerFileInfo) Size() int64                  { return fi.size }
-func (fi *dataRangerFileInfo) Mode() fs.FileMode            { return 0o644 }
-func (fi *dataRangerFileInfo) ModTime() time.Time           { return time.Time{} }
-func (fi *dataRangerFileInfo) IsDir() bool                  { return false }
-func (fi *dataRangerFileInfo) Sys() any                     { return nil }
+func (*dataRangerFileInfo) Mode() fs.FileMode               { return 0o644 }
+func (*dataRangerFileInfo) ModTime() time.Time              { return time.Time{} }
+func (*dataRangerFileInfo) IsDir() bool                     { return false }
+func (*dataRangerFileInfo) Sys() any                        { return nil }
 func (fi *dataRangerFileInfo) DataRange() []erofs.DataRange { return fi.ranges }
 
 // dataRangerFS is a minimal fs.FS that exposes one regular file whose
@@ -2100,15 +2100,15 @@ type dataRangerDir struct {
 	didRead bool
 }
 
-func (d *dataRangerDir) Stat() (fs.FileInfo, error) {
+func (*dataRangerDir) Stat() (fs.FileInfo, error) {
 	return &dataRangerDirInfo{}, nil
 }
 
-func (d *dataRangerDir) Read([]byte) (int, error) {
+func (*dataRangerDir) Read([]byte) (int, error) {
 	return 0, &fs.PathError{Op: "read", Path: ".", Err: fmt.Errorf("is a directory")}
 }
-func (d *dataRangerDir) Close() error { return nil }
-func (d *dataRangerDir) ReadDir(n int) ([]fs.DirEntry, error) {
+func (*dataRangerDir) Close() error { return nil }
+func (d *dataRangerDir) ReadDir(int) ([]fs.DirEntry, error) {
 	if d.didRead {
 		return nil, io.EOF
 	}
@@ -2120,18 +2120,18 @@ func (d *dataRangerDir) ReadDir(n int) ([]fs.DirEntry, error) {
 
 type dataRangerDirInfo struct{}
 
-func (i *dataRangerDirInfo) Name() string       { return "." }
-func (i *dataRangerDirInfo) Size() int64        { return 0 }
-func (i *dataRangerDirInfo) Mode() fs.FileMode  { return fs.ModeDir | 0o755 }
-func (i *dataRangerDirInfo) ModTime() time.Time { return time.Time{} }
-func (i *dataRangerDirInfo) IsDir() bool        { return true }
-func (i *dataRangerDirInfo) Sys() any           { return nil }
+func (*dataRangerDirInfo) Name() string       { return "." }
+func (*dataRangerDirInfo) Size() int64        { return 0 }
+func (*dataRangerDirInfo) Mode() fs.FileMode  { return fs.ModeDir | 0o755 }
+func (*dataRangerDirInfo) ModTime() time.Time { return time.Time{} }
+func (*dataRangerDirInfo) IsDir() bool        { return true }
+func (*dataRangerDirInfo) Sys() any           { return nil }
 
 type dataRangerEntry struct{ info *dataRangerFileInfo }
 
 func (e *dataRangerEntry) Name() string               { return e.info.name }
-func (e *dataRangerEntry) IsDir() bool                { return false }
-func (e *dataRangerEntry) Type() fs.FileMode          { return 0 }
+func (*dataRangerEntry) IsDir() bool                  { return false }
+func (*dataRangerEntry) Type() fs.FileMode            { return 0 }
 func (e *dataRangerEntry) Info() (fs.FileInfo, error) { return e.info, nil }
 
 type dataRangerFile struct {
@@ -2163,7 +2163,7 @@ func (f *dataRangerFile) Read(p []byte) (int, error) {
 
 	return n, nil
 }
-func (f *dataRangerFile) Close() error { return nil }
+func (*dataRangerFile) Close() error { return nil }
 
 // TestCopyFromDataRange verifies that CopyFrom(MetadataOnly) uses the
 // DataRange() accessor from a source FileInfo to synthesise chunk indexes

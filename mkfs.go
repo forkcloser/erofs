@@ -1416,7 +1416,7 @@ func (fi *writerFileInfo) ModTime() time.Time {
 }
 
 func (fi *writerFileInfo) IsDir() bool { return fi.entry.mode&disk.StatTypeMask == disk.StatTypeDir }
-func (fi *writerFileInfo) Sys() any    { return nil }
+func (*writerFileInfo) Sys() any       { return nil }
 
 // readFile implements fs.File for reading back a finalized file's data.
 type readFile struct {

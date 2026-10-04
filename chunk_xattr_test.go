@@ -124,7 +124,7 @@ type chunkSourceInfo struct {
 }
 
 func (i chunkSourceInfo) Name() string { return i.name }
-func (i chunkSourceInfo) Size() int64  { return 4096 }
+func (chunkSourceInfo) Size() int64    { return 4096 }
 func (i chunkSourceInfo) Mode() fs.FileMode {
 	if i.dir {
 		return fs.ModeDir | 0o755
@@ -132,8 +132,8 @@ func (i chunkSourceInfo) Mode() fs.FileMode {
 
 	return 0o644
 }
-func (i chunkSourceInfo) ModTime() time.Time { return time.Unix(0, 0) }
-func (i chunkSourceInfo) IsDir() bool        { return i.dir }
+func (chunkSourceInfo) ModTime() time.Time { return time.Unix(0, 0) }
+func (i chunkSourceInfo) IsDir() bool      { return i.dir }
 func (i chunkSourceInfo) Sys() any {
 	if i.dir {
 		return &builder.Entry{Nlink: 2}

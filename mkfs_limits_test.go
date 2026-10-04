@@ -140,12 +140,12 @@ type sizedInfo struct {
 	sys  any
 }
 
-func (i *sizedInfo) Name() string       { return i.name }
-func (i *sizedInfo) Size() int64        { return i.size }
-func (i *sizedInfo) Mode() fs.FileMode  { return 0o644 }
-func (i *sizedInfo) ModTime() time.Time { return time.Unix(1000, 0) }
-func (i *sizedInfo) IsDir() bool        { return false }
-func (i *sizedInfo) Sys() any           { return i.sys }
+func (i *sizedInfo) Name() string     { return i.name }
+func (i *sizedInfo) Size() int64      { return i.size }
+func (*sizedInfo) Mode() fs.FileMode  { return 0o644 }
+func (*sizedInfo) ModTime() time.Time { return time.Unix(1000, 0) }
+func (*sizedInfo) IsDir() bool        { return false }
+func (i *sizedInfo) Sys() any         { return i.sys }
 
 // TestShortInlineReadIsRejected covers a source that yields fewer bytes than
 // it declared. Inline data is followed by the zero fill that aligns the next
@@ -346,11 +346,11 @@ type xattrInfo struct {
 	xattrs map[string]string
 }
 
-func (i *xattrInfo) Name() string       { return i.name }
-func (i *xattrInfo) Size() int64        { return 0 }
-func (i *xattrInfo) Mode() fs.FileMode  { return i.mode }
-func (i *xattrInfo) ModTime() time.Time { return time.Unix(1000, 0) }
-func (i *xattrInfo) IsDir() bool        { return i.mode.IsDir() }
+func (i *xattrInfo) Name() string      { return i.name }
+func (*xattrInfo) Size() int64         { return 0 }
+func (i *xattrInfo) Mode() fs.FileMode { return i.mode }
+func (*xattrInfo) ModTime() time.Time  { return time.Unix(1000, 0) }
+func (i *xattrInfo) IsDir() bool       { return i.mode.IsDir() }
 func (i *xattrInfo) Sys() any {
 	return &builder.Entry{Xattrs: i.xattrs}
 }

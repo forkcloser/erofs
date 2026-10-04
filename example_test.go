@@ -25,7 +25,7 @@ func ExampleOpen() {
 		log.Fatal(err)
 	}
 
-	err = fs.WalkDir(img, ".", func(path string, d fs.DirEntry, err error) error {
+	err = fs.WalkDir(img, ".", func(path string, _ fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}

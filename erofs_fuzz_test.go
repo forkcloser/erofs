@@ -264,7 +264,7 @@ func fuzzOpen(f *testing.F, img fuzzImage) {
 		f.Add(s)
 	}
 
-	f.Fuzz(func(t *testing.T, path string) {
+	f.Fuzz(func(_ *testing.T, path string) {
 		file, err := img.fsys.Open(path)
 		if err != nil {
 			return
@@ -654,7 +654,7 @@ func fuzzReadAfterClose(f *testing.F, img fuzzImage) {
 		f.Add(s)
 	}
 
-	f.Fuzz(func(t *testing.T, path string) {
+	f.Fuzz(func(_ *testing.T, path string) {
 		file, err := img.fsys.Open(path)
 		if err != nil {
 			return
@@ -888,7 +888,7 @@ func exerciseFS(fsys fs.FS) {
 
 	// Walk (with limit)
 	count := 0
-	_ = fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+	_ = fs.WalkDir(fsys, ".", func(_ string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -940,7 +940,7 @@ func FuzzImageOpen(f *testing.F) {
 
 	f.Add(zeroed)
 
-	f.Fuzz(func(t *testing.T, data []byte) {
+	f.Fuzz(func(_ *testing.T, data []byte) {
 		r := bytes.NewReader(data)
 
 		fsys, err := erofs.Open(r)
@@ -982,7 +982,7 @@ func FuzzImageCorruptSuperblock(f *testing.F) {
 		f.Add(tweaked)
 	}
 
-	f.Fuzz(func(t *testing.T, sbBytes []byte) {
+	f.Fuzz(func(_ *testing.T, sbBytes []byte) {
 		if len(sbBytes) != 128 {
 			return
 		}
@@ -1015,7 +1015,7 @@ func FuzzImageCorruptInode(f *testing.F) {
 		f.Add(seed, off)
 	}
 
-	f.Fuzz(func(t *testing.T, data []byte, corruptOffset int) {
+	f.Fuzz(func(_ *testing.T, data []byte, corruptOffset int) {
 		if len(data) < 2048 {
 			return
 		}
@@ -1103,7 +1103,7 @@ func FuzzImageCopyFrom(f *testing.F) {
 		f.Add(m)
 	}
 
-	f.Fuzz(func(t *testing.T, data []byte) {
+	f.Fuzz(func(_ *testing.T, data []byte) {
 		fsys, err := erofs.Open(bytes.NewReader(data))
 		if err != nil {
 			return
