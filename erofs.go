@@ -2054,11 +2054,7 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 		// can still return — entries before d.consumed were handed out by an
 		// earlier call, and n bounds the rest — so a caller paginating with a
 		// small n does not pay for the whole block on every call.
-		want := int(entryN) - int(d.consumed)
-		if want < 0 {
-			want = 0
-		}
-
+		want := max(int(entryN)-int(d.consumed), 0)
 		if n > 0 && n < want {
 			want = n
 		}
