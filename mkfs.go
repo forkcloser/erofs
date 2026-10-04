@@ -892,69 +892,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 
 		// For regular files, get a data reader.
 		if info.Mode().IsRegular() && info.Size() > 0 && (be == nil || be.Data == nil) {
-			// In metadata-only mode, data is referenced via chunk indexes
-			// from the source — no need to open the file.
-			if fsys.copyMetadataOnly {
-				if be == nil {
-					be = entryFromSys(info)
-					if be == nil {
-						be = &builder.Entry{}
-					}
-				}
-				// Generate chunks from DataRange if available.
-				if len(be.Chunks) == 0 {
-					if dr, ok := info.(dataRanger); ok {
-						if ranges := dr.DataRange(); len(ranges) > 0 {
-							chunks, err := fsys.chunksFromRanges(ranges, info.Size())
-							if err != nil {
-								return fmt.Errorf("chunksFromRanges %s: %w", p, err)
-							}
-
-							be.Chunks = chunks
-							// Contiguous: a single non-hole range whose total-size
-							// invariant is satisfied (guaranteed by chunksFromRanges)
-							// means the file is fully covered by one contiguous extent.
-							be.Contiguous = len(ranges) == 1 && ranges[0].Offset != holeOffset
-						}
-					}
-				}
-
-				return fsys.add(p, &entryFileInfo{info: info, sys: be})
-			}
-			// For EROFS sources, use direct SectionReader (bypasses
-			// block-at-a-time reader for contiguous flat-plain data).
-			if srcImg, ok := src.(*image); ok {
-				if st, ok := info.Sys().(*Stat); ok {
-					f := file{img: srcImg, nid: st.Ino}
-					if ino, err := f.readInfo(); err == nil {
-						if dr := srcImg.openDirect(ino); dr != nil {
-							if be == nil {
-								be = &builder.Entry{}
-							}
-
-							be.Data = dr
-
-							return fsys.add(p, &entryFileInfo{info: info, sys: be})
-						}
-					}
-				}
-			}
-
-			f, err := src.Open(fpath)
-			if err != nil {
-				return fmt.Errorf("open %s: %w", fpath, err)
-			}
-
-			if be == nil {
-				be = entryFromSys(info)
-				if be == nil {
-					be = &builder.Entry{}
-				}
-			}
-
-			be.Data = f
-
-			return fsys.add(p, &entryFileInfo{info: info, sys: be})
+			return fsys.addRegular(src, fpath, p, info, be)
 		}
 
 		// For symlinks without LinkTarget, read via ReadLink interface.
@@ -1540,6 +1478,76 @@ func (de *dirEntry) IsDir() bool  { return de.entry.mode&disk.StatTypeMask == di
 
 func (de *dirEntry) Type() fs.FileMode          { return disk.EroFSModeToGoFileMode(de.entry.mode).Type() }
 func (de *dirEntry) Info() (fs.FileInfo, error) { return &writerFileInfo{entry: de.entry}, nil }
+
+// addRegular adds the regular file at fpath (p once normalized) whose data
+// the source did not hand over in be: as chunk indexes in metadata-only
+// mode, through a direct section reader when the source is an EROFS image,
+// and by opening the file otherwise.
+func (fsys *Writer) addRegular(src fs.FS, fpath, p string, info fs.FileInfo, be *builder.Entry) error {
+	// In metadata-only mode, data is referenced via chunk indexes
+	// from the source — no need to open the file.
+	if fsys.copyMetadataOnly {
+		if be == nil {
+			be = entryFromSys(info)
+			if be == nil {
+				be = &builder.Entry{}
+			}
+		}
+		// Generate chunks from DataRange if available.
+		if len(be.Chunks) == 0 {
+			if dr, ok := info.(dataRanger); ok {
+				if ranges := dr.DataRange(); len(ranges) > 0 {
+					chunks, err := fsys.chunksFromRanges(ranges, info.Size())
+					if err != nil {
+						return fmt.Errorf("chunksFromRanges %s: %w", p, err)
+					}
+
+					be.Chunks = chunks
+					// Contiguous: a single non-hole range whose total-size
+					// invariant is satisfied (guaranteed by chunksFromRanges)
+					// means the file is fully covered by one contiguous extent.
+					be.Contiguous = len(ranges) == 1 && ranges[0].Offset != holeOffset
+				}
+			}
+		}
+
+		return fsys.add(p, &entryFileInfo{info: info, sys: be})
+	}
+	// For EROFS sources, use direct SectionReader (bypasses
+	// block-at-a-time reader for contiguous flat-plain data).
+	if srcImg, ok := src.(*image); ok {
+		if st, ok := info.Sys().(*Stat); ok {
+			f := file{img: srcImg, nid: st.Ino}
+			if ino, err := f.readInfo(); err == nil {
+				if dr := srcImg.openDirect(ino); dr != nil {
+					if be == nil {
+						be = &builder.Entry{}
+					}
+
+					be.Data = dr
+
+					return fsys.add(p, &entryFileInfo{info: info, sys: be})
+				}
+			}
+		}
+	}
+
+	f, err := src.Open(fpath)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", fpath, err)
+	}
+
+	if be == nil {
+		be = entryFromSys(info)
+		if be == nil {
+			be = &builder.Entry{}
+		}
+	}
+
+	be.Data = f
+
+	return fsys.add(p, &entryFileInfo{info: info, sys: be})
+}
 
 // add adds a single entry. Mode and Size come from info; extended metadata
 // comes from info.Sys(). Checks Sys() for *builder.Entry first, then
