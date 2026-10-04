@@ -2,7 +2,6 @@ package erofstest
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -43,7 +42,7 @@ func MkfsErofs(opts ...string) Converter {
 		defer func() { _ = tarStream.Close() }()
 
 		path := filepath.Join(tb.TempDir(), "test.erofs")
-		if err := ConvertTarErofs(context.Background(), tarStream, path, "", opts); err != nil {
+		if err := ConvertTarErofs(tb.Context(), tarStream, path, "", opts); err != nil {
 			tb.Fatal(err)
 		}
 
@@ -68,7 +67,7 @@ func MkfsErofsBlobDev(chunkSize int, extraOpts ...string) Converter {
 			"--blobdev=" + blobPath,
 			fmt.Sprintf("--chunksize=%d", chunkSize),
 		}, extraOpts...)
-		if err := ConvertTarErofs(context.Background(), tarStream, path, "", opts); err != nil {
+		if err := ConvertTarErofs(tb.Context(), tarStream, path, "", opts); err != nil {
 			tb.Fatal(err)
 		}
 
@@ -93,7 +92,7 @@ func MkfsErofsMaxSize(maxBytes int64, opts ...string) Converter {
 		defer func() { _ = tarStream.Close() }()
 
 		path := filepath.Join(tb.TempDir(), "test.erofs")
-		if err := ConvertTarErofs(context.Background(), tarStream, path, "", opts); err != nil {
+		if err := ConvertTarErofs(tb.Context(), tarStream, path, "", opts); err != nil {
 			tb.Fatal(err)
 		}
 
