@@ -15,7 +15,7 @@ func FsckErofs(tb testing.TB, path string) {
 		return // silently skip
 	}
 
-	cmd := exec.Command("fsck.erofs", path)
+	cmd := exec.CommandContext(tb.Context(), "fsck.erofs", path)
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -46,7 +46,7 @@ func FsckErofsBytes(tb testing.TB, buf []byte) {
 		tb.Fatal(err)
 	}
 
-	cmd := exec.Command("fsck.erofs", f.Name())
+	cmd := exec.CommandContext(tb.Context(), "fsck.erofs", f.Name())
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -83,7 +83,7 @@ func FsckErofsDevice(tb testing.TB, imagePath string, devicePaths ...string) {
 		args = append(args, "--device="+d)
 	}
 
-	cmd := exec.Command("fsck.erofs", args...)
+	cmd := exec.CommandContext(tb.Context(), "fsck.erofs", args...)
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {

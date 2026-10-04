@@ -17,7 +17,7 @@ import (
 )
 
 func TestErofs(t *testing.T) {
-	if _, err := erofstest.CheckMkfsVersion("1.0"); err != nil {
+	if _, err := erofstest.CheckMkfsVersion(t.Context(), "1.0"); err != nil {
 		t.Skipf("skipping: %v", err)
 	}
 
@@ -32,7 +32,7 @@ func TestErofs(t *testing.T) {
 		{"FileSizes", erofstest.FileSizes, nil},
 		{"UIDGIDValues", erofstest.UIDGIDValues, nil},
 		{"SpecialModeBits", erofstest.SpecialModeBits, nil},
-		{"LongXattrs", erofstest.LongXattrs, erofstest.XattrPrefixFlags()},
+		{"LongXattrs", erofstest.LongXattrs, erofstest.XattrPrefixFlags(t.Context())},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, cc := range []struct {
@@ -104,7 +104,7 @@ func TestErofs(t *testing.T) {
 }
 
 func BenchmarkLookup(b *testing.B) {
-	if _, err := erofstest.CheckMkfsVersion("1.0"); err != nil {
+	if _, err := erofstest.CheckMkfsVersion(b.Context(), "1.0"); err != nil {
 		b.Skipf("skipping: %v", err)
 	}
 
@@ -220,7 +220,7 @@ func checkDataRangeCoverage(t *testing.T, fsys fs.FS, name string, fileSize int)
 // layout that contained the headSize bug (inodeData treated as block count
 // instead of block address).
 func TestDataRangeMultiBlockCoverage(t *testing.T) {
-	if _, err := erofstest.CheckMkfsVersion("1.0"); err != nil {
+	if _, err := erofstest.CheckMkfsVersion(t.Context(), "1.0"); err != nil {
 		t.Skipf("skipping: %v", err)
 	}
 
@@ -270,7 +270,7 @@ func TestDataRangeMultiBlockCoverage(t *testing.T) {
 
 				imgPath := filepath.Join(t.TempDir(), "test.erofs")
 
-				out, err := exec.Command("mkfs.erofs", imgPath, dir).CombinedOutput()
+				out, err := exec.CommandContext(t.Context(), "mkfs.erofs", imgPath, dir).CombinedOutput()
 				if err != nil {
 					t.Fatalf("mkfs.erofs: %s: %v", out, err)
 				}
@@ -302,7 +302,7 @@ func TestDataRangeMultiBlockCoverage(t *testing.T) {
 //   - At least one file has a hole so the hole-emission path in
 //     buildChunkDataRanges is actually exercised.
 func TestDataRangeSparseChunkBased(t *testing.T) {
-	if _, err := erofstest.CheckMkfsVersion("1.0"); err != nil {
+	if _, err := erofstest.CheckMkfsVersion(t.Context(), "1.0"); err != nil {
 		t.Skipf("skipping: %v", err)
 	}
 

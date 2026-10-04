@@ -1,6 +1,7 @@
 package erofstest
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -11,8 +12,8 @@ import (
 // CheckMkfsVersion checks that mkfs.erofs is at least the given minimum
 // version. It returns nil if the version is sufficient, or an error describing
 // the mismatch. Version strings are compared using major.minor.patch semantics.
-func CheckMkfsVersion(minimum string) (bool, error) {
-	ver, err := mkfsVersion()
+func CheckMkfsVersion(ctx context.Context, minimum string) (bool, error) {
+	ver, err := mkfsVersion(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -80,8 +81,8 @@ func parseVersion(s string) (semver, error) {
 	return v, nil
 }
 
-func mkfsVersion() (string, error) {
-	out, err := exec.Command("mkfs.erofs", "-V").CombinedOutput()
+func mkfsVersion(ctx context.Context) (string, error) {
+	out, err := exec.CommandContext(ctx, "mkfs.erofs", "-V").CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("mkfs.erofs -V failed: %s: %w", out, err)
 	}

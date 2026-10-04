@@ -425,7 +425,7 @@ func fsckImage(t *testing.T, image []byte) {
 		t.Fatal(err)
 	}
 
-	if out, err := exec.Command("fsck.erofs", p).CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(t.Context(), "fsck.erofs", p).CombinedOutput(); err != nil {
 		t.Errorf("fsck.erofs rejected the image: %v\n%s", err, out)
 	}
 }
