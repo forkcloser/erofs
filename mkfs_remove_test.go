@@ -194,123 +194,79 @@ func TestWriterRemoveSymlink(t *testing.T) {
 	erofstest.CheckDirEntries(t, efs, ".", []string{"target"})
 }
 
-// TestWriterRemoveHardlinkAlias verifies that removing an alias leaves the
-// canonical path intact with the correct nlink.
-func TestWriterRemoveHardlinkAlias(t *testing.T) {
-	var buf testBuffer
+// TestWriterRemoveHardlinkOneName verifies that removing one name of a
+// three-name hardlink group leaves the other two on the same inode with
+// nlink 2: an alias goes without touching the canonical path, and removing
+// the canonical path promotes the first surviving alias (POSIX unlink
+// semantics).
+func TestWriterRemoveHardlinkOneName(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		remove    string
+		survivors []string
+	}{
+		{name: "alias", remove: "/alias1", survivors: []string{"alias2", "orig"}},
+		{name: "canonical", remove: "/orig", survivors: []string{"alias1", "alias2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf testBuffer
 
-	w := erofs.Create(&buf)
+			w := erofs.Create(&buf)
 
-	f, err := w.Create("/orig")
-	if err != nil {
-		t.Fatal(err)
-	}
+			f, err := w.Create("/orig")
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	if _, err = f.Write([]byte("hardlink payload\n")); err != nil {
-		t.Fatal(err)
-	}
+			if _, err = f.Write([]byte("hardlink payload\n")); err != nil {
+				t.Fatal(err)
+			}
 
-	if err = f.Close(); err != nil {
-		t.Fatal(err)
-	}
+			if err = f.Close(); err != nil {
+				t.Fatal(err)
+			}
 
-	if err = w.Link("/orig", "/alias1"); err != nil {
-		t.Fatal(err)
-	}
+			if err = w.Link("/orig", "/alias1"); err != nil {
+				t.Fatal(err)
+			}
 
-	if err = w.Link("/orig", "/alias2"); err != nil {
-		t.Fatal(err)
-	}
-	// Remove one alias.
-	if err = w.Remove("/alias1"); err != nil {
-		t.Fatal("Remove alias:", err)
-	}
+			if err = w.Link("/orig", "/alias2"); err != nil {
+				t.Fatal(err)
+			}
 
-	if err = w.Close(); err != nil {
-		t.Fatal(err)
-	}
+			if err = w.Remove(tc.remove); err != nil {
+				t.Fatal("Remove:", err)
+			}
 
-	erofstest.FsckErofsBytes(t, buf.Bytes())
+			if err = w.Close(); err != nil {
+				t.Fatal(err)
+			}
 
-	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
-	if err != nil {
-		t.Fatal(err)
-	}
+			erofstest.FsckErofsBytes(t, buf.Bytes())
 
-	erofstest.CheckFile(t, efs, "orig", "hardlink payload\n")
-	erofstest.CheckFile(t, efs, "alias2", "hardlink payload\n")
-	erofstest.CheckDirEntries(t, efs, ".", []string{"alias2", "orig"})
+			efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	stOrig := erofstest.Stat(t, efs, "orig")
+			for _, name := range tc.survivors {
+				erofstest.CheckFile(t, efs, name, "hardlink payload\n")
+			}
 
-	stAlias := erofstest.Stat(t, efs, "alias2")
-	if stOrig.Ino != stAlias.Ino {
-		t.Errorf("Ino mismatch after alias remove: orig=%d alias2=%d", stOrig.Ino, stAlias.Ino)
-	}
+			erofstest.CheckDirEntries(t, efs, ".", tc.survivors)
 
-	if stOrig.Nlink != 2 {
-		t.Errorf("orig nlink after alias remove: got %d, want 2", stOrig.Nlink)
-	}
-}
+			st0 := erofstest.Stat(t, efs, tc.survivors[0])
 
-// TestWriterRemoveHardlinkCanonicalPromotes verifies that removing the
-// canonical path of a hardlink group promotes the first surviving alias
-// to canonical (POSIX unlink semantics).
-func TestWriterRemoveHardlinkCanonicalPromotes(t *testing.T) {
-	var buf testBuffer
+			st1 := erofstest.Stat(t, efs, tc.survivors[1])
+			if st0.Ino != st1.Ino {
+				t.Errorf("Ino mismatch after removing %s: %s=%d %s=%d",
+					tc.remove, tc.survivors[0], st0.Ino, tc.survivors[1], st1.Ino)
+			}
 
-	w := erofs.Create(&buf)
-
-	f, err := w.Create("/orig")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err = f.Write([]byte("promote me\n")); err != nil {
-		t.Fatal(err)
-	}
-
-	if err = f.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	if err = w.Link("/orig", "/alias1"); err != nil {
-		t.Fatal(err)
-	}
-
-	if err = w.Link("/orig", "/alias2"); err != nil {
-		t.Fatal(err)
-	}
-
-	// Remove the canonical entry; data should survive via the aliases.
-	if err = w.Remove("/orig"); err != nil {
-		t.Fatal("Remove canonical:", err)
-	}
-
-	if err = w.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	erofstest.FsckErofsBytes(t, buf.Bytes())
-
-	efs, err := erofs.Open(bytes.NewReader(buf.Bytes()))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	erofstest.CheckFile(t, efs, "alias1", "promote me\n")
-	erofstest.CheckFile(t, efs, "alias2", "promote me\n")
-	erofstest.CheckDirEntries(t, efs, ".", []string{"alias1", "alias2"})
-
-	st1 := erofstest.Stat(t, efs, "alias1")
-
-	st2 := erofstest.Stat(t, efs, "alias2")
-	if st1.Ino != st2.Ino {
-		t.Errorf("Ino mismatch after canonical remove: alias1=%d alias2=%d", st1.Ino, st2.Ino)
-	}
-
-	if st1.Nlink != 2 {
-		t.Errorf("alias1 nlink: got %d, want 2", st1.Nlink)
+			if st0.Nlink != 2 {
+				t.Errorf("%s nlink after removing %s: got %d, want 2", tc.survivors[0], tc.remove, st0.Nlink)
+			}
+		})
 	}
 }
 
