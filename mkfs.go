@@ -753,17 +753,6 @@ func (fsys *Writer) placeEntry(fe *fsEntry) *fsEntry {
 	return existing
 }
 
-// inSubtreeOf reports whether e is d or lies beneath it.
-func (e *fsEntry) inSubtreeOf(d *fsEntry) bool {
-	for cur := e; cur != nil; cur = cur.parent {
-		if cur == d {
-			return true
-		}
-	}
-
-	return false
-}
-
 // --- Writer bulk copy ---
 
 // CopyFrom walks an fs.FS and adds all entries.
@@ -1208,6 +1197,17 @@ type fsEntry struct {
 
 	removed      bool // true if removed by a whiteout in a merge layer
 	metadataOnly bool // from a metadata-only CopyFrom; use chunk-based layout
+}
+
+// inSubtreeOf reports whether e is d or lies beneath it.
+func (e *fsEntry) inSubtreeOf(d *fsEntry) bool {
+	for cur := e; cur != nil; cur = cur.parent {
+		if cur == d {
+			return true
+		}
+	}
+
+	return false
 }
 
 // createOptions holds the parsed option values for Create.

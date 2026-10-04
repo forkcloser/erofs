@@ -131,7 +131,7 @@ func (w *erofsWriter) planLayout(root *erofsEntry) {
 			}
 		case disk.StatTypeSymlink:
 			inBlockOff := (currentOff + headerSize) % w.blockSize
-			if len(e.symTarget) > 0 && inBlockOff+len(e.symTarget) <= w.blockSize {
+			if e.symTarget != "" && inBlockOff+len(e.symTarget) <= w.blockSize {
 				e.layout = disk.LayoutFlatInline
 			} else {
 				e.layout = disk.LayoutFlatPlain

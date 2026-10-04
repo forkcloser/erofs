@@ -162,8 +162,8 @@ var Basic TestCase = &testCase{ //nolint:gochecknoglobals // immutable fixture: 
 			tc.Dir("/usr/lib/testdir", 0o755),
 			tc.File("/in-root.txt", []byte("root file content\n"), 0o600),
 			tc.File("/usr/lib/testdir/emptyfile", []byte{}, 0o600),
-			tc.File("/usr/lib/testdir/13k-zeros.raw", bytes.Repeat([]byte{0}, 1024*13), 0o600),
-			tc.File("/usr/lib/testdir/16k-zeros.raw", bytes.Repeat([]byte{0}, 1024*16), 0o600),
+			tc.File("/usr/lib/testdir/13k-zeros.raw", make([]byte, 1024*13), 0o600),
+			tc.File("/usr/lib/testdir/16k-zeros.raw", make([]byte, 1024*16), 0o600),
 			tc.File("/usr/lib/testdir/5k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*5), 0o600),
 			tc.File("/usr/lib/testdir/16k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*16), 0o600),
 			tc.Dir("/usr/lib/testdir/emptydir", 0o600),
@@ -215,8 +215,8 @@ var Basic TestCase = &testCase{ //nolint:gochecknoglobals // immutable fixture: 
 
 		CheckFile(tb, fsys, "in-root.txt", "root file content\n")
 		CheckFile(tb, fsys, "usr/lib/testdir/emptyfile", "")
-		CheckFileBytes(tb, fsys, "usr/lib/testdir/13k-zeros.raw", bytes.Repeat([]byte{0}, 1024*13))
-		CheckFileBytes(tb, fsys, "usr/lib/testdir/16k-zeros.raw", bytes.Repeat([]byte{0}, 1024*16))
+		CheckFileBytes(tb, fsys, "usr/lib/testdir/13k-zeros.raw", make([]byte, 1024*13))
+		CheckFileBytes(tb, fsys, "usr/lib/testdir/16k-zeros.raw", make([]byte, 1024*16))
 		CheckFileBytes(tb, fsys, "usr/lib/testdir/5k-sequence.raw", bytes.Repeat([]byte{1, 2, 3, 4, 5, 6, 7, 8}, 128*5))
 		CheckFileBytes(
 			tb,
