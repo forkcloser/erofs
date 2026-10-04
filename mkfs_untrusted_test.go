@@ -377,6 +377,7 @@ func TestUntrustedDirectoryCycleFullImageTerminates(t *testing.T) {
 	case err := <-done:
 		var after runtime.MemStats
 
+		//revive:disable-next-line:call-to-gc resident memory is measured from a collected heap
 		runtime.GC()
 		runtime.ReadMemStats(&after)
 

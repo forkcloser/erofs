@@ -228,11 +228,13 @@ func disableGC(b *testing.B) (gc func()) {
 
 	prev := debug.SetGCPercent(-1)
 
+	//revive:disable-next-line:call-to-gc the measured run starts from a collected heap
 	runtime.GC()
 	b.Cleanup(func() { debug.SetGCPercent(prev) })
 
 	return func() {
 		b.StopTimer()
+		//revive:disable-next-line:call-to-gc collecting with the timer stopped keeps it out of the measurement
 		runtime.GC()
 		b.StartTimer()
 	}

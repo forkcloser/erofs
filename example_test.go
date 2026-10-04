@@ -48,6 +48,8 @@ func ExampleOpen() {
 
 // buildExampleImage writes a small image to a temporary file and returns
 // its path.
+//
+//revive:disable:deep-exit an example helper fails as an example does, with log.Fatal
 func buildExampleImage() string {
 	path := filepath.Join(os.TempDir(), fmt.Sprintf("erofs-example-%d.img", os.Getpid()))
 
@@ -84,6 +86,8 @@ func buildExampleImage() string {
 
 	return path
 }
+
+//revive:enable:deep-exit
 
 func ExampleCreate() {
 	var buf testBuffer
