@@ -6,11 +6,9 @@ type block struct {
 	end    int32
 }
 
+// bytes is the loaded window of the block. Every block comes from the image's
+// pool with its buffer allocated, so the window is never nil.
 func (b *block) bytes() []byte {
-	if b.buf == nil || b.offset == -1 {
-		return nil
-	}
-
 	return b.buf[b.offset:b.end]
 }
 
