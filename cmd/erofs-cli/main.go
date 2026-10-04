@@ -21,6 +21,7 @@ func main() {
 	}
 }
 
+//nolint:forbidigo // the output is the program's interface, not logging
 func run(path string) error {
 	f, err := os.Open(path)
 	if err != nil {
