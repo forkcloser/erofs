@@ -22,12 +22,12 @@ func CheckMkfsVersion(minimum string) (bool, error) {
 		return false, fmt.Errorf("parsing mkfs.erofs version %q: %w", ver, err)
 	}
 
-	min, err := parseVersion(minimum)
+	minVer, err := parseVersion(minimum)
 	if err != nil {
 		return false, fmt.Errorf("parsing minimum version %q: %w", minimum, err)
 	}
 
-	return cur.less(min), nil
+	return cur.less(minVer), nil
 }
 
 type semver struct {

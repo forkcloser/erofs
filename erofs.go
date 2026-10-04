@@ -1169,6 +1169,8 @@ func checkDirentName(name []byte) error {
 // even though fs.ReadFile(sub, "../outside") is refused. io/fs does not
 // promise otherwise, and neither does a kernel mount. A caller that needs
 // containment has to walk with Lstat and refuse symlinks itself.
+//
+//revive:disable-next-line:function-result-limit the walk yields the inode, its type and its final name together.
 func (img *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.FileMode, basename string, err error) {
 	original := name
 	if !validPath(name) {

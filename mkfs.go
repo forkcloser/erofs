@@ -499,7 +499,7 @@ func (fsys *Writer) Chown(name string, uid, gid int) error {
 
 // checkOwner converts a uid:gid pair to the on-disk widths, refusing values
 // that do not fit.
-func checkOwner(uid, gid int) (uint32, uint32, error) {
+func checkOwner(uid, gid int) (uid32, gid32 uint32, err error) {
 	if uid < 0 || int64(uid) > math.MaxUint32 {
 		return 0, 0, fmt.Errorf("uid %d out of range: %w", uid, ErrInvalid)
 	}
@@ -1895,9 +1895,9 @@ func (fsys *Writer) promoteAlias(target *fsEntry) {
 
 	// The heir takes over the inode wholesale, keeping only its own name
 	// and place in the tree.
-	path, parent := heir.path, heir.parent
+	heirPath, heirParent := heir.path, heir.parent
 	*heir = *target
-	heir.path, heir.parent = path, parent
+	heir.path, heir.parent = heirPath, heirParent
 	heir.linkTo = nil
 	heir.removed = false
 
