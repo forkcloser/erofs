@@ -1,3 +1,5 @@
+// Command erofs-cli walks an EROFS image and prints every entry with its
+// type, mode, modification time and extended attributes.
 package main
 
 import (

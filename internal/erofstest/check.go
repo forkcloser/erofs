@@ -1,3 +1,5 @@
+// Package erofstest holds the fixtures and checks shared by the erofs tests:
+// tar inputs, mkfs.erofs and fsck.erofs drivers, and conformance cases.
 package erofstest
 
 import (

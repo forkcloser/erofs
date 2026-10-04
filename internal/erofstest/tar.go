@@ -25,8 +25,9 @@ import (
 	"time"
 )
 
-// WriterToTar is an type which writes to a tar writer
+// WriterToTar is a type which writes to a tar writer
 type WriterToTar interface {
+	// WriteTo writes the entry to tw.
 	WriteTo(*tar.Writer) error
 }
 
@@ -267,6 +268,7 @@ func (tc TarContext) Link(oldname, newname string) WriterToTar {
 	})
 }
 
+// Device returns a device node tar entry; ftype selects character or block.
 func (tc TarContext) Device(name string, ftype os.FileMode, major, minor int64) WriterToTar {
 	return writerToFn(func(tw *tar.Writer) error {
 		hdr := tc.newHeader(0o600, name, "", 0)

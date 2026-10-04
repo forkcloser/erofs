@@ -2,6 +2,7 @@ package disk
 
 import "io/fs"
 
+// The file type a directory entry carries (erofs_dirent.file_type).
 const (
 	FileTypeReg     = 1
 	FileTypeDir     = 2
@@ -10,7 +11,11 @@ const (
 	FileTypeFifo    = 5
 	FileTypeSock    = 6
 	FileTypeSymlink = 7
+)
 
+// The type and permission bits of an inode mode (erofs_inode.i_mode), as
+// in stat(2).
+const (
 	StatTypeMask    = 0o170000 // Mask for the type bits
 	StatTypeReg     = 0o100000 // Regular file
 	StatTypeDir     = 0o040000 // Directory
@@ -24,7 +29,8 @@ const (
 	StatTypeIsVTX   = 0o001000 // Sticky bit
 )
 
-// Converts EroFS filetypes to Go FileMode
+// EroFSFtypeToFileMode converts a directory entry file type to the
+// corresponding fs.FileMode type bits.
 func EroFSFtypeToFileMode(ftype uint8) fs.FileMode {
 	switch ftype {
 	case FileTypeDir:
@@ -44,6 +50,8 @@ func EroFSFtypeToFileMode(ftype uint8) fs.FileMode {
 	}
 }
 
+// EroFSModeToGoFileMode converts an inode mode to an fs.FileMode, type bits
+// and permission bits included. An unknown type maps to fs.ModeIrregular.
 func EroFSModeToGoFileMode(mode uint16) fs.FileMode {
 	var m fs.FileMode
 
@@ -81,6 +89,8 @@ func EroFSModeToGoFileMode(mode uint16) fs.FileMode {
 	return m
 }
 
+// RdevFromMode returns the device number an inode of the given mode stores
+// in its i_u field, or 0 when the type carries none.
 func RdevFromMode(mode uint16, inodeData uint32) uint32 {
 	switch mode & StatTypeMask {
 	case StatTypeChrdev, StatTypeBlkdev, StatTypeFifo, StatTypeSock:
