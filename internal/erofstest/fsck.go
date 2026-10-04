@@ -1,7 +1,6 @@
 package erofstest
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"testing"
@@ -81,7 +80,7 @@ func FsckErofsDevice(t testing.TB, imagePath string, devicePaths ...string) {
 
 	args := []string{imagePath}
 	for _, d := range devicePaths {
-		args = append(args, fmt.Sprintf("--device=%s", d))
+		args = append(args, "--device="+d)
 	}
 
 	cmd := exec.Command("fsck.erofs", args...)

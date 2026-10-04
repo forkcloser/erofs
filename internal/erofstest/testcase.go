@@ -65,7 +65,7 @@ func MkfsErofsBlobDev(chunkSize int, extraOpts ...string) Converter {
 		blobPath := path + ".blob"
 
 		opts := append([]string{
-			fmt.Sprintf("--blobdev=%s", blobPath),
+			"--blobdev=" + blobPath,
 			fmt.Sprintf("--chunksize=%d", chunkSize),
 		}, extraOpts...)
 		if err := ConvertTarErofs(context.Background(), tarStream, path, "", opts); err != nil {

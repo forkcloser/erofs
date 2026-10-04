@@ -156,7 +156,7 @@ func initFuzzWide(t testing.TB) fuzzImage {
 			entries = append(entries, tc.Dir("/"+dirName, 0o755))
 			dirs = append(dirs, dirName)
 
-			fname := fmt.Sprintf("%s/main.go", dirName)
+			fname := dirName + "/main.go"
 			entries = append(entries, tc.File("/"+fname, fmt.Appendf(nil, "package pkg%03d\n", i), 0o644))
 			files = append(files, fname)
 		}
