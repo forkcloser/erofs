@@ -1,0 +1,85 @@
+# This project's carve-outs from the Go lint baseline (.limen/lint-go.yaml):
+# the baseline's sections, in its shape, holding only what this project adds,
+# changes or takes out (book/per-language.md, "one baseline, per-project
+# carve-outs"). `just do lint go` renders the two on every run.
+golangci:
+  linters:
+    exclusions:
+      rules:
+        # ONBOARDING BACKLOG (book/mandatory-files.md, "onboarding an existing
+        # repository"): the findings limen v0.7.2's baseline reports on code that
+        # predates it, not yet read. Not a judgment: each entry is a linter and
+        # the files it fires in, to be emptied one linter or one package per
+        # pull request, and the block deleted with the last one.
+        - path: ^(cmd/erofs\-cli/main\.go|example_test\.go|internal/disk/types_test\.go)$
+          linters: [depguard]
+        - path: ^(mkfs_remove_test\.go)$
+          linters: [dupl]
+        - path: ^(mkfs_untrusted_test\.go)$
+          linters: [embeddedstructfieldcheck]
+        - path: ^(erofs\.go|internal/erofstest/mkfs\.go|internal/erofstest/tar\.go|internal/erofstest/testbuf\.go|mkfs\.go|mkfs_image\.go|mkfs_test\.go|mkfs_untrusted_test\.go|testbuf_test\.go|writer\.go)$
+          linters: [err113]
+        - path: ^(erofs_directread_test\.go|erofs_fuzz_test\.go|perf_audit_test\.go)$
+          linters: [errorlint]
+        - path: ^(format\.go)$
+          linters: [exhaustive]
+        - path: ^(cmd/erofs\-cli/main\.go)$
+          linters: [forbidigo]
+        - path: ^(erofs\.go|internal/erofstest/tar\.go|mkfs\.go)$
+          linters: [funcorder]
+        - path: ^(erofs_fuzz_test\.go|format\.go|internal/erofstest/testcase\.go)$
+          linters: [gochecknoglobals]
+        - path: ^(erofs\.go|internal/erofstest/testcase\.go|layout\.go|mkfs\.go|mkfs_image\.go|writer\.go|xattr\.go)$
+          linters: [gocognit]
+        - path: ^(erofs\.go|internal/erofstest/testcase\.go|mkfs\.go)$
+          linters: [goconst]
+        - path: ^(erofs\.go|internal/erofstest/testcase\.go|layout\.go|mkfs\.go|writer\.go)$
+          linters: [gocritic]
+        - path: ^(erofs\.go|internal/disk/ftypes\.go|internal/disk/types\.go|internal/erofstest/tar\.go)$
+          linters: [godot]
+        - path: ^(cmd/erofs\-cli/main\.go|erofs\.go|format\.go|internal/erofstest/convert\.go|internal/erofstest/fsck\.go|internal/erofstest/testcase\.go|layout\.go|mkfs\.go|mkfs_image\.go|writer\.go|xattr\.go)$
+          linters: [gosec]
+        - path: ^(chunk_xattr_test\.go|erofs_loadat_test\.go|internal/erofstest/tar\.go|mkfs_copy_test\.go|mkfs_untrusted_test\.go)$
+          linters: [inamedparam]
+        - path: ^(erofs\.go|mkfs_image\.go|xattr\.go)$
+          linters: [intrange]
+        - path: ^(erofs\.go|internal/disk/ftypes\.go|internal/erofstest/tar\.go|internal/erofstest/testcase\.go|layout\.go|mkfs\.go|mkfs_image\.go|writer\.go|xattr\.go)$
+          linters: [mnd]
+        - path: ^(erofs\.go|mkfs_remove_test\.go)$
+          linters: [modernize]
+        - path: ^(erofs_fuzz_test\.go|mkfs_untrusted_test\.go)$
+          linters: [nilerr]
+        - path: ^(mkfs_image\.go)$
+          linters: [nilnil]
+        - path: ^(bench_test\.go|erofs_loadat_test\.go|erofs_test\.go|internal/erofstest/fsck\.go|internal/erofstest/mkfs\.go|mkfs_chunkmap_test\.go|mkfs_limits_test\.go)$
+          linters: [noctx]
+        - path: ^(bench_test\.go)$
+          linters: [nolintlint]
+        - path: ^(chunk_xattr_test\.go|erofs_directread_test\.go|erofs_fsconform_test\.go|erofs_loadat_test\.go|erofs_test\.go|format_test\.go|internal/disk/types_test\.go|mkfs_chunkmap_test\.go|mkfs_copy_test\.go|mkfs_limits_test\.go|mkfs_link_test\.go|mkfs_openfile_test\.go|mkfs_remove_test\.go|mkfs_test\.go|mkfs_untrusted_test\.go|perf_audit_test\.go)$
+          linters: [paralleltest]
+        - path: ^(erofs_fuzz_test\.go|internal/erofstest/fsck\.go|internal/erofstest/mkfs\.go|internal/erofstest/testcase\.go|mkfs\.go|mkfs_test\.go)$
+          linters: [perfsprint]
+        - path: ^(bench_test\.go|chunk_xattr_test\.go|cmd/erofs\-cli/main\.go|erofs\.go|erofs_directread_test\.go|erofs_fuzz_test\.go|erofs_loadat_test\.go|erofs_test\.go|example_test\.go|internal/disk/ftypes\.go|internal/disk/types\.go|internal/erofstest/check\.go|internal/erofstest/convert\.go|internal/erofstest/mkfs\.go|internal/erofstest/tar\.go|internal/erofstest/testbuf\.go|internal/erofstest/testcase\.go|mkfs\.go|mkfs_chunkmap_test\.go|mkfs_image\.go|mkfs_limits_test\.go|mkfs_test\.go|mkfs_untrusted_test\.go|perf_audit_test\.go)$
+          linters: [revive]
+        - path: ^(erofs_directread_test\.go|erofs_fsconform_test\.go|erofs_loadat_test\.go|format_test\.go|internal/disk/types_test\.go|mkfs_chunkmap_test\.go|mkfs_limits_test\.go|mkfs_openfile_test\.go|mkfs_untrusted_test\.go|perf_audit_test\.go)$
+          linters: [testpackage]
+        - path: ^(erofs_fuzz_test\.go|internal/erofstest/check\.go|internal/erofstest/fsck\.go|internal/erofstest/testcase\.go|mkfs_link_test\.go)$
+          linters: [thelper]
+        - path: ^(bench_test\.go|erofs_fuzz_test\.go|erofs_test\.go|internal/erofstest/testcase\.go|mkfs_copy_test\.go)$
+          linters: [usestdlibvars]
+        - path: ^(erofs_fuzz_test\.go|erofs_test\.go|internal/erofstest/testcase\.go)$
+          linters: [usetesting]
+        - path: ^(cmd/erofs\-cli/main\.go|erofs\.go|format\.go|internal/disk/ftypes\.go|internal/erofstest/check\.go|internal/erofstest/fsck\.go|internal/erofstest/mkfs\.go|internal/erofstest/tar\.go|internal/erofstest/testcase\.go|layout\.go|mkfs\.go|mkfs_image\.go|writer\.go|xattr\.go)$
+          linters: [varnamelen]
+        - path: ^(erofs\.go|erofs_fuzz_test\.go)$
+          linters: [wastedassign]
+        - path: ^(cmd/erofs\-cli/main\.go|erofs\.go|internal/erofstest/tar\.go|mkfs\.go|mkfs_image\.go|writer\.go)$
+          linters: [wrapcheck]
+
+nilaway:
+  exclude-errors-in-files:
+    # ONBOARDING BACKLOG, as above: the files NilAway reports in, not yet read.
+    - bench_test.go
+    - block.go
+    - erofs.go
+    - erofs_fuzz_test.go
