@@ -3,7 +3,7 @@
 # verify-windows-image jobs are INTERIM: see .github/scripts/build-erofs-utils.sh
 # for what retires them.
 #
-# Minimal glue: GitHub's own actions pinned by SHA, aqua at aqua.yaml's pins,
+# Minimal glue: GitHub's own actions pinned by SHA, aqua at .aqua/aqua.yaml's pins,
 # `just` running the recipes a laptop runs. No third-party actions, hence no
 # egress-filtering action either.
 name: ci
@@ -69,7 +69,7 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.AQUA_ROOT_DIR }}/pkgs
-          key: aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('aqua.yaml', 'aqua-checksums.json', '.limen/aqua-registry.yaml') }}
+          key: aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.aqua/aqua.yaml', '.aqua/aqua-checksums.json', '.limen/aqua-registry.yaml') }}
           restore-keys: |
             aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-
 
@@ -139,7 +139,7 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.AQUA_ROOT_DIR }}/pkgs
-          key: aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('aqua.yaml', 'aqua-checksums.json', '.limen/aqua-registry.yaml') }}
+          key: aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.aqua/aqua.yaml', '.aqua/aqua-checksums.json', '.limen/aqua-registry.yaml') }}
           restore-keys: |
             aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-
 
@@ -170,7 +170,7 @@ jobs:
           fetch-depth: 0
 
       # Into the same project-local tool dir the native builds use: the root
-      # Justfile's PATH addition finds it, no GITHUB_PATH plumbing needed.
+      # .justfile's PATH addition finds it, no GITHUB_PATH plumbing needed.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: mkfs-erofs-windows
@@ -184,7 +184,7 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.AQUA_ROOT_DIR }}/pkgs
-          key: aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('aqua.yaml', 'aqua-checksums.json', '.limen/aqua-registry.yaml') }}
+          key: aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.aqua/aqua.yaml', '.aqua/aqua-checksums.json', '.limen/aqua-registry.yaml') }}
           restore-keys: |
             aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-
 
@@ -292,7 +292,7 @@ jobs:
           # The same key as the verify legs', so this job and the linux leg
           # share one store — and no fallback key here: a changed pin must be
           # a real install, which is what this job exists to prove.
-          key: aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('aqua.yaml', 'aqua-checksums.json', '.limen/aqua-registry.yaml') }}
+          key: aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.aqua/aqua.yaml', '.aqua/aqua-checksums.json', '.limen/aqua-registry.yaml') }}
 
       - name: Install every pinned tool
         run: aqua install
