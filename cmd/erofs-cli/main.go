@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
-	"log"
 	"os"
 
 	"github.com/forkcloser/erofs"
@@ -19,7 +18,8 @@ func main() {
 	flag.Parse()
 
 	if err := run(path); err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, "erofs-cli:", err)
+		os.Exit(1)
 	}
 }
 

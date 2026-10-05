@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io/fs"
-	"log"
+	"log" //nolint:depguard // examples end on log.Fatal, as the standard library's do
 	"os"
 	"path/filepath"
 

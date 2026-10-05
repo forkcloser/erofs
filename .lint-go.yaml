@@ -11,8 +11,6 @@ golangci:
         # predates it, not yet read. Not a judgment: each entry is a linter and
         # the files it fires in, to be emptied one linter or one package per
         # pull request, and the block deleted with the last one.
-        - path: ^(cmd/erofs\-cli/main\.go|example_test\.go|internal/disk/types_test\.go)$
-          linters: [depguard]
         - path: ^(mkfs_remove_test\.go)$
           linters: [dupl]
         - path: ^(mkfs_untrusted_test\.go)$

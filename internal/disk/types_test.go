@@ -3,7 +3,7 @@ package disk
 import (
 	"bytes"
 	"encoding/binary"
-	"math/rand"
+	"math/rand/v2"
 	"reflect"
 	"testing"
 )
@@ -13,13 +13,15 @@ import (
 // reordered or resized in the struct cannot silently diverge from the manual
 // offsets.
 
-func randBytes(t *testing.T, n int, seed int64) []byte {
+func randBytes(t *testing.T, n int, seed uint64) []byte {
 	t.Helper()
 
-	b := make([]byte, n)
+	var key [32]byte
 
-	r := rand.New(rand.NewSource(seed))
-	if _, err := r.Read(b); err != nil {
+	binary.LittleEndian.PutUint64(key[:], seed)
+
+	b := make([]byte, n)
+	if _, err := rand.NewChaCha8(key).Read(b); err != nil {
 		t.Fatal(err)
 	}
 
@@ -102,7 +104,7 @@ func TestUnmarshalMatchesBinaryDecode(t *testing.T) {
 				make([]byte, tc.size),
 				bytes.Repeat([]byte{0xFF}, tc.size),
 			}
-			for seed := range int64(200) {
+			for seed := range uint64(200) {
 				inputs = append(inputs, randBytes(t, tc.size, seed))
 			}
 
