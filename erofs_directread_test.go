@@ -2,6 +2,7 @@ package erofs
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"io/fs"
 	"testing"
@@ -31,7 +32,7 @@ func readAllVia(t *testing.T, img *image, name string, bufSize int, forceBlockPa
 		n, err := f.Read(buf)
 		out = append(out, buf[:n]...)
 
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 
