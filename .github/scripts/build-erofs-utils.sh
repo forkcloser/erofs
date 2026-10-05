@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Build erofs-utils from source, patched, for the image-backed tests.
 #
-# Installs into build/erofs-utils/ — the root Justfile prepends its bin/ to
+# Installs into build/erofs-utils/ — the root .justfile prepends its bin/ to
 # limen's hermetic PATH; a /usr/local install is invisible to `just test`. The
 # apt/brew build-dependency packages are the one unpinned input. INTERIM until
-# a forkcloser erofs-utils release is pinned in aqua.yaml.
+# a forkcloser erofs-utils release is pinned in .aqua/aqua.yaml.
 #
 # Usage:
 #   build-erofs-utils.sh native    build and install for this host (linux or
