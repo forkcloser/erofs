@@ -120,8 +120,7 @@ func TestWriterRemoveNonEmptyDirFails(t *testing.T) {
 		t.Fatal("expected error removing non-empty directory")
 	}
 
-	var pe *fs.PathError
-	if !errors.As(err, &pe) {
+	if _, ok := errors.AsType[*fs.PathError](err); !ok {
 		t.Fatalf("error is not *fs.PathError: %T %v", err, err)
 	}
 
