@@ -26,6 +26,9 @@ type fuzzImage struct {
 	dirs  []string // valid directory paths (no leading slash)
 }
 
+// One image per shape, built once per process and only ever read.
+//
+//nolint:gochecknoglobals // shared lazily built fixtures, see above
 var (
 	fuzzFlat     fuzzImage
 	fuzzFlatOnce sync.Once

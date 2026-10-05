@@ -143,7 +143,7 @@ func (tc *testCase) Run(tb testing.TB, conv Converter) {
 // Basic is the standard test case exercising files, directories, symlinks,
 // empty files, large files, case-sensitive names, many-entry directories,
 // xattrs (including long prefixes), and device files.
-var Basic TestCase = &testCase{
+var Basic TestCase = &testCase{ //nolint:gochecknoglobals // immutable fixture: Run rebuilds the tar on every call
 	tar: func() WriterToTar {
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
@@ -314,7 +314,7 @@ const (
 // layouts where inline xattr space is limited. The tar content also
 // includes very long PAX headers that mkfs.ext4's libarchive cannot parse,
 // so this test case is not suitable for the ext4 converter.
-var LongXattrs TestCase = &testCase{
+var LongXattrs TestCase = &testCase{ //nolint:gochecknoglobals // immutable fixture: Run rebuilds the tar on every call
 	tar: func() WriterToTar {
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
@@ -349,7 +349,7 @@ var LongXattrs TestCase = &testCase{
 // SpecialModeBits checks that setuid, setgid and sticky bits survive the
 // round trip into fs.FileInfo.Mode, and that the mode reported by Mode() is
 // a well-formed fs.FileMode (no raw on-disk bits) for ordinary entries too.
-var SpecialModeBits TestCase = &testCase{
+var SpecialModeBits TestCase = &testCase{ //nolint:gochecknoglobals // immutable fixture: Run rebuilds the tar on every call
 	tar: func() WriterToTar {
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
@@ -401,7 +401,7 @@ var SpecialModeBits TestCase = &testCase{
 //   - 4097 bytes: just over one block (exercises partial second block)
 //   - 8000 bytes: spans 2 blocks with a partial last block
 //   - 1MB: many blocks, exercises sustained sequential reads
-var FileSizes TestCase = &testCase{
+var FileSizes TestCase = &testCase{ //nolint:gochecknoglobals // immutable fixture: Run rebuilds the tar on every call
 	tar: func() WriterToTar {
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
@@ -425,7 +425,7 @@ var FileSizes TestCase = &testCase{
 // exercising chunk index overflow where multiple chunk entries are needed.
 // This test case should be run with a single 4KB-chunk converter to avoid
 // redundant work.
-var LargeFile TestCase = &testCase{
+var LargeFile TestCase = &testCase{ //nolint:gochecknoglobals // immutable fixture: Run rebuilds the tar on every call
 	tar: func() WriterToTar {
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 		// 256MB + 4KB to push past the 65535-block boundary.
@@ -442,7 +442,7 @@ var LargeFile TestCase = &testCase{
 // uidgidTestValues is the shared set of UID/GID pairs tested by
 // UIDGIDValues. Defined once to avoid drift between tar creation and
 // verification.
-var uidgidTestValues = []struct{ uid, gid int }{
+var uidgidTestValues = []struct{ uid, gid int }{ //nolint:gochecknoglobals // read-only table
 	{0, 0},
 	{1, 1},
 	{1000, 2000},
@@ -458,7 +458,7 @@ var uidgidTestValues = []struct{ uid, gid int }{
 // UIDGIDValues tests a variety of UID/GID values including boundary values
 // for compact (uint16) and extended (uint32) inodes. Each value is tested
 // on a regular file, directory, and symlink.
-var UIDGIDValues TestCase = &testCase{
+var UIDGIDValues TestCase = &testCase{ //nolint:gochecknoglobals // immutable fixture: Run rebuilds the tar on every call
 	tar: func() WriterToTar {
 		base := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 
@@ -570,7 +570,7 @@ func verifyContent(tb testing.TB, fsys fs.FS, name string, size int) {
 // Note: This test case requires mkfs.erofs with --chunksize to trigger
 // sparse chunk creation. The Go-native builder does not yet produce sparse
 // chunks, so only the mkfs.erofs converter produces correct results.
-var SparseFiles TestCase = &testCase{
+var SparseFiles TestCase = &testCase{ //nolint:gochecknoglobals // immutable fixture: Run rebuilds the tar on every call
 	tar: func() WriterToTar {
 		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 		marker := []byte("hello sparse world!\n")
