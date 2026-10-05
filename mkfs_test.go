@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -628,7 +629,7 @@ func TestCreateFSEmpty(t *testing.T) {
 // with different block sizes and that invalid sizes are rejected.
 func TestCreateFSBlockSize(t *testing.T) {
 	for _, bs := range []int{512, 1024, 4096, 65536} {
-		t.Run(fmt.Sprintf("%d", bs), func(t *testing.T) {
+		t.Run(strconv.Itoa(bs), func(t *testing.T) {
 			var buf testBuffer
 
 			fsys := erofs.Create(&buf, erofs.WithBlockSize(bs))
