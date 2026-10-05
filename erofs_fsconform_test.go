@@ -1,4 +1,4 @@
-package erofs
+package erofs_test
 
 import (
 	"bytes"
@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"testing"
 	"testing/fstest"
+
+	"github.com/forkcloser/erofs"
 )
 
 // conformImage builds a small image with a nested directory, a symlink and a
@@ -13,9 +15,9 @@ import (
 func conformImage(t *testing.T) fs.FS {
 	t.Helper()
 
-	out := &seekBuf{}
+	out := &testBuffer{}
 
-	w := Create(out, WithBuildTime(1000, 0))
+	w := erofs.Create(out, erofs.WithBuildTime(1000, 0))
 	if err := w.Mkdir("/dir", 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +34,7 @@ func conformImage(t *testing.T) fs.FS {
 		t.Fatal(err)
 	}
 
-	img, err := Open(bytes.NewReader(out.buf))
+	img, err := erofs.Open(bytes.NewReader(out.Bytes()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,15 +127,15 @@ func TestNonUTF8NamesRemainReachable(t *testing.T) {
 
 	const raw = "\xff\xfe-name"
 
-	out := &seekBuf{}
-	w := Create(out, WithBuildTime(1000, 0))
+	out := &testBuffer{}
+	w := erofs.Create(out, erofs.WithBuildTime(1000, 0))
 	writeFile(t, w, "/"+raw, []byte("payload"))
 
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	img, err := Open(bytes.NewReader(out.buf))
+	img, err := erofs.Open(bytes.NewReader(out.Bytes()))
 	if err != nil {
 		t.Fatal(err)
 	}

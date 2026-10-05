@@ -1,4 +1,4 @@
-package disk
+package disk_test
 
 import (
 	"bytes"
@@ -6,6 +6,8 @@ import (
 	"math/rand/v2"
 	"reflect"
 	"testing"
+
+	"github.com/forkcloser/erofs/internal/disk"
 )
 
 // The Unmarshal methods hand-decode layouts that binary.Decode derives from
@@ -39,9 +41,9 @@ func TestUnmarshalMatchesBinaryDecode(t *testing.T) {
 	}{
 		{
 			name: "InodeCompact",
-			size: SizeInodeCompact,
+			size: disk.SizeInodeCompact,
 			decode: func(b []byte) (any, any, error) {
-				var manual, want InodeCompact
+				var manual, want disk.InodeCompact
 				manual.Unmarshal(b)
 				_, err := binary.Decode(b, binary.LittleEndian, &want)
 
@@ -50,9 +52,9 @@ func TestUnmarshalMatchesBinaryDecode(t *testing.T) {
 		},
 		{
 			name: "InodeExtended",
-			size: SizeInodeExtended,
+			size: disk.SizeInodeExtended,
 			decode: func(b []byte) (any, any, error) {
-				var manual, want InodeExtended
+				var manual, want disk.InodeExtended
 				manual.Unmarshal(b)
 				_, err := binary.Decode(b, binary.LittleEndian, &want)
 
@@ -61,9 +63,9 @@ func TestUnmarshalMatchesBinaryDecode(t *testing.T) {
 		},
 		{
 			name: "Dirent",
-			size: SizeDirent,
+			size: disk.SizeDirent,
 			decode: func(b []byte) (any, any, error) {
-				var manual, want Dirent
+				var manual, want disk.Dirent
 				manual.Unmarshal(b)
 				_, err := binary.Decode(b, binary.LittleEndian, &want)
 
@@ -72,9 +74,9 @@ func TestUnmarshalMatchesBinaryDecode(t *testing.T) {
 		},
 		{
 			name: "XattrHeader",
-			size: SizeXattrBodyHeader,
+			size: disk.SizeXattrBodyHeader,
 			decode: func(b []byte) (any, any, error) {
-				var manual, want XattrHeader
+				var manual, want disk.XattrHeader
 				manual.Unmarshal(b)
 				_, err := binary.Decode(b, binary.LittleEndian, &want)
 
@@ -83,9 +85,9 @@ func TestUnmarshalMatchesBinaryDecode(t *testing.T) {
 		},
 		{
 			name: "XattrEntry",
-			size: SizeXattrEntry,
+			size: disk.SizeXattrEntry,
 			decode: func(b []byte) (any, any, error) {
-				var manual, want XattrEntry
+				var manual, want disk.XattrEntry
 				manual.Unmarshal(b)
 				_, err := binary.Decode(b, binary.LittleEndian, &want)
 
@@ -137,15 +139,15 @@ func mustNew(t *testing.T, tc struct {
 
 	switch tc.name {
 	case "InodeCompact":
-		return &InodeCompact{}
+		return &disk.InodeCompact{}
 	case "InodeExtended":
-		return &InodeExtended{}
+		return &disk.InodeExtended{}
 	case "Dirent":
-		return &Dirent{}
+		return &disk.Dirent{}
 	case "XattrHeader":
-		return &XattrHeader{}
+		return &disk.XattrHeader{}
 	case "XattrEntry":
-		return &XattrEntry{}
+		return &disk.XattrEntry{}
 	}
 
 	t.Fatalf("unknown case %q", tc.name)
@@ -154,16 +156,16 @@ func mustNew(t *testing.T, tc struct {
 }
 
 func BenchmarkDecodeInodeCompact(b *testing.B) {
-	buf := make([]byte, SizeInodeCompact)
+	buf := make([]byte, disk.SizeInodeCompact)
 
 	b.Run("manual", func(b *testing.B) {
-		var v InodeCompact
+		var v disk.InodeCompact
 		for range b.N {
 			v.Unmarshal(buf)
 		}
 	})
 	b.Run("reflect", func(b *testing.B) {
-		var v InodeCompact
+		var v disk.InodeCompact
 		for range b.N {
 			if _, err := binary.Decode(buf, binary.LittleEndian, &v); err != nil {
 				b.Fatal(err)
@@ -173,16 +175,16 @@ func BenchmarkDecodeInodeCompact(b *testing.B) {
 }
 
 func BenchmarkDecodeDirent(b *testing.B) {
-	buf := make([]byte, SizeDirent)
+	buf := make([]byte, disk.SizeDirent)
 
 	b.Run("manual", func(b *testing.B) {
-		var v Dirent
+		var v disk.Dirent
 		for range b.N {
 			v.Unmarshal(buf)
 		}
 	})
 	b.Run("reflect", func(b *testing.B) {
-		var v Dirent
+		var v disk.Dirent
 		for range b.N {
 			if _, err := binary.Decode(buf, binary.LittleEndian, &v); err != nil {
 				b.Fatal(err)
@@ -197,8 +199,8 @@ func BenchmarkDecodeDirent(b *testing.B) {
 func TestSuperBlockMarshalMatchesReflection(t *testing.T) {
 	t.Parallel()
 
-	sb := SuperBlock{
-		MagicNumber: MagicNumber, Checksum: 0x11223344, FeatureCompat: 0x55667788,
+	sb := disk.SuperBlock{
+		MagicNumber: disk.MagicNumber, Checksum: 0x11223344, FeatureCompat: 0x55667788,
 		BlkSizeBits: 12, ExtSlots: 3, RootNid: 0xABCD,
 		Inos: 0x0102030405060708, BuildTime: 0x1112131415161718, BuildTimeNs: 0x21222324,
 		Blocks: 0x31323334, MetaBlkAddr: 0x41424344, XattrBlkAddr: 0x51525354,
@@ -207,7 +209,7 @@ func TestSuperBlockMarshalMatchesReflection(t *testing.T) {
 		ComprAlgs:   0x6162,
 		DevtSlotOff: 9, DirBlkBits: 12, XattrPrefixCount: 7, XattrPrefixStart: 0x71727374,
 		PackedNid: 0x8182838485868788, XattrFilterRes: 0x91,
-		FeatureIncompat: FeatureIncompatChunkedFile, ExtraDevices: 2,
+		FeatureIncompat: disk.FeatureIncompatChunkedFile, ExtraDevices: 2,
 	}
 	for i := range sb.Reserved {
 		sb.Reserved[i] = uint8(i + 1)
@@ -218,14 +220,14 @@ func TestSuperBlockMarshalMatchesReflection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := make([]byte, SizeSuperBlock)
+	got := make([]byte, disk.SizeSuperBlock)
 	sb.Marshal(got)
 
 	if !bytes.Equal(got, want.Bytes()) {
 		t.Fatalf("Marshal disagrees with binary.Write:\n got %x\nwant %x", got, want.Bytes())
 	}
 
-	var back SuperBlock
+	var back disk.SuperBlock
 	back.Unmarshal(got)
 
 	if back != sb {
@@ -236,7 +238,7 @@ func TestSuperBlockMarshalMatchesReflection(t *testing.T) {
 func TestDeviceSlotMarshalMatchesReflection(t *testing.T) {
 	t.Parallel()
 
-	var ds DeviceSlot
+	var ds disk.DeviceSlot
 	for i := range ds.Tag {
 		ds.Tag[i] = uint8(i)
 	}
@@ -253,14 +255,14 @@ func TestDeviceSlotMarshalMatchesReflection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := make([]byte, SizeDeviceSlot)
+	got := make([]byte, disk.SizeDeviceSlot)
 	ds.Marshal(got)
 
 	if !bytes.Equal(got, want.Bytes()) {
 		t.Fatalf("Marshal disagrees with binary.Write:\n got %x\nwant %x", got, want.Bytes())
 	}
 
-	var back DeviceSlot
+	var back disk.DeviceSlot
 	back.Unmarshal(got)
 
 	if back != ds {

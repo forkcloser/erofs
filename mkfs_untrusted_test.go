@@ -1,4 +1,4 @@
-package erofs
+package erofs //nolint:testpackage // white-box: forges hostile images and writer states from unexported types
 
 import (
 	"bytes"

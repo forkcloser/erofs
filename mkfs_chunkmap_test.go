@@ -1,4 +1,4 @@
-package erofs
+package erofs_test
 
 import (
 	"bytes"
@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"testing"
 	"time"
+
+	"github.com/forkcloser/erofs"
 )
 
 // sparseFS is a metadata-only source describing one file whose content lives
@@ -16,7 +18,7 @@ type sparseFS struct {
 	blockSize uint32
 	blocks    uint64
 	size      int64
-	ranges    []DataRange
+	ranges    []erofs.DataRange
 	// noRanges makes DataRange report nothing, the shape a metadata-only
 	// source takes when it cannot describe where its data lives. The entry
 	// still becomes chunk-based, just with no mappings.
@@ -93,7 +95,7 @@ func (*sparseInfo) ModTime() time.Time { return time.Unix(1000, 0) }
 func (i *sparseInfo) IsDir() bool      { return i.dir }
 func (*sparseInfo) Sys() any           { return nil }
 
-func (i *sparseInfo) DataRange() []DataRange {
+func (i *sparseInfo) DataRange() []erofs.DataRange {
 	if i.dir || i.s.noRanges {
 		return nil
 	}
@@ -118,9 +120,9 @@ func newSparseFS(bs int, blob []byte) *sparseFS {
 		blockSize: uint32(bs),
 		blocks:    uint64(len(blob) / bs),
 		size:      int64(4 * bs),
-		ranges: []DataRange{
+		ranges: []erofs.DataRange{
 			{Device: 0, Offset: 0, Size: int64(bs)},
-			{Offset: holeOffset, Size: int64(bs)},
+			{Offset: -1, Size: int64(bs)}, // a hole
 			{Device: 0, Offset: int64(2 * bs), Size: int64(2 * bs)},
 		},
 	}
@@ -136,6 +138,13 @@ func checkSparseContent(t *testing.T, img fs.FS, bs int, label string) {
 	if err != nil {
 		t.Fatalf("%s: read: %v", label, err)
 	}
+
+	checkSparseBytes(t, got, bs, label)
+}
+
+// checkSparseBytes is checkSparseContent on content already read.
+func checkSparseBytes(t *testing.T, got []byte, bs int, label string) {
+	t.Helper()
 
 	if len(got) != 4*bs {
 		t.Fatalf("%s: read %d bytes, want %d", label, len(got), 4*bs)
@@ -163,10 +172,10 @@ func TestChunkMapHonoursBlockSize(t *testing.T) {
 
 			blob := sparseBlob(bs)
 
-			out := &seekBuf{}
+			out := &testBuffer{}
 
-			w := Create(out, WithBlockSize(bs), WithBuildTime(1000, 0))
-			if err := w.CopyFrom(newSparseFS(bs, blob), MetadataOnly()); err != nil {
+			w := erofs.Create(out, erofs.WithBlockSize(bs), erofs.WithBuildTime(1000, 0))
+			if err := w.CopyFrom(newSparseFS(bs, blob), erofs.MetadataOnly()); err != nil {
 				t.Fatal(err)
 			}
 
@@ -174,13 +183,13 @@ func TestChunkMapHonoursBlockSize(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			img, err := Open(bytes.NewReader(out.buf), WithExtraDevices(bytes.NewReader(blob)))
+			img, err := erofs.Open(bytes.NewReader(out.Bytes()), erofs.WithExtraDevices(bytes.NewReader(blob)))
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			checkSparseContent(t, img, bs, "image")
-			fsckWithDevice(t, out.buf, blob)
+			fsckWithDevice(t, out.Bytes(), blob)
 		})
 	}
 }
@@ -197,10 +206,10 @@ func TestChunkMapSurvivesReindex(t *testing.T) {
 
 	blob := sparseBlob(bs)
 
-	out := &seekBuf{}
+	out := &testBuffer{}
 
-	w := Create(out, WithBlockSize(bs), WithBuildTime(1000, 0))
-	if err := w.CopyFrom(newSparseFS(bs, blob), MetadataOnly()); err != nil {
+	w := erofs.Create(out, erofs.WithBlockSize(bs), erofs.WithBuildTime(1000, 0))
+	if err := w.CopyFrom(newSparseFS(bs, blob), erofs.MetadataOnly()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -208,7 +217,7 @@ func TestChunkMapSurvivesReindex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	img1, err := Open(bytes.NewReader(out.buf), WithExtraDevices(bytes.NewReader(blob)))
+	img1, err := erofs.Open(bytes.NewReader(out.Bytes()), erofs.WithExtraDevices(bytes.NewReader(blob)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,10 +225,10 @@ func TestChunkMapSurvivesReindex(t *testing.T) {
 	checkSparseContent(t, img1, bs, "first image")
 
 	// Re-index the image into a fresh metadata-only image.
-	out2 := &seekBuf{}
+	out2 := &testBuffer{}
 
-	w2 := Create(out2, WithBuildTime(1000, 0))
-	if err = w2.CopyFrom(img1, MetadataOnly()); err != nil {
+	w2 := erofs.Create(out2, erofs.WithBuildTime(1000, 0))
+	if err = w2.CopyFrom(img1, erofs.MetadataOnly()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -227,13 +236,58 @@ func TestChunkMapSurvivesReindex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	img2, err := Open(bytes.NewReader(out2.buf), WithExtraDevices(bytes.NewReader(blob)))
+	img2, err := erofs.Open(bytes.NewReader(out2.Bytes()), erofs.WithExtraDevices(bytes.NewReader(blob)))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	checkSparseContent(t, img2, bs, "re-indexed image")
-	fsckWithDevice(t, out2.buf, blob)
+	fsckWithDevice(t, out2.Bytes(), blob)
+}
+
+// TestDirectReadSparseFile covers Read and WriteTo on a chunk-based file with
+// a hole. Both serve a contiguous file straight from the device; taking that
+// path here would read the hole as the device bytes behind it.
+func TestDirectReadSparseFile(t *testing.T) {
+	t.Parallel()
+
+	const bs = 4096
+
+	blob := sparseBlob(bs)
+
+	out := &testBuffer{}
+
+	w := erofs.Create(out, erofs.WithBlockSize(bs), erofs.WithBuildTime(1000, 0))
+	if err := w.CopyFrom(newSparseFS(bs, blob), erofs.MetadataOnly()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	img, err := erofs.Open(bytes.NewReader(out.Bytes()), erofs.WithExtraDevices(bytes.NewReader(blob)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// fs.ReadFile goes through Read.
+	checkSparseContent(t, img, bs, "sparse via Read")
+
+	fh, err := img.Open("f")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() { _ = fh.Close() }()
+
+	// io.Copy goes through WriteTo.
+	var got bytes.Buffer
+	if _, err = io.Copy(&got, fh); err != nil {
+		t.Fatal(err)
+	}
+
+	checkSparseBytes(t, got.Bytes(), bs, "sparse via WriteTo")
 }
 
 func blockSizeName(bs int) string {

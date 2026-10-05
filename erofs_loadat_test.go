@@ -1,4 +1,4 @@
-package erofs
+package erofs //nolint:testpackage // white-box: drives the unexported block loader on images shorter than a block
 
 import (
 	"bytes"

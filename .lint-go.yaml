@@ -22,13 +22,6 @@ golangci:
         - path: ^internal/erofstest/
           linters:
             - mnd
-        # ONBOARDING BACKLOG (book/mandatory-files.md, "onboarding an existing
-        # repository"): the findings limen v0.7.2's baseline reports on code that
-        # predates it, not yet read. Not a judgment: each entry is a linter and
-        # the files it fires in, to be emptied one linter or one package per
-        # pull request, and the block deleted with the last one.
-        - path: ^(erofs_directread_test\.go|erofs_fsconform_test\.go|erofs_loadat_test\.go|format_test\.go|internal/disk/types_test\.go|mkfs_chunkmap_test\.go|mkfs_limits_test\.go|mkfs_openfile_test\.go|mkfs_untrusted_test\.go|perf_audit_test\.go)$
-          linters: [testpackage]
     settings:
       wrapcheck:
         # A list here replaces wrapcheck's own, so its defaults come first.

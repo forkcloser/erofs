@@ -1,4 +1,4 @@
-package erofs
+package erofs_test
 
 import (
 	"bytes"
@@ -10,8 +10,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
+	"github.com/forkcloser/erofs"
 	"github.com/forkcloser/erofs/internal/builder"
 	"github.com/forkcloser/erofs/internal/disk"
 )
@@ -25,10 +27,10 @@ import (
 func TestParentMustBeADirectory(t *testing.T) {
 	t.Parallel()
 
-	newWriterWithFile := func(t *testing.T) *Writer {
+	newWriterWithFile := func(t *testing.T) *erofs.Writer {
 		t.Helper()
 
-		w := Create(&seekBuf{}, WithBuildTime(1000, 0))
+		w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(1000, 0))
 		writeFile(t, w, "/a", []byte("x"))
 
 		return w
@@ -42,7 +44,7 @@ func TestParentMustBeADirectory(t *testing.T) {
 			_ = f.Close()
 
 			t.Error("Create under a regular file succeeded")
-		} else if !errors.Is(err, ErrNotDirectory) {
+		} else if !errors.Is(err, erofs.ErrNotDirectory) {
 			t.Errorf("err = %v; want ErrNotDirectory", err)
 		}
 	})
@@ -51,7 +53,7 @@ func TestParentMustBeADirectory(t *testing.T) {
 		t.Parallel()
 
 		w := newWriterWithFile(t)
-		if err := w.Mkdir("/a/b", 0o755); !errors.Is(err, ErrNotDirectory) {
+		if err := w.Mkdir("/a/b", 0o755); !errors.Is(err, erofs.ErrNotDirectory) {
 			t.Errorf("err = %v; want ErrNotDirectory", err)
 		}
 	})
@@ -60,7 +62,7 @@ func TestParentMustBeADirectory(t *testing.T) {
 		t.Parallel()
 
 		w := newWriterWithFile(t)
-		if err := w.Symlink("target", "/a/b"); !errors.Is(err, ErrNotDirectory) {
+		if err := w.Symlink("target", "/a/b"); !errors.Is(err, erofs.ErrNotDirectory) {
 			t.Errorf("err = %v; want ErrNotDirectory", err)
 		}
 	})
@@ -69,7 +71,7 @@ func TestParentMustBeADirectory(t *testing.T) {
 		t.Parallel()
 
 		w := newWriterWithFile(t)
-		if err := w.Mknod("/a/b", fs.ModeDevice|fs.ModeCharDevice|0o666, 0); !errors.Is(err, ErrNotDirectory) {
+		if err := w.Mknod("/a/b", fs.ModeDevice|fs.ModeCharDevice|0o666, 0); !errors.Is(err, erofs.ErrNotDirectory) {
 			t.Errorf("err = %v; want ErrNotDirectory", err)
 		}
 	})
@@ -78,7 +80,7 @@ func TestParentMustBeADirectory(t *testing.T) {
 		t.Parallel()
 
 		w := newWriterWithFile(t)
-		if err := w.Link("/a", "/a/b"); !errors.Is(err, ErrNotDirectory) {
+		if err := w.Link("/a", "/a/b"); !errors.Is(err, erofs.ErrNotDirectory) {
 			t.Errorf("err = %v; want ErrNotDirectory", err)
 		}
 	})
@@ -87,7 +89,7 @@ func TestParentMustBeADirectory(t *testing.T) {
 		t.Parallel()
 
 		w := newWriterWithFile(t)
-		if err := w.Mkdir("/a/b/c/d", 0o755); !errors.Is(err, ErrNotDirectory) {
+		if err := w.Mkdir("/a/b/c/d", 0o755); !errors.Is(err, erofs.ErrNotDirectory) {
 			t.Errorf("err = %v; want ErrNotDirectory", err)
 		}
 	})
@@ -95,12 +97,12 @@ func TestParentMustBeADirectory(t *testing.T) {
 	t.Run("throughSymlink", func(t *testing.T) {
 		t.Parallel()
 
-		w := Create(&seekBuf{}, WithBuildTime(1000, 0))
+		w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(1000, 0))
 		if err := w.Symlink("elsewhere", "/link"); err != nil {
 			t.Fatal(err)
 		}
 
-		if err := w.Mkdir("/link/sub", 0o755); !errors.Is(err, ErrNotDirectory) {
+		if err := w.Mkdir("/link/sub", 0o755); !errors.Is(err, erofs.ErrNotDirectory) {
 			t.Errorf("err = %v; want ErrNotDirectory", err)
 		}
 	})
@@ -109,15 +111,15 @@ func TestParentMustBeADirectory(t *testing.T) {
 	t.Run("implicitParentsStillWork", func(t *testing.T) {
 		t.Parallel()
 
-		out := &seekBuf{}
-		w := Create(out, WithBuildTime(1000, 0))
+		out := &testBuffer{}
+		w := erofs.Create(out, erofs.WithBuildTime(1000, 0))
 		writeFile(t, w, "/x/y/z.txt", []byte("deep"))
 
 		if err := w.Close(); err != nil {
 			t.Fatal(err)
 		}
 
-		img, err := Open(bytes.NewReader(out.buf))
+		img, err := erofs.Open(bytes.NewReader(out.Bytes()))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -152,18 +154,15 @@ func (s *shortReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-type sizedInfo struct {
-	name string
-	size int64
-	sys  any
+// shortSource holds one file whose MapFile.Data only declares its size: the
+// content comes from Sys, which delivers 10 bytes.
+func shortSource(name string, size int) fstest.MapFS {
+	return fstest.MapFS{name: &fstest.MapFile{
+		Data: make([]byte, size),
+		Mode: 0o644,
+		Sys:  &builder.Entry{Data: &shortReader{data: bytes.Repeat([]byte("A"), 10)}},
+	}}
 }
-
-func (i *sizedInfo) Name() string     { return i.name }
-func (i *sizedInfo) Size() int64      { return i.size }
-func (*sizedInfo) Mode() fs.FileMode  { return 0o644 }
-func (*sizedInfo) ModTime() time.Time { return time.Unix(1000, 0) }
-func (*sizedInfo) IsDir() bool        { return false }
-func (i *sizedInfo) Sys() any         { return i.sys }
 
 // TestShortInlineReadIsRejected covers a source that yields fewer bytes than
 // it declared. Inline data is followed by the zero fill that aligns the next
@@ -172,20 +171,15 @@ func (i *sizedInfo) Sys() any         { return i.sys }
 func TestShortInlineReadIsRejected(t *testing.T) {
 	t.Parallel()
 
-	out := &seekBuf{}
-	w := Create(out, WithBuildTime(1000, 0))
+	out := &testBuffer{}
+	w := erofs.Create(out, erofs.WithBuildTime(1000, 0))
 
 	// Small enough to be laid out inline, inside the metadata area.
-	err := w.add("/a.txt", &sizedInfo{
-		name: "a.txt",
-		size: 100,
-		sys:  &builder.Entry{Data: &shortReader{data: bytes.Repeat([]byte("A"), 10)}},
-	})
-	if err != nil {
+	if err := w.CopyFrom(shortSource("a.txt", 100)); err != nil {
 		t.Fatal(err)
 	}
 
-	err = w.Close()
+	err := w.Close()
 	if err == nil {
 		t.Fatal("Close accepted a source that delivered 10 of 100 declared bytes")
 	}
@@ -202,16 +196,11 @@ func TestShortInlineReadIsRejected(t *testing.T) {
 func TestShortFlatPlainReadIsRejected(t *testing.T) {
 	t.Parallel()
 
-	out := &seekBuf{}
-	w := Create(out, WithBuildTime(1000, 0))
+	out := &testBuffer{}
+	w := erofs.Create(out, erofs.WithBuildTime(1000, 0))
 
 	// Larger than a block, so it lands in the flat-plain data area.
-	err := w.add("/big.bin", &sizedInfo{
-		name: "big.bin",
-		size: 40000,
-		sys:  &builder.Entry{Data: &shortReader{data: bytes.Repeat([]byte("A"), 10)}},
-	})
-	if err != nil {
+	if err := w.CopyFrom(shortSource("big.bin", 40000)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -247,8 +236,8 @@ func TestCompactInodeKeepsSubSecondMtime(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			out := &seekBuf{}
-			w := Create(out, WithBuildTime(tc.buildSec, tc.buildNs))
+			out := &testBuffer{}
+			w := erofs.Create(out, erofs.WithBuildTime(tc.buildSec, tc.buildNs))
 			writeFile(t, w, "/f.txt", []byte("hello"))
 
 			mt := time.Unix(int64(tc.mtimeSec), int64(tc.mtimeNs))
@@ -260,7 +249,7 @@ func TestCompactInodeKeepsSubSecondMtime(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			img, err := Open(bytes.NewReader(out.buf))
+			img, err := erofs.Open(bytes.NewReader(out.Bytes()))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -270,7 +259,7 @@ func TestCompactInodeKeepsSubSecondMtime(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			st, ok := fi.Sys().(*Stat)
+			st, ok := fi.Sys().(*erofs.Stat)
 			if !ok {
 				t.Fatalf("Sys returned %T, want *Stat", fi.Sys())
 			}
@@ -294,12 +283,12 @@ func TestXattrLimits(t *testing.T) {
 	t.Run("SetxattrRejectsLongName", func(t *testing.T) {
 		t.Parallel()
 
-		w := Create(&seekBuf{}, WithBuildTime(1000, 0))
+		w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(1000, 0))
 		if err := w.Mkdir("/d", 0o755); err != nil {
 			t.Fatal(err)
 		}
 
-		if err := w.Setxattr("/d", longName, "v"); !errors.Is(err, ErrInvalid) {
+		if err := w.Setxattr("/d", longName, "v"); !errors.Is(err, erofs.ErrInvalid) {
 			t.Errorf("err = %v; want ErrInvalid", err)
 		}
 	})
@@ -307,12 +296,12 @@ func TestXattrLimits(t *testing.T) {
 	t.Run("SetxattrRejectsBigValue", func(t *testing.T) {
 		t.Parallel()
 
-		w := Create(&seekBuf{}, WithBuildTime(1000, 0))
+		w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(1000, 0))
 		if err := w.Mkdir("/d", 0o755); err != nil {
 			t.Fatal(err)
 		}
 
-		if err := w.Setxattr("/d", "user.big", bigValue); !errors.Is(err, ErrInvalid) {
+		if err := w.Setxattr("/d", "user.big", bigValue); !errors.Is(err, erofs.ErrInvalid) {
 			t.Errorf("err = %v; want ErrInvalid", err)
 		}
 	})
@@ -320,9 +309,9 @@ func TestXattrLimits(t *testing.T) {
 	t.Run("BoundaryValuesAccepted", func(t *testing.T) {
 		t.Parallel()
 
-		out := &seekBuf{}
+		out := &testBuffer{}
 
-		w := Create(out, WithBuildTime(1000, 0))
+		w := erofs.Create(out, erofs.WithBuildTime(1000, 0))
 		if err := w.Mkdir("/d", 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -338,7 +327,7 @@ func TestXattrLimits(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		img, err := Open(bytes.NewReader(out.buf))
+		img, err := erofs.Open(bytes.NewReader(out.Bytes()))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -348,51 +337,35 @@ func TestXattrLimits(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		got := fi.Sys().(*Stat).Xattrs[name]
+		got := fi.Sys().(*erofs.Stat).Xattrs[name]
 		if got != value {
 			t.Errorf("xattr round-trip failed: got %d bytes, want %d", len(got), len(value))
 		}
 
-		fsckImage(t, out.buf)
+		fsckImage(t, out.Bytes())
 	})
 
 	// Xattrs also arrive through CopyFrom, where the source picks lengths.
 	t.Run("CopyFromRejectsOversized", func(t *testing.T) {
 		t.Parallel()
 
-		out := &seekBuf{}
-		w := Create(out, WithBuildTime(1000, 0))
+		out := &testBuffer{}
+		w := erofs.Create(out, erofs.WithBuildTime(1000, 0))
 
-		err := w.add("/d", &xattrInfo{
-			name:   "d",
-			mode:   fs.ModeDir | 0o755,
-			xattrs: map[string]string{"user.big": bigValue},
-		})
-		if err != nil {
-			t.Fatal(err)
+		err := w.CopyFrom(fstest.MapFS{"d": &fstest.MapFile{
+			Mode: fs.ModeDir | 0o755,
+			Sys:  &erofs.Stat{Xattrs: map[string]string{"user.big": bigValue}},
+		}})
+		if err == nil {
+			err = w.Close()
 		}
 
-		if err := w.Close(); !errors.Is(err, ErrInvalid) {
-			t.Errorf("Close err = %v; want ErrInvalid", err)
+		if !errors.Is(err, erofs.ErrInvalid) {
+			t.Errorf("CopyFrom/Close err = %v; want ErrInvalid", err)
 		} else {
 			t.Logf("rejected with: %v", err)
 		}
 	})
-}
-
-type xattrInfo struct {
-	name   string
-	mode   fs.FileMode
-	xattrs map[string]string
-}
-
-func (i *xattrInfo) Name() string      { return i.name }
-func (*xattrInfo) Size() int64         { return 0 }
-func (i *xattrInfo) Mode() fs.FileMode { return i.mode }
-func (*xattrInfo) ModTime() time.Time  { return time.Unix(1000, 0) }
-func (i *xattrInfo) IsDir() bool       { return i.mode.IsDir() }
-func (i *xattrInfo) Sys() any {
-	return &builder.Entry{Xattrs: i.xattrs}
 }
 
 // --- Finding 12: the chunked-file feature flag ---
@@ -414,10 +387,10 @@ func TestChunkedFeatureFlagDeclared(t *testing.T) {
 	src := newSparseFS(bs, blob)
 	src.noRanges = true
 
-	out := &seekBuf{}
+	out := &testBuffer{}
 
-	w := Create(out, WithBlockSize(bs), WithBuildTime(1000, 0))
-	if err := w.CopyFrom(src, MetadataOnly()); err != nil {
+	w := erofs.Create(out, erofs.WithBlockSize(bs), erofs.WithBuildTime(1000, 0))
+	if err := w.CopyFrom(src, erofs.MetadataOnly()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -425,14 +398,9 @@ func TestChunkedFeatureFlagDeclared(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	img, err := Open(bytes.NewReader(out.buf), WithExtraDevices(bytes.NewReader(blob)))
+	img, err := erofs.Open(bytes.NewReader(out.Bytes()), erofs.WithExtraDevices(bytes.NewReader(blob)))
 	if err != nil {
 		t.Fatal(err)
-	}
-
-	i, ok := img.(*image)
-	if !ok {
-		t.Fatalf("Open returned %T, want *image", img)
 	}
 
 	fi, err := fs.Stat(img, "f")
@@ -440,13 +408,28 @@ func TestChunkedFeatureFlagDeclared(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if layout := fi.(*fileInfo).layout; layout != disk.LayoutChunkBased {
+	buf := out.Bytes()
+
+	var sb disk.SuperBlock
+
+	sb.Unmarshal(buf[disk.SuperBlockOffset:])
+
+	var ino disk.InodeCompact
+
+	nid := int64(fi.Sys().(*erofs.Stat).Ino)
+	ino.Unmarshal(buf[int64(sb.MetaBlkAddr)<<sb.BlkSizeBits+nid*disk.SizeInodeSlot:])
+
+	if ino.Format&disk.InodeFormatExtended != 0 {
+		t.Fatal("test premise broken: the inode is extended, decoded here as compact")
+	}
+
+	if layout := (ino.Format & disk.InodeFormatLayoutMask) >> 1; layout != disk.LayoutChunkBased {
 		t.Fatalf("test premise broken: layout = %d, want chunk-based", layout)
 	}
 
-	if i.sb.FeatureIncompat&disk.FeatureIncompatChunkedFile == 0 {
+	if sb.FeatureIncompat&disk.FeatureIncompatChunkedFile == 0 {
 		t.Errorf("image holds chunk-based inodes but FeatureIncompat = %#x lacks the chunked-file bit",
-			i.sb.FeatureIncompat)
+			sb.FeatureIncompat)
 	}
 }
 
@@ -485,7 +468,7 @@ func TestDataFileSeekErrorIsSticky(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := Create(&seekBuf{}, WithDataFile(df), WithBuildTime(1000, 0))
+	w := erofs.Create(&testBuffer{}, erofs.WithDataFile(df), erofs.WithBuildTime(1000, 0))
 
 	if f, err := w.Create("/a"); err == nil {
 		_ = f.Close()
