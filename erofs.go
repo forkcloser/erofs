@@ -2190,8 +2190,6 @@ func (d *dir) lookup(target string) (uint64, fs.FileMode, error) {
 		firstName  []byte
 	)
 
-	lastIdx := -1
-
 	lo, hi := 0, nblocks
 	for lo < hi {
 		mid := lo + (hi-lo)/2
@@ -2231,7 +2229,6 @@ func (d *dir) lookup(target string) (uint64, fs.FileMode, error) {
 			}
 
 			lastBlk = b
-			lastIdx = mid
 			lo = mid + 1
 		} else {
 			d.img.putBlock(b)
@@ -2240,9 +2237,9 @@ func (d *dir) lookup(target string) (uint64, fs.FileMode, error) {
 		}
 	}
 
-	// lastIdx is the last block whose first entry <= target.
+	// lastBlk is the last block whose first entry <= target.
 	// The target must be in that block if it exists.
-	if lastIdx < 0 {
+	if lastBlk == nil {
 		return 0, 0, fs.ErrNotExist
 	}
 

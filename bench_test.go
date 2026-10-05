@@ -356,13 +356,11 @@ func prepareMergeSources(b *testing.B) mergeSources {
 	// Build full EROFS images (Go) for erofs-to-erofs merge benchmarks.
 	s.goBaseFullPath = filepath.Join(tmpDir, "base-full-go.erofs")
 	buildErofsFromDir(b, baseDirPath, s.goBaseFullPath)
-	fi, _ := os.Stat(s.goBaseFullPath)
-	b.Logf("base erofs full (go): %.1f MB", float64(fi.Size())/(1024*1024))
+	b.Logf("base erofs full (go): %.1f MB", fileSizeMB(b, s.goBaseFullPath))
 
 	s.goOverlayFullPath = filepath.Join(tmpDir, "overlay-full-go.erofs")
 	buildErofsFromDir(b, s.overlayDirPath, s.goOverlayFullPath)
-	fi, _ = os.Stat(s.goOverlayFullPath)
-	b.Logf("overlay erofs full (go): %.1f MB", float64(fi.Size())/(1024*1024))
+	b.Logf("overlay erofs full (go): %.1f MB", fileSizeMB(b, s.goOverlayFullPath))
 
 	// Build full EROFS images (mkfs.erofs) for erofs-to-erofs merge benchmarks.
 	if _, err := exec.LookPath("mkfs.erofs"); err == nil {
@@ -382,8 +380,7 @@ func prepareMergeSources(b *testing.B) mergeSources {
 			}
 
 			*tc.field = outPath
-			fi, _ = os.Stat(outPath)
-			b.Logf("%s erofs full (mkfs): %.1f MB", tc.label, float64(fi.Size())/(1024*1024))
+			b.Logf("%s erofs full (mkfs): %.1f MB", tc.label, fileSizeMB(b, outPath))
 		}
 	}
 
@@ -849,7 +846,6 @@ func BenchmarkMerge10Layer(b *testing.B) {
 			built[li].mkfsErofsPath = mkfsPath
 		}
 
-		fi, _ := os.Stat(goPath)
 		// Count inodes by opening the image.
 		inodes := uint64(0)
 
@@ -865,7 +861,7 @@ func BenchmarkMerge10Layer(b *testing.B) {
 		}
 
 		b.Logf("layer %d (%s): target %s, erofs %.1f MB, %d files",
-			li, spec.name, formatSize(spec.size), float64(fi.Size())/(1024*1024), inodes)
+			li, spec.name, formatSize(spec.size), fileSizeMB(b, goPath), inodes)
 	}
 
 	// go: merge all 10 layers as MetadataOnly into a single index.
@@ -948,6 +944,18 @@ func BenchmarkMerge10Layer(b *testing.B) {
 			}
 		}
 	})
+}
+
+// fileSizeMB is the size of the file at path in mebibytes.
+func fileSizeMB(b *testing.B, path string) float64 {
+	b.Helper()
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	return float64(fi.Size()) / (1024 * 1024)
 }
 
 func formatSize(b int64) string {
