@@ -841,7 +841,7 @@ func parseXattrsFromBuf(
 	}
 
 	if len(xattrs) == 0 {
-		return nil, nil
+		return nil, nil //nolint:nilnil // an empty xattr body is no map at all, not an error
 	}
 
 	return xattrs, nil
