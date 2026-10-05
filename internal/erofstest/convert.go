@@ -32,6 +32,7 @@ func ConvertTarErofs(ctx context.Context, r io.Reader, layerPath, uuid string, m
 	}
 
 	args = append(args, layerPath)
+	// #nosec G204 -- a fixed binary run without a shell; the arguments are the test's own paths and options
 	cmd := exec.CommandContext(ctx, "mkfs.erofs", args...)
 	cmd.Stdin = r
 

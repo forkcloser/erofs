@@ -92,6 +92,7 @@ func xattrICount(xattrSize int) int {
 // xattrCount encodes the xattr area size into the inode XattrCount field.
 // checkLimits has already rejected areas too large for the field.
 func xattrCount(xattrSize int) uint16 {
+	// #nosec G115 -- checkLimits rejected any area whose count exceeds maxXattrICount, the uint16 maximum
 	return uint16(xattrICount(xattrSize))
 }
 
@@ -119,7 +120,7 @@ func inodeFormat(layout uint8, compact bool) uint16 {
 
 // goModeToUnixMode converts Go fs.FileMode to Unix mode bits.
 func goModeToUnixMode(m fs.FileMode) uint16 {
-	mode := uint16(m.Perm())
+	mode := uint16(m.Perm()) // #nosec G115 -- the permission bits are 0o777 at most
 
 	if m&fs.ModeSetuid != 0 {
 		mode |= disk.StatTypeIsUID

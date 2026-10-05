@@ -512,10 +512,12 @@ func (fsys *Writer) Chtimes(name string, atime, mtime time.Time) error {
 		return err
 	}
 
+	// #nosec G115 -- held in two's complement, as mtime is
 	e.atime = uint64(atime.Unix())
-	e.atimeNs = uint32(atime.Nanosecond())
+	e.atimeNs = uint32(atime.Nanosecond()) // #nosec G115 -- Nanosecond is below 1e9
+	// #nosec G115 -- i_mtime is the kernel's signed time64_t in two's complement: a pre-1970 time round-trips
 	e.mtime = uint64(mtime.Unix())
-	e.mtimeNs = uint32(mtime.Nanosecond())
+	e.mtimeNs = uint32(mtime.Nanosecond()) // #nosec G115 -- Nanosecond is below 1e9
 
 	return nil
 }
@@ -719,6 +721,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 			}
 
 			fsys.devices = append(fsys.devices, devBlocks...)
+			// #nosec G115 -- checkDeviceCount capped the table at 65535 just above
 			fsys.copyDeviceID = uint16(len(fsys.devices) - len(devBlocks) + 1)
 
 			return fsys.copyFromImage(srcImg)
@@ -738,7 +741,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 			}
 
 			fsys.devices = append(fsys.devices, db.DeviceBlocks())
-			fsys.copyDeviceID = uint16(len(fsys.devices))
+			fsys.copyDeviceID = uint16(len(fsys.devices)) // #nosec G115 -- checkDeviceCount capped it at 65535
 		}
 	}
 
@@ -787,6 +790,13 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 		case *builder.Entry:
 			be = sys
 		case *Stat:
+			// i_rdev is 32 bits on disk. A *Stat from this package's reader
+			// always fits, but any source can hand one over, and a wider
+			// value would be truncated into some other device number.
+			if sys.Rdev > math.MaxUint32 {
+				return fmt.Errorf("mkfs: %s: rdev %#x does not fit the 32-bit on-disk field: %w",
+					p, sys.Rdev, ErrInvalid)
+			}
 			// EROFS image source: convert *Stat to *builder.Entry. The nid
 			// is unique within the source image, and the hardlink map is
 			// scoped to this CopyFrom call, so it serves as the inode
@@ -797,7 +807,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 				Mtime:   sys.Mtime,
 				MtimeNs: sys.MtimeNs,
 				Nlink:   uint32(min(sys.Nlink, math.MaxUint32)),
-				Rdev:    uint32(sys.Rdev),
+				Rdev:    uint32(sys.Rdev), // #nosec G115 -- checked against math.MaxUint32 above
 				Xattrs:  sys.Xattrs,
 				Ino:     sys.Ino,
 			}
@@ -890,12 +900,12 @@ func (fsys *Writer) Close() error {
 	if fsys.dataFile != nil {
 		// Fill in the reserved device slot 0 with the actual block count.
 		blocks := (fsys.dataOff + int64(fsys.blockSize) - 1) / int64(fsys.blockSize)
-		fsys.devices[0] = uint64(blocks)
+		fsys.devices[0] = uint64(blocks) // #nosec G115 -- a block count from a non-negative offset
 	}
 
 	buildTime := fsys.buildTime
 	if !fsys.hasBuildTime {
-		buildTime = uint64(time.Now().Unix())
+		buildTime = uint64(time.Now().Unix()) // #nosec G115 -- the clock is past 1970
 	}
 
 	// Build erofsEntry tree from the fsEntry tree via BFS.
@@ -971,8 +981,10 @@ func (fsys *Writer) Open(name string) (fs.File, error) {
 
 		var sr *io.SectionReader
 		if fsys.dataFile != nil {
+			// #nosec G115 -- e.size fits int64: File counts it in an int64, and add and copyFromImage bound it
 			sr = io.NewSectionReader(fsys.dataFile, e.dataStartOff, int64(e.size))
 		} else if fsys.spool != nil && e.size > 0 {
+			// #nosec G115 -- e.size fits int64: File counts it in an int64, and add and copyFromImage bound it
 			sr = io.NewSectionReader(fsys.spool, e.dataStartOff, int64(e.size))
 		}
 
@@ -1045,7 +1057,7 @@ func (f *File) Close() error {
 	f.closed = true
 	f.entry.fileClosed = true
 
-	f.entry.size = uint64(f.written)
+	f.entry.size = uint64(f.written) // #nosec G115 -- a byte count, never negative
 	if f.fs.openFile == f {
 		f.fs.openFile = nil
 	}
@@ -1276,10 +1288,14 @@ type writerFileInfo struct {
 	entry *fsEntry
 }
 
-func (fi *writerFileInfo) Name() string      { return path.Base(fi.entry.path) }
+func (fi *writerFileInfo) Name() string { return path.Base(fi.entry.path) }
+
+// Size reports e.size as fs.FileInfo spells it.
+// #nosec G115 -- e.size fits int64: File counts it in an int64, and add and copyFromImage bound it
 func (fi *writerFileInfo) Size() int64       { return int64(fi.entry.size) }
 func (fi *writerFileInfo) Mode() fs.FileMode { return disk.EroFSModeToGoFileMode(fi.entry.mode) }
 func (fi *writerFileInfo) ModTime() time.Time {
+	// #nosec G115 -- i_mtime is the kernel's signed time64_t, in two's complement
 	return time.Unix(int64(fi.entry.mtime), int64(fi.entry.mtimeNs))
 }
 
@@ -1509,7 +1525,7 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 		return fmt.Errorf("mkfs: %s: negative size %d: %w", p, info.Size(), ErrInvalid)
 	}
 
-	size := uint64(info.Size())
+	size := uint64(info.Size()) // #nosec G115 -- a negative size was rejected just above
 	typ := mode & disk.StatTypeMask
 
 	be, err := entryFromSys(info)
@@ -1526,8 +1542,8 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 	// has no case for — would otherwise stamp every entry with the epoch.
 	if be.Mtime == 0 && be.MtimeNs == 0 {
 		if t := info.ModTime(); !t.IsZero() && t.Unix() >= 0 {
-			be.Mtime = uint64(t.Unix())
-			be.MtimeNs = uint32(t.Nanosecond())
+			be.Mtime = uint64(t.Unix())         // #nosec G115 -- t.Unix() >= 0 is the condition above
+			be.MtimeNs = uint32(t.Nanosecond()) // #nosec G115 -- Nanosecond is below 1e9
 		}
 	}
 
@@ -1871,6 +1887,7 @@ func (fsys *Writer) promoteAlias(target *fsEntry) {
 	heir.linkTo = nil
 	heir.removed = false
 
+	// #nosec G115 -- each alias was counted into target.extraLinks, a uint32
 	heir.extraLinks = uint32(len(aliases) - 1)
 	for _, a := range aliases[1:] {
 		a.linkTo = heir
@@ -2094,6 +2111,7 @@ func (fsys *Writer) fsToErofs(e *fsEntry) erofsEntry {
 		if e.directData != nil {
 			data = e.directData
 		} else if fsys.spool != nil {
+			// #nosec G115 -- e.size fits int64: File counts it in an int64, and add and copyFromImage bound it
 			data = io.NewSectionReader(fsys.spool, e.spoolOff, int64(e.size))
 		}
 	}
@@ -2226,7 +2244,7 @@ func (fsys *Writer) remapChunkDevices(p string, chunks []builder.Chunk) error {
 				p, chunks[i].DeviceID, id, len(fsys.devices), ErrInvalid)
 		}
 
-		chunks[i].DeviceID = uint16(id)
+		chunks[i].DeviceID = uint16(id) // #nosec G115 -- checked against the device count, at most 65535
 	}
 
 	return nil
@@ -2253,7 +2271,7 @@ func (fsys *Writer) remapChunkDevices(p string, chunks []builder.Chunk) error {
 //
 //nolint:gocognit // one loop validating each range and emitting its chunks, hole or data
 func (fsys *Writer) chunksFromRanges(ranges []DataRange, fileSize int64) ([]builder.Chunk, error) {
-	blockSize := uint64(fsys.resolveBlockSize())
+	blockSize := uint64(fsys.resolveBlockSize()) // #nosec G115 -- the block size is positive, 512 to 1<<16
 
 	// Validate total coverage first.
 	var total int64
@@ -2428,7 +2446,9 @@ func (f *File) closeDataFile() error {
 	}
 
 	// Compute chunks from the start offset and written bytes.
+	// #nosec G115 -- a data file offset and a positive block size, neither negative
 	startBlock := uint64(f.dataStartOff) / uint64(f.fs.resolveBlockSize())
+	// #nosec G115 -- a byte count and a positive block size, neither negative
 	totalBlocks := (uint64(f.written) + uint64(f.fs.resolveBlockSize()) - 1) / uint64(f.fs.resolveBlockSize())
 
 	for totalBlocks > 0 {
@@ -2463,5 +2483,5 @@ const (
 
 // blkBits returns log2(blockSize).
 func blkBits(blockSize int) uint8 {
-	return uint8(bits.TrailingZeros(uint(blockSize)))
+	return uint8(bits.TrailingZeros(uint(blockSize))) // #nosec G115 -- a bit index, at most 64
 }

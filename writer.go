@@ -99,6 +99,7 @@ const maxChunkIndexEntries = 1 << 27
 // real filesystem. The clamped value is over the limit by one, so
 // checkLimits rejects the entry before anything is written.
 func (w *erofsWriter) chunkCount(e *erofsEntry) int {
+	// #nosec G115 -- a block of at most 1<<16 bytes shifted by at most 31 chunk bits: positive, below 1<<47
 	cs := uint64(w.entryChunkSize(e))
 	if cs == 0 {
 		return 0
@@ -171,6 +172,27 @@ func (w *erofsWriter) checkLimits() error {
 			)
 		}
 	}
+	// Block addresses are 32 bits wide: i_u's raw_blkaddr, MetaBlkAddr and
+	// the superblock's block count. Nothing upstream bounds how much flat
+	// data a source packs, and past 2^32 blocks the addresses wrap, so data
+	// and metadata alias each other's blocks. Summed entry by entry, so the
+	// count stops at the limit long before it could overflow.
+	blockSize := int64(w.blockSize)
+	blocks := int64(w.sbAreaBlocks()) + (int64(w.metadataBytes())+blockSize-1)/blockSize
+
+	for _, entry := range w.entries {
+		ds := int64(w.flatPlainDataSize(entry))
+
+		blocks += ds / blockSize
+		if ds%blockSize != 0 {
+			blocks++
+		}
+
+		if blocks > math.MaxUint32 {
+			return fmt.Errorf("mkfs: %s: image needs more than the %d blocks a 32-bit block address can name: %w",
+				entry.path, uint64(math.MaxUint32), ErrInvalid)
+		}
+	}
 
 	return nil
 }
@@ -179,6 +201,7 @@ func (w *erofsWriter) checkLimits() error {
 // one chunk (chunkSize >= size). Capped at 31 (LayoutChunkFormatBits max).
 func (w *erofsWriter) minChunkBits(size uint64) uint8 {
 	bits := w.chunkBits
+	// #nosec G115 -- the block size is positive, 512 to 1<<16
 	for uint64(w.blockSize)<<bits < size && bits < 31 {
 		bits++
 	}
@@ -280,12 +303,13 @@ func (w *erofsWriter) newMetaBuffer() *bytes.Buffer {
 // For data-first layout, data starts after the superblock area.
 func (w *erofsWriter) assignDataBlocks() {
 	sbBlks := w.sbAreaBlocks()
+	// #nosec G115 -- checkLimits bounded the image's block count to 32 bits
 	if w.metaBlkAddr == uint32(sbBlks) {
 		// Metadata-first: data blocks come after metadata.
 		totalMetaBytes := 0
 
 		for _, e := range w.entries {
-			expectedOff := int(e.nid) * 32
+			expectedOff := int(e.nid) * 32 // #nosec G115 -- planLayout made the nid from an int offset / 32
 
 			sz := inodeSlotAlign(inodeCoreSize(e) + e.xattrSize + e.chunkPad + e.trailingSize)
 
@@ -297,10 +321,13 @@ func (w *erofsWriter) assignDataBlocks() {
 
 		metaBlocks := (totalMetaBytes + w.blockSize - 1) / w.blockSize
 
+		// #nosec G115 -- checkLimits bounded the image's block count to 32 bits
 		w.assignFlatPlainAddrs(uint32(w.sbAreaBlocks() + metaBlocks))
 	} else {
 		// Data-first: data starts after superblock area.
-		w.metaBlkAddr = w.assignFlatPlainAddrs(uint32(w.sbAreaBlocks())) // metadata follows data
+		// Metadata follows data.
+		// #nosec G115 -- checkLimits bounded the image's block count to 32 bits
+		w.metaBlkAddr = w.assignFlatPlainAddrs(uint32(w.sbAreaBlocks()))
 	}
 }
 
@@ -310,6 +337,7 @@ func (w *erofsWriter) assignFlatPlainAddrs(addr uint32) uint32 {
 	for _, e := range w.entries {
 		if ds := w.flatPlainDataSize(e); ds > 0 {
 			e.dataBlkAddr = addr
+			// #nosec G115 -- checkLimits bounded the image's block count, and so every address, to 32 bits
 			addr += uint32((ds + w.blockSize - 1) / w.blockSize)
 		}
 	}
@@ -341,7 +369,7 @@ func (w *erofsWriter) metadataBytes() int {
 	curOff := 0
 
 	for _, e := range w.entries {
-		expectedOff := int(e.nid) * 32
+		expectedOff := int(e.nid) * 32 // #nosec G115 -- planLayout made the nid from an int offset / 32
 		if curOff < expectedOff {
 			curOff = expectedOff
 		}
@@ -382,7 +410,7 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 
 	if len(w.devices) > 0 {
 		featureIncompat |= disk.FeatureIncompatDeviceTable
-		extraDevices = uint16(len(w.devices))
+		extraDevices = uint16(len(w.devices)) // #nosec G115 -- checkDeviceCount caps the table at 65535
 		devtSlotOff = uint16((disk.SuperBlockOffset + disk.SizeSuperBlock) / disk.SizeDeviceSlot)
 	}
 	// Keyed off the resolved layout, not off len(e.chunks): a metadata-only
@@ -399,11 +427,11 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 	sb := disk.SuperBlock{
 		MagicNumber:     disk.MagicNumber,
 		BlkSizeBits:     blkBits(w.blockSize),
-		RootNid:         uint16(w.rootNid),
+		RootNid:         uint16(w.rootNid), // #nosec G115 -- planLayout places the root first, at nid 0
 		Inos:            w.totalInodes,
 		BuildTime:       w.buildTime,
 		BuildTimeNs:     w.buildTimeNs,
-		Blocks:          uint32(totalBlocks),
+		Blocks:          uint32(totalBlocks), // #nosec G115 -- checkLimits bounded the block count to 32 bits
 		MetaBlkAddr:     w.metaBlkAddr,
 		FeatureIncompat: featureIncompat,
 		ExtraDevices:    extraDevices,
@@ -442,7 +470,7 @@ func (w *erofsWriter) writeMetadataInodes(buf io.Writer) error {
 	metaStart := 0
 
 	for _, e := range w.entries {
-		expectedOff := int(e.nid) * 32
+		expectedOff := int(e.nid) * 32 // #nosec G115 -- planLayout made the nid from an int offset / 32
 		// planLayout hands out nids as byte offsets, so the bytes written so
 		// far must never have run past this entry's slot: if they have, every
 		// following dirent nid points at misaligned garbage. Fail loudly
@@ -498,6 +526,7 @@ func (w *erofsWriter) writeMetadataInodes(buf io.Writer) error {
 
 				metaStart += e.trailingSize
 			} else if e.layout == disk.LayoutFlatInline && e.size > 0 && e.data != nil {
+				// #nosec G115 -- planLayout inlines only a size that fits in one block
 				n, err := io.CopyBuffer(onlyWriter{buf}, io.LimitReader(e.data, int64(e.size)), w.copyBuf)
 				if c, ok := e.data.(io.Closer); ok {
 					_ = c.Close()
@@ -511,6 +540,7 @@ func (w *erofsWriter) writeMetadataInodes(buf io.Writer) error {
 				// next inode, leaving the file silently truncated-with-NULs
 				// instead of reporting the problem. The flat-plain path in
 				// writeDataBlocks already rejects this.
+				// #nosec G115 -- planLayout inlines only a size that fits in one block
 				if n != int64(e.size) {
 					return fmt.Errorf("write inline data for %s: short read: got %d bytes, expected %d: %w",
 						e.path, n, e.size, io.ErrUnexpectedEOF)
@@ -592,10 +622,14 @@ func (w *erofsWriter) writeInode(buf io.Writer, e *erofsEntry) error {
 		binary.LittleEndian.PutUint16(b[0:2], inodeFormat(e.layout, true))
 		binary.LittleEndian.PutUint16(b[2:4], xattrCount(e.xattrSize))
 		binary.LittleEndian.PutUint16(b[4:6], e.mode)
+		// #nosec G115 -- planLayout packs compact only when nlink is at most 0xFFFF
 		binary.LittleEndian.PutUint16(b[6:8], uint16(e.nlink))
+		// #nosec G115 -- planLayout packs compact only when i_size is at most 0xFFFFFFFF
 		binary.LittleEndian.PutUint32(b[8:12], uint32(fileSize))
 		binary.LittleEndian.PutUint32(b[16:20], inodeData)
+		// #nosec G115 -- planLayout packs compact only when the uid is at most 0xFFFF
 		binary.LittleEndian.PutUint16(b[24:26], uint16(e.uid))
+		// #nosec G115 -- planLayout packs compact only when the gid is at most 0xFFFF
 		binary.LittleEndian.PutUint16(b[26:28], uint16(e.gid))
 		_, err := buf.Write(b[:disk.SizeInodeCompact])
 
@@ -632,8 +666,9 @@ func (w *erofsWriter) writeXattrs(buf io.Writer, e *erofsEntry) error {
 
 		var xent [disk.SizeXattrEntry]byte
 
-		xent[0] = uint8(len(suffix))
+		xent[0] = uint8(len(suffix)) // #nosec G115 -- checkLimits ran validateXattr: at most maxXattrNameLen
 		xent[1] = nameIndex
+		// #nosec G115 -- checkLimits ran validateXattr: at most maxXattrValueLen
 		binary.LittleEndian.PutUint16(xent[2:4], uint16(len(value)))
 
 		if _, err := buf.Write(xent[:]); err != nil {
@@ -708,6 +743,7 @@ func (w *erofsWriter) writeChunkIndexes(buf io.Writer, e *erofsEntry) error {
 				// this reader both resolve as phys mod 2^32. checkLimits
 				// rejects anything that would need those bits.
 				binary.LittleEndian.PutUint16(scratch[2:4], c.DeviceID)
+				// #nosec G115 -- checkLimits rejected any chunk ending past math.MaxUint32
 				binary.LittleEndian.PutUint32(scratch[4:8], uint32(phys))
 
 				if _, err := buf.Write(scratch[:]); err != nil {
@@ -804,6 +840,7 @@ func (w *erofsWriter) writeDirents(buf io.Writer, e *erofsEntry) (int, error) {
 		for j, de := range blockEnts {
 			off := j * disk.SizeDirent
 			binary.LittleEndian.PutUint64(blk[off:off+8], de.nid)
+			// #nosec G115 -- a name starts inside its block, and a block is at most 1<<16 bytes
 			binary.LittleEndian.PutUint16(blk[off+8:off+10], uint16(nameOff))
 			blk[off+10] = de.fileType
 			blk[off+11] = 0
@@ -910,6 +947,8 @@ func (w *erofsWriter) flatPlainDataSize(e *erofsEntry) int {
 	switch e.mode & disk.StatTypeMask {
 	case disk.StatTypeReg:
 		if e.size > 0 && e.data != nil {
+			// e.size fits int64: File counts it in an int64, and add and copyFromImage bound it.
+			// #nosec G115 -- and int is 64 bits wide on every supported platform
 			return int(e.size)
 		}
 	case disk.StatTypeDir:

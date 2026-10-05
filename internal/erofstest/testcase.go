@@ -72,7 +72,7 @@ func MkfsErofsBlobDev(chunkSize int, extraOpts ...string) Converter {
 			tb.Fatal(err)
 		}
 
-		bf, err := os.Open(blobPath)
+		bf, err := os.Open(blobPath) // #nosec G304 -- the blob mkfs.erofs just wrote under tb.TempDir
 		if err != nil {
 			tb.Fatal(err)
 		}
@@ -114,7 +114,7 @@ func MkfsErofsMaxSize(maxBytes int64, opts ...string) Converter {
 func openEroFS(tb testing.TB, path string, opts ...erofs.OpenOpt) fs.FS {
 	tb.Helper()
 
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- the image the converter just wrote under tb.TempDir
 	if err != nil {
 		tb.Fatal(err)
 	}

@@ -197,6 +197,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 	// slot at minimum) and by maxQueuePrealloc.
 	maxInodes := (totalBytes - metaStart) / disk.SizeInodeCompact
 
+	// #nosec G115 -- a count past 1<<63 wraps negative, which the next line replaces
 	inodeCount := int64(img.sb.Inos)
 	if inodeCount <= 0 || inodeCount > maxInodes {
 		inodeCount = maxInodes
@@ -249,12 +250,13 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		// nid + k*2^59 name the same inode: the cycle guard below keyed on
 		// the nid would see 32 distinct directories where the image has one,
 		// and expand the same subtree under each.
+		// #nosec G115 -- metaStart < totalBytes was checked on entry, so the difference is positive
 		if cur.nid > uint64(totalBytes-metaStart)/disk.SizeInodeCompact {
 			return fmt.Errorf("nid %d lies past the end of the %d byte image: %w",
 				cur.nid, totalBytes, ErrInvalid)
 		}
 
-		inodeAddr := metaStart + int64(cur.nid*disk.SizeInodeCompact)
+		inodeAddr := metaStart + int64(cur.nid*disk.SizeInodeCompact) // #nosec G115 -- nid bounded just above
 
 		buf := at(inodeAddr)
 		if len(buf) < disk.SizeInodeCompact {
@@ -312,6 +314,14 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			mtimeNs = ino.MtimeNs
 			xcnt = ino.XattrCount
 			icSize = disk.SizeInodeExtended
+		}
+
+		// i_size is unsigned on disk and an int64 everywhere the Writer
+		// reports it: its fs.FileInfo.Size, the readers its Open returns. The
+		// reader refuses a size past 1<<63, and so must the copy, or the entry
+		// reports a negative size until Close.
+		if size > math.MaxInt64 {
+			return fmt.Errorf("nid %d declares a size of %d bytes: %w", cur.nid, size, ErrInvalid)
 		}
 
 		// Parse xattr area.
@@ -389,6 +399,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			// it — the reader's loadBlock refuses that outright, and without
 			// the same rule here the copy would take whatever follows the
 			// block as the directory's entries or the link's target.
+			// #nosec G115 -- size was checked against totalBytes, an int64, just above
 			if layout == disk.LayoutFlatInline && trailingAddr%int64(blockSize)+int64(size) > int64(blockSize) {
 				return fmt.Errorf("inline data crosses block boundary for nid %d: %w", cur.nid, ErrInvalid)
 			}
@@ -407,7 +418,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 
 			expanded[inodeAddr] = struct{}{}
 
-			dirSize := int(size)
+			dirSize := int(size) // #nosec G115 -- checked against totalBytes, an int64, above
 			if dirSize > 0 {
 				dataAddr := trailingAddr
 				if layout == disk.LayoutFlatPlain {
@@ -431,6 +442,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 					dataAddr = int64(idata) << blkBits
 				}
 
+				// #nosec G115 -- checked against totalBytes, an int64, above
 				linkData, err := span(dataAddr, int64(size))
 				if err != nil {
 					return fmt.Errorf("read symlink data for nid %d: %w", cur.nid, err)
@@ -441,6 +453,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 
 		case disk.StatTypeReg:
 			if layout == disk.LayoutChunkBased && size > 0 {
+				// #nosec G115 -- the chunk format is the low 16 bits of i_u, as the kernel's __le16 c.format reads it
 				chunkFmt := uint16(idata)
 				indexed := chunkFmt&disk.LayoutChunkFormatIndexes != 0
 				chunkAddr := trailingAddr
@@ -623,12 +636,12 @@ func chunkMapBytes(chunkFmt uint16, fileSize uint64, blkBits uint8, unit int64) 
 		nchunks++
 	}
 
-	if nchunks > uint64(maxChunkIndexBytes/unit) {
+	if nchunks > uint64(maxChunkIndexBytes/unit) { // #nosec G115 -- unit is 4 or 8: a positive quotient
 		return 0, fmt.Errorf("chunk index for a %d byte file exceeds the %d byte limit: %w",
 			fileSize, int64(maxChunkIndexBytes), ErrInvalid)
 	}
 
-	return int64(nchunks) * unit, nil
+	return int64(nchunks) * unit, nil // #nosec G115 -- nchunks was bounded by maxChunkIndexBytes just above
 }
 
 // parseChunks extracts chunk index entries from an in-memory buffer.
@@ -655,6 +668,7 @@ func (*Writer) parseChunks(
 	}
 
 	chunkBits := blkBits + uint8(chunkFmt&disk.LayoutChunkFormatBits)
+	// #nosec G115 -- chunkBits is at least 9, the smallest block, so the count is below 1<<55
 	nchunks := int((fileSize-1)>>chunkBits) + 1
 	blocksPerChunk := 1 << (chunkBits - blkBits)
 
@@ -697,6 +711,7 @@ func (*Writer) parseChunks(
 				prev := &chunks[len(chunks)-1]
 				if prev.PhysicalBlock == builder.NullPhysicalBlock &&
 					int(prev.Count)+blocksPerChunk <= math.MaxUint16 {
+					// #nosec G115 -- the sum was checked against math.MaxUint16 above
 					prev.Count += uint16(blocksPerChunk)
 
 					continue
@@ -705,7 +720,7 @@ func (*Writer) parseChunks(
 
 			chunks = append(chunks, builder.Chunk{
 				PhysicalBlock: builder.NullPhysicalBlock,
-				Count:         uint16(blocksPerChunk),
+				Count:         uint16(blocksPerChunk), // #nosec G115 -- checked against math.MaxUint16 on entry
 			})
 
 			continue
@@ -724,6 +739,7 @@ func (*Writer) parseChunks(
 				prev.DeviceID == deviceID &&
 				prev.PhysicalBlock+uint64(prev.Count) == physBlock &&
 				int(prev.Count)+blocksPerChunk <= math.MaxUint16 {
+				// #nosec G115 -- the sum was checked against math.MaxUint16 above
 				prev.Count += uint16(blocksPerChunk)
 				continue
 			}
@@ -731,7 +747,7 @@ func (*Writer) parseChunks(
 
 		chunks = append(chunks, builder.Chunk{
 			PhysicalBlock: physBlock,
-			Count:         uint16(blocksPerChunk),
+			Count:         uint16(blocksPerChunk), // #nosec G115 -- checked against math.MaxUint16 on entry
 			DeviceID:      deviceID,
 		})
 	}
