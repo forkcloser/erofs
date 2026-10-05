@@ -81,6 +81,7 @@ func setXattr(stat *Stat, nid uint64, name, value string) error {
 //nolint:gocognit // the xattr body decoded field by field, shared then inline, over one block cursor
 func loadXattrs(b *file, stat *Stat) (err error) {
 	ino := b.info
+	// #nosec G115 -- readInfo bounded the nid through checkNid
 	addr := b.img.metaStartPos() + int64(ino.nid*disk.SizeInodeCompact) + int64(ino.icsize)
 	xsize := ino.xsize
 

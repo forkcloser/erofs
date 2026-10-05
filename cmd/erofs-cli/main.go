@@ -25,7 +25,7 @@ func main() {
 
 //nolint:forbidigo // the output is the program's interface, not logging
 func run(path string) error {
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- opening the image the user names with -img is the tool's job
 	if err != nil {
 		return err
 	}

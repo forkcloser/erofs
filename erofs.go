@@ -242,6 +242,7 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 		ondiskExtraDevices = uint32(i.sb.ExtraDevices)
 		// Calculate device_id_mask
 		// sbi->device_id_mask = roundup_pow_of_two(ondisk_extradevs + 1) - 1;
+		// #nosec G115 -- ExtraDevices is a uint16 on disk, so the mask is at most 1<<16 - 1
 		i.deviceIDMask = uint16(roundupPowerOfTwo(uint32(i.sb.ExtraDevices)+1) - 1)
 	}
 
@@ -575,6 +576,7 @@ func (img *image) chunkAddr(phys uint64) (int64, error) {
 		return 0, fmt.Errorf("chunk block address %d is out of range: %w", phys, ErrInvalid)
 	}
 
+	// #nosec G115 -- phys was checked against MaxInt64 >> BlkSizeBits just above
 	return int64(phys) << img.sb.BlkSizeBits, nil
 }
 
@@ -706,6 +708,7 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 			return nil
 		}
 
+		// #nosec G115 -- readInfo bounded the nid through checkNid
 		inodeAddr := img.metaStartPos() + int64(ino.nid)*disk.SizeInodeCompact
 		trailingAddr := inodeAddr + ino.flatDataOffset()
 		// Inline data lives in the inode's own block and cannot run past it —
@@ -725,6 +728,7 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 		// Chunk-based files store data at the physical block addresses
 		// listed in the chunk index. For contiguous single-device files,
 		// the data is laid out consecutively and can be read directly.
+		// #nosec G115 -- the chunk format is the low 16 bits of i_u, as the kernel's __le16 c.format reads it
 		chunkFmt := uint16(ino.inodeData)
 		if chunkFmt&disk.LayoutChunkFormatIndexes == 0 {
 			return nil
@@ -739,6 +743,7 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 		nchunks := int((ino.size-1)>>chunkBits) + 1
 
 		// Read chunk index entries to check contiguity.
+		// #nosec G115 -- readInfo bounded the nid through checkNid
 		inodeStart := img.metaStartPos() + int64(ino.nid)*disk.SizeInodeCompact
 
 		baseOffset := inodeStart + ino.flatDataOffset()
@@ -970,6 +975,7 @@ func (img *image) loadAt(addr, size int64) (*block, error) {
 	}
 
 	b.offset = 0
+	// #nosec G115 -- n is at most size, which is capped at one block (at most 1<<16)
 	b.end = int32(n)
 
 	return b, nil
@@ -1006,6 +1012,7 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 	case disk.LayoutFlatInline:
 		// If on the last block, validate
 		if bn == nblocks-1 {
+			// #nosec G115 -- readInfo bounded the nid through checkNid
 			addr = img.metaStartPos() + int64(fi.nid*disk.SizeInodeCompact)
 			// Move to the data offset from the start of the inode
 			addr += fi.flatDataOffset()
@@ -1033,6 +1040,7 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 		}
 	case disk.LayoutChunkBased:
 		// first 2 le bytes for format, second 2 bytes are reserved
+		// #nosec G115 -- the chunk format is the low 16 bits of i_u, as the kernel's __le16 c.format reads it
 		format := uint16(fi.inodeData)
 		if format&disk.LayoutChunkFormat48Bit != 0 {
 			return nil, fmt.Errorf("48-bit chunk format for nid %d: %w", fi.nid, ErrNotImplemented)
@@ -1050,6 +1058,7 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 			return nil, fmt.Errorf("chunk format does not fit into allocated bytes for nid %d: %w", fi.nid, ErrInvalid)
 		}
 
+		// #nosec G115 -- readInfo bounded the nid through checkNid
 		inodeStart := img.metaStartPos() + int64(fi.nid*disk.SizeInodeCompact)
 		baseOffset := inodeStart + fi.flatDataOffset()
 
@@ -1127,8 +1136,8 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 			// Null address: a hole, which reads as zeros.
 			b := img.getBlock()
 			clear(b.buf[blockOffset:blockEnd])
-			b.offset = int32(blockOffset)
-			b.end = int32(blockEnd)
+			b.offset = int32(blockOffset) // #nosec G115 -- checked above: in [0, blockSize), at most 1<<16
+			b.end = int32(blockEnd)       // #nosec G115 -- checked above: at most blockSize, at most 1<<16
 
 			return b, nil
 		}
@@ -1155,8 +1164,8 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 			return nil, fmt.Errorf("failed to read full block for nid %d: %w", fi.nid, ErrInvalid)
 		}
 
-		b.offset = int32(blockOffset)
-		b.end = int32(blockEnd)
+		b.offset = int32(blockOffset) // #nosec G115 -- checked above: in [0, blockSize), at most 1<<16
+		b.end = int32(blockEnd)       // #nosec G115 -- checked above: at most blockSize, at most 1<<16
 
 		return b, nil
 	case disk.LayoutCompressedFull, disk.LayoutCompressedCompact:
@@ -1174,9 +1183,9 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 	}
 
 	b := img.getBlock()
-	b.offset = int32(blockOffset)
+	b.offset = int32(blockOffset) // #nosec G115 -- checked above: in [0, blockSize), at most 1<<16
 
-	b.end = int32(blockEnd)
+	b.end = int32(blockEnd) // #nosec G115 -- checked above: at most blockSize, at most 1<<16
 	if n, err := img.meta.ReadAt(b.bytes(), addr+int64(blockOffset)); err != nil {
 		img.putBlock(b)
 		return nil, fmt.Errorf("failed to read block for nid %d: %w", fi.nid, err)
@@ -1647,9 +1656,11 @@ func (b *file) readInfo() (ino *inode, err error) {
 		return nil, err
 	}
 
+	// #nosec G115 -- checkNid bounded nid*32 just above
 	addr := b.img.metaStartPos() + int64(b.nid*disk.SizeInodeCompact)
 	blkSize := int32(1 << b.img.sb.BlkSizeBits)
 	blk := b.img.getBlock()
+	// #nosec G115 -- the offset is masked below blkSize, at most 1<<16
 	blk.offset = int32(addr & int64(blkSize-1))
 
 	blk.end = blkSize
@@ -1723,7 +1734,7 @@ func (b *file) readInfo() (ino *inode, err error) {
 			icsize:      disk.SizeInodeExtended,
 			inodeLayout: layout,
 			inodeData:   di.InodeData,
-			size:        int64(di.Size),
+			size:        int64(di.Size), // #nosec G115 -- a size past 1<<63 wraps negative, rejected below
 			mode:        disk.EroFSModeToGoFileMode(di.Mode),
 			rawMode:     di.Mode,
 			uid:         di.UID,
@@ -1788,7 +1799,7 @@ func (b *file) statInfo() (*fileInfo, error) {
 			Rdev:    uint64(disk.RdevFromMode(ino.rawMode, ino.inodeData)),
 			UID:     ino.uid,
 			GID:     ino.gid,
-			Nlink:   uint64(ino.nlink),
+			Nlink:   uint64(ino.nlink), // #nosec G115 -- read from a uint16 or uint32 field, never negative
 			Mtime:   ino.mtime,
 			MtimeNs: ino.mtimeNs,
 		},
@@ -1843,6 +1854,7 @@ func (b *file) buildDataRanges(ino *inode, dst []DataRange) ([]DataRange, error)
 
 		return append(dst, DataRange{Device: 0, Offset: dataOffset, Size: ino.size}), nil
 	case disk.LayoutFlatInline:
+		// #nosec G115 -- readInfo bounded the nid through checkNid
 		inodeAddr := b.img.metaStartPos() + int64(ino.nid)*disk.SizeInodeCompact
 
 		trailingAddr := inodeAddr + ino.flatDataOffset()
@@ -1900,6 +1912,7 @@ const maxChunkIndexBytes = 64 << 20 // 64 MiB
 //
 //nolint:gocognit // one pass over the chunk index, coalescing holes and contiguous extents in place
 func (b *file) buildChunkDataRanges(ino *inode) []DataRange {
+	// #nosec G115 -- the chunk format is the low 16 bits of i_u, as the kernel's __le16 c.format reads it
 	chunkFmt := uint16(ino.inodeData)
 	if chunkFmt&disk.LayoutChunkFormatIndexes == 0 {
 		return nil
@@ -1914,6 +1927,7 @@ func (b *file) buildChunkDataRanges(ino *inode) []DataRange {
 	nchunks := int((ino.size-1)>>chunkBits) + 1
 	chunkSize := int64(1) << chunkBits
 
+	// #nosec G115 -- readInfo bounded the nid through checkNid
 	inodeStart := b.img.metaStartPos() + int64(ino.nid)*disk.SizeInodeCompact
 
 	baseOffset := inodeStart + ino.flatDataOffset()
@@ -2447,11 +2461,14 @@ type fileInfo struct {
 	rangesLoader func() []DataRange
 }
 
-func (fi *fileInfo) Name() string       { return fi.name }
-func (fi *fileInfo) Size() int64        { return fi.size }
-func (fi *fileInfo) Mode() fs.FileMode  { return fi.mode }
-func (fi *fileInfo) IsDir() bool        { return fi.mode.IsDir() }
-func (fi *fileInfo) Sys() any           { return &fi.stat }
+func (fi *fileInfo) Name() string      { return fi.name }
+func (fi *fileInfo) Size() int64       { return fi.size }
+func (fi *fileInfo) Mode() fs.FileMode { return fi.mode }
+func (fi *fileInfo) IsDir() bool       { return fi.mode.IsDir() }
+func (fi *fileInfo) Sys() any          { return &fi.stat }
+
+// ModTime reads i_mtime as the kernel does, as a signed time64_t.
+// #nosec G115 -- two's complement: a pre-1970 time is stored past 1<<63 and reads back negative
 func (fi *fileInfo) ModTime() time.Time { return time.Unix(int64(fi.mtime), int64(fi.mtimeNs)) }
 func (fi *fileInfo) UID() uint32        { return fi.stat.UID }
 func (fi *fileInfo) GID() uint32        { return fi.stat.GID }

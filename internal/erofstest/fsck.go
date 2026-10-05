@@ -15,6 +15,7 @@ func FsckErofs(tb testing.TB, path string) {
 		return // silently skip
 	}
 
+	// #nosec G204 -- a fixed binary run without a shell on the image path the test passes
 	cmd := exec.CommandContext(tb.Context(), "fsck.erofs", path)
 
 	out, err := cmd.CombinedOutput()
@@ -46,6 +47,7 @@ func FsckErofsBytes(tb testing.TB, buf []byte) {
 		tb.Fatal(err)
 	}
 
+	// #nosec G204 -- a fixed binary run without a shell on the temp file just written
 	cmd := exec.CommandContext(tb.Context(), "fsck.erofs", f.Name())
 
 	out, err := cmd.CombinedOutput()
@@ -83,6 +85,7 @@ func FsckErofsDevice(tb testing.TB, imagePath string, devicePaths ...string) {
 		args = append(args, "--device="+d)
 	}
 
+	// #nosec G204 -- a fixed binary run without a shell on the image and device paths the test passes
 	cmd := exec.CommandContext(tb.Context(), "fsck.erofs", args...)
 
 	out, err := cmd.CombinedOutput()

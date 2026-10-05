@@ -19,7 +19,7 @@ import (
 func (w *erofsWriter) inodeFileSize(e *erofsEntry) uint64 {
 	switch e.mode & disk.StatTypeMask {
 	case disk.StatTypeDir:
-		return uint64(w.direntDataSize(e))
+		return uint64(w.direntDataSize(e)) // #nosec G115 -- a byte count, never negative
 	case disk.StatTypeSymlink:
 		return uint64(len(e.symTarget))
 	}
@@ -111,6 +111,7 @@ func (w *erofsWriter) planLayout(root *erofsEntry) {
 				// look small (or negative) and reserve the wrong trailing size.
 				if avail := w.blockSize - headerSize; avail >= 0 && e.size <= uint64(avail) {
 					inBlockOff := (currentOff + headerSize) % w.blockSize
+					// #nosec G115 -- e.size was checked against avail, at most one block, just above
 					if inBlockOff+int(e.size) <= w.blockSize {
 						e.layout = disk.LayoutFlatInline
 					} else {
@@ -152,7 +153,7 @@ func (w *erofsWriter) planLayout(root *erofsEntry) {
 		if blockOff+inodeSize > w.blockSize {
 			// Align to next block
 			currentOff = (currentOff + w.blockSize - 1) & ^(w.blockSize - 1)
-			e.nid = uint64(currentOff / 32)
+			e.nid = uint64(currentOff / 32) // #nosec G115 -- an offset counted up from zero
 		}
 
 		// Also check that trailing data doesn't cross block boundary for inline layouts
@@ -214,6 +215,7 @@ func (w *erofsWriter) calcTrailingSize(e *erofsEntry) int {
 		}
 
 		if e.layout == disk.LayoutFlatInline {
+			// #nosec G115 -- planLayout picks the inline layout only for a size that fits in one block
 			return int(e.size)
 		}
 
