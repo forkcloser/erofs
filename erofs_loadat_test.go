@@ -173,7 +173,7 @@ func TestReadReferenceImage(t *testing.T) {
 			}
 
 			target, err := img.(interface {
-				ReadLink(string) (string, error)
+				ReadLink(name string) (string, error)
 			}).ReadLink("link")
 			if err != nil {
 				t.Fatalf("ReadLink: %v", err)

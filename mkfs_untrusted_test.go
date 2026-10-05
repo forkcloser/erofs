@@ -1701,7 +1701,7 @@ func TestCopyFromImageInlineCrossingBlock(t *testing.T) {
 
 	var target string
 	if target, err = img.(interface {
-		ReadLink(string) (string, error)
+		ReadLink(name string) (string, error)
 	}).ReadLink("l"); err == nil {
 		t.Errorf("ReadLink returned %q, want an error", target)
 	}
