@@ -33,8 +33,43 @@ golangci:
           linters: [paralleltest]
         - path: ^(erofs_directread_test\.go|erofs_fsconform_test\.go|erofs_loadat_test\.go|format_test\.go|internal/disk/types_test\.go|mkfs_chunkmap_test\.go|mkfs_limits_test\.go|mkfs_openfile_test\.go|mkfs_untrusted_test\.go|perf_audit_test\.go)$
           linters: [testpackage]
-        - path: ^(cmd/erofs\-cli/main\.go|erofs\.go|internal/erofstest/tar\.go|mkfs\.go|mkfs_image\.go|writer\.go)$
-          linters: [wrapcheck]
+    settings:
+      wrapcheck:
+        # A list here replaces wrapcheck's own, so its defaults come first.
+        ignore-sigs:
+          - .Errorf(
+          - errors.New(
+          - errors.Unwrap(
+          - errors.Join(
+          - .Wrap(
+          - .Wrapf(
+          - .WithMessage(
+          - .WithMessagef(
+          - .WithStack(
+          # The image's io.ReaderAt and the destination io.Writer are the
+          # caller's: their errors go back untouched, and io.EOF comes back
+          # as io.EOF, which readers compare with ==. erofs's own failures
+          # are already classified (ErrInvalid and the errors built on it).
+          - .Read(
+          - .ReadAt(
+          - .Write(
+          - .WriteTo(
+          - .WriteHeader(
+          - .Seek(
+          - io.ReadFull(
+          - io.Copy(
+          - io.WriteString(
+          # WalkDir returns what the walk function returned, which is this
+          # package's own error, or the source fs.FS's *PathError.
+          - fs.WalkDir(
+        ignore-package-globs:
+          # This module's own packages: their errors already say what they
+          # refuse.
+          - github.com/forkcloser/erofs
+          - github.com/forkcloser/erofs/*
+          # os errors are *PathError and *LinkError: the operation and the
+          # path are already in them.
+          - os
 
 nilaway:
   exclude-errors-in-files:
