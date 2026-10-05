@@ -1307,7 +1307,7 @@ func (img *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.Fi
 				)}
 			}
 
-			if len(target) > 0 && target[0] == '/' {
+			if target != "" && target[0] == '/' {
 				target = target[1:]
 			}
 			// validPath was applied to the caller's name, not to this. A

@@ -122,7 +122,7 @@ func (w *erofsWriter) checkLimits() error {
 		// away and restart the walk at the root, so any path through the link
 		// silently loses its prefix. Symlink rejects it at the API boundary;
 		// this catches the CopyFrom paths, where the source picks the target.
-		if e.mode&disk.StatTypeMask == disk.StatTypeSymlink && len(e.symTarget) == 0 {
+		if e.mode&disk.StatTypeMask == disk.StatTypeSymlink && e.symTarget == "" {
 			return fmt.Errorf("mkfs: %s: empty symlink target: %w", e.path, ErrInvalid)
 		}
 
@@ -747,9 +747,11 @@ func (w *erofsWriter) writeDirents(buf io.Writer, e *erofsEntry) (int, error) {
 	// alphabetically. EROFS requires dirents to be sorted within
 	// each block; "." and ".." are not guaranteed to be first.
 	allEnts := make([]direntInfo, 0, len(e.children)+2)
-	allEnts = append(allEnts, direntInfo{".", e.nid, disk.FileTypeDir})
+	allEnts = append(allEnts,
+		direntInfo{".", e.nid, disk.FileTypeDir},
+		direntInfo{"..", e.parentNid, disk.FileTypeDir},
+	)
 
-	allEnts = append(allEnts, direntInfo{"..", e.parentNid, disk.FileTypeDir})
 	for _, c := range e.children {
 		allEnts = append(allEnts, direntInfo{
 			name:     c.name,
