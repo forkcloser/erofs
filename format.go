@@ -133,6 +133,7 @@ func goModeToUnixMode(m fs.FileMode) uint16 {
 		mode |= disk.StatTypeIsVTX
 	}
 
+	//nolint:exhaustive // fs.FileMode is a bit set, not an enum: m.Type() yields only the type bits
 	switch m.Type() {
 	case 0: // regular file
 		mode |= disk.StatTypeReg
@@ -148,6 +149,9 @@ func goModeToUnixMode(m fs.FileMode) uint16 {
 		mode |= disk.StatTypeFifo
 	case fs.ModeSocket:
 		mode |= disk.StatTypeSock
+	default:
+		// fs.ModeIrregular, or type bits in a combination no FileInfo
+		// produces: the mode carries no type.
 	}
 
 	return mode
