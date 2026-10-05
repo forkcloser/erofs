@@ -8,6 +8,28 @@ commit `44d5e74`.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-05
+
+### Fixed
+
+- `CopyFrom` refuses, with `ErrInvalid`, three inputs it used to truncate into
+  a wrong image: data past 2^32 blocks, where the 32-bit block addresses
+  wrapped and the metadata landed inside file data; a `*Stat` source whose
+  `Rdev` needs more than 32 bits; and a metadata-only copy of an image whose
+  `i_size` is 2^63 or more, which made `Writer.Stat` report a negative size.
+- A host file's device number, read from its platform stat, is refused
+  rather than narrowed when it needs more than the 32-bit `i_rdev`: on Linux a
+  major past 4095 or a minor past 2^20-1 used to be stored as a different
+  device.
+- Errors wrap a sentinel, so `errors.Is` matches what before could only be
+  told apart by its text: `ErrInvalidSuperblock` for the super block checks
+  (exported but never returned until now), `ErrInvalid` for a corrupt image
+  or an invalid input, `fs.ErrExist`, `fs.ErrNotExist`, `fs.ErrClosed` and
+  `ErrIsDirectory` from the writer, `io.ErrUnexpectedEOF` for a short chunk
+  entry. The messages are unchanged apart from the sentinel's text.
+- `erofs-cli` skips the xattr listing of an entry whose `Sys()` is not an
+  `*erofs.Stat` instead of panicking.
+
 ## [1.0.0] - 2026-09-12
 
 ### Removed
