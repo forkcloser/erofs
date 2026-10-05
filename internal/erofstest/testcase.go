@@ -594,6 +594,8 @@ var SparseFiles TestCase = &testCase{ //nolint:gochecknoglobals // immutable fix
 // verifySparse checks a sparse file's size, verifies zeros by sampling a
 // 4KB block every 1MB, and optionally checks for a data marker at markerOff.
 // Set markerOff to -1 to skip the marker check.
+//
+//nolint:gocognit // a test helper: size, a zero sample every MiB, then the marker, in one read pass
 func verifySparse(tb testing.TB, fsys fs.FS, name string, size, markerOff int64, marker string) {
 	tb.Helper()
 

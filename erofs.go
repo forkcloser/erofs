@@ -198,6 +198,8 @@ func WithExtraDevices(devices ...io.ReaderAt) OpenOpt {
 // indefinitely. Callers walking an image from an untrusted source should
 // impose their own depth or visit limit. [Writer.CopyFrom] does this
 // internally and rejects cyclic images.
+//
+//nolint:gocognit // the superblock's checks, one after another, each naming what it refuses
 func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 	o := options{}
 	for _, opt := range opts {
@@ -474,6 +476,8 @@ const maxReadFileSize = 128 << 20 // 128 MiB
 
 // mapDev resolves map->m_bdev and map->m_pa mapping for go-erofs.
 // It works similarly to erofs_map_dev in the linux kernel.
+//
+//nolint:gocognit // the device lookup as erofs_map_dev does it: by id, then by mapped range, then the image
 func (img *image) mapDev(deviceID uint16, pa int64) (io.ReaderAt, int64, error) {
 	if deviceID > 0 {
 		if int(deviceID) > len(img.devices) {
@@ -537,6 +541,8 @@ func (img *image) deviceBlocks() []uint64 {
 // be read in one go instead of a block at a time. Returns nil when the layout
 // cannot be expressed as one contiguous physical range: a sparse or fragmented
 // chunk file, a multi-block inline file, or a compressed one.
+//
+//nolint:gocognit // one case per inode layout, each the contiguity rule loadBlock applies to that layout
 func (img *image) openDirect(ino *inode) *io.SectionReader {
 	if ino.size <= 0 {
 		return nil
@@ -702,6 +708,8 @@ func (*image) readMetadata(r io.Reader) ([]byte, error) {
 // prefixes. They are stored sequentially in a special "packed inode" or
 // "meta inode".
 // See: https://docs.kernel.org/filesystems/erofs.html#extended-attributes
+//
+//nolint:gocognit // the one-shot load inside the sync.Once: the closure is the function
 func (img *image) loadLongPrefixes() error {
 	img.prefixesOnce.Do(func() {
 		if img.sb.XattrPrefixCount == 0 {
@@ -829,6 +837,8 @@ func (img *image) loadAt(addr, size int64) (*block, error) {
 }
 
 // loadBlock loads the block with the given data.
+//
+//nolint:gocognit // the block map on every read, one case per inode layout, as erofs_map_blocks
 func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 	nblocks := calculateBlocks(img.sb.BlkSizeBits, fi.size)
 
@@ -1185,6 +1195,7 @@ func checkDirentName(name []byte) error {
 // promise otherwise, and neither does a kernel mount. A caller that needs
 // containment has to walk with Lstat and refuse symlinks itself.
 //
+//nolint:gocognit // the path walk: one component per iteration, a symlink restarting it from the root
 //revive:disable-next-line:function-result-limit the walk yields the inode, its type and its final name together.
 func (img *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.FileMode, basename string, err error) {
 	original := name
@@ -1770,6 +1781,8 @@ const maxChunkIndexBytes = 64 << 20 // 64 MiB
 //
 // The final entry (data or hole) has its Size trimmed to the file-tail length
 // so the invariant sum(Size) == ino.size holds precisely.
+//
+//nolint:gocognit // one pass over the chunk index, coalescing holes and contiguous extents in place
 func (b *file) buildChunkDataRanges(ino *inode) []DataRange {
 	chunkFmt := uint16(ino.inodeData)
 	if chunkFmt&disk.LayoutChunkFormatIndexes == 0 {
@@ -1856,6 +1869,7 @@ func (b *file) Stat() (fs.FileInfo, error) {
 	return b.statInfo()
 }
 
+//nolint:gocognit // the read path perf_audit_test.go measures: the whole-file fast path, else the block loop
 func (b *file) Read(p []byte) (int, error) {
 	fi, err := b.readInfo()
 	if err != nil {
@@ -1997,6 +2011,7 @@ type dir struct {
 	consumed uint16
 }
 
+//nolint:gocognit // the dirent walk perf_audit_test.go measures: one block at a time, each name checked where it is sliced
 func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 	fi, err := d.readInfo()
 	if err != nil {
@@ -2172,6 +2187,8 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 // A cross-block binary search locates the correct block, then an
 // intra-block binary search finds the entry.
 // Returns the nid and file type if found, or fs.ErrNotExist if not.
+//
+//nolint:gocognit // the binary search perf_audit_test.go measures, keeping the candidate block across iterations
 func (d *dir) lookup(target string) (uint64, fs.FileMode, error) {
 	fi, err := d.readInfo()
 	if err != nil {

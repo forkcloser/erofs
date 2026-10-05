@@ -52,6 +52,8 @@ func imageSize(ra io.ReaderAt) (int64, bool) {
 // The caller is responsible for validating metaStart and totalBytes against
 // the real size of ra before calling: both derive from superblock fields and
 // would otherwise size the allocation below directly from untrusted input.
+//
+//nolint:gocognit // the returned accessor is the function: the metadata buffer first, then the block cache
 func newMetaReader(ra io.ReaderAt, metaStart, totalBytes int64, blockSize int) func(int64) []byte {
 	metaSize := totalBytes - metaStart
 	if metaSize <= 0 {
@@ -112,6 +114,8 @@ type imgQEntry struct {
 // syscalls), it reads the entire metadata area into memory and parses
 // inodes, directory entries, xattrs, and chunk indexes directly from the
 // buffer. This reduces thousands of syscalls to a single ReadAt.
+//
+//nolint:gocognit // the BFS over the source's inodes, each decoded field by field; the fast path bench_test.go's merge benchmarks measure
 func (fsys *Writer) copyFromImage(img *image) error {
 	metaStart := img.metaStartPos()
 
@@ -513,6 +517,8 @@ func (fsys *Writer) copyFromImage(img *image) error {
 
 // parseDirBlock extracts directory entries from dirent data and enqueues
 // child inodes for BFS traversal.
+//
+//nolint:gocognit // the dirent decode, applying the reader's ReadDir rules block by block
 func (*Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPath string, queue *[]imgQEntry) error {
 	pos := 0
 	for pos < dirSize {
@@ -628,6 +634,8 @@ func chunkMapBytes(chunkFmt uint16, fileSize uint64, blkBits uint8, unit int64) 
 // reader will ever parse back (maxChunkIndexBytes). Both mean the size field
 // cannot be trusted, and carrying it forward would let a corrupt source drive
 // the writer's own allocations — the entry's trailing size is derived from it.
+//
+//nolint:gocognit // one pass over the chunk index, coalescing holes and contiguous extents in place
 func (*Writer) parseChunks(
 	data []byte,
 	chunkFmt uint16,
@@ -744,6 +752,8 @@ func (*Writer) parseChunks(
 // span reads n bytes at an absolute image offset (see copyFromImage) and is
 // how shared entries are reached; sharedOff is the shared xattr area's byte
 // offset, which the reader computes the same way, 0 included.
+//
+//nolint:gocognit // the xattr body decoded field by field: shared references, then inline entries
 func parseXattrsFromBuf(
 	buf []byte,
 	span func(off, n int64) ([]byte, error),

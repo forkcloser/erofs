@@ -77,6 +77,8 @@ func setXattr(stat *Stat, nid uint64, name, value string) error {
 
 // loadXattrs reads the extended attributes for the file's inode and
 // populates the given Stat's Xattrs map.
+//
+//nolint:gocognit // the xattr body decoded field by field, shared then inline, over one block cursor
 func loadXattrs(b *file, stat *Stat) (err error) {
 	ino := b.info
 	addr := b.img.metaStartPos() + int64(ino.nid*disk.SizeInodeCompact) + int64(ino.icsize)
