@@ -25,6 +25,8 @@ import (
 // without a recognised Stat_t — can carry it. Every entry used to read back
 // as the epoch.
 func TestCopyFromPreservesModTime(t *testing.T) {
+	t.Parallel()
+
 	when := time.Date(2024, time.March, 4, 5, 6, 7, 890, time.UTC)
 	src := fstest.MapFS{
 		"dir":   &fstest.MapFile{Mode: fs.ModeDir | 0o755, ModTime: when},
@@ -149,6 +151,8 @@ func checkHardlinkPair(t *testing.T, efs fs.FS, a, b, other string) {
 // TestCopyFromHostHardlinks copies a host directory holding a hard link:
 // the two names must share one inode in the image, as they do on the host.
 func TestCopyFromHostHardlinks(t *testing.T) {
+	t.Parallel()
+
 	switch runtime.GOOS {
 	case "linux", "darwin", "freebsd":
 	default:
@@ -196,12 +200,16 @@ func TestCopyFromHostHardlinks(t *testing.T) {
 // routes — the fs.WalkDir path with data, and the metadata-only fast path —
 // and expects one inode with two names either way.
 func TestCopyFromImageHardlinks(t *testing.T) {
+	t.Parallel()
+
 	srcFS, err := erofs.Open(bytes.NewReader(buildHardlinkSourceImage(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	t.Run("full", func(t *testing.T) {
+		t.Parallel()
+
 		var buf testBuffer
 
 		w := erofs.Create(&buf)
@@ -226,6 +234,8 @@ func TestCopyFromImageHardlinks(t *testing.T) {
 	})
 
 	t.Run("metadataOnly", func(t *testing.T) {
+		t.Parallel()
+
 		dataFile, err := os.Create(filepath.Join(t.TempDir(), "data.bin"))
 		if err != nil {
 			t.Fatal(err)
@@ -256,6 +266,8 @@ func TestCopyFromImageHardlinks(t *testing.T) {
 // CopyFrom call: a second source whose nids happen to coincide must not be
 // linked to the first source's files.
 func TestCopyFromHardlinkScope(t *testing.T) {
+	t.Parallel()
+
 	srcA, err := erofs.Open(bytes.NewReader(buildHardlinkSourceImage(t)))
 	if err != nil {
 		t.Fatal(err)
@@ -331,6 +343,8 @@ func TestCopyFromHardlinkScope(t *testing.T) {
 // link count of 1 does not — and a source's link count is never copied onto
 // a file whose other names the image does not hold.
 func TestCopyFromHardlinkIdentity(t *testing.T) {
+	t.Parallel()
+
 	src := fstest.MapFS{
 		"a": &fstest.MapFile{Data: []byte("dev1"), Mode: 0o644, Sys: &builder.Entry{Nlink: 2, Dev: 1, Ino: 100}},
 		"a2": &fstest.MapFile{
@@ -395,6 +409,8 @@ func TestCopyFromHardlinkIdentity(t *testing.T) {
 // a hard-linked pair with a plain file: the survivor keeps the inode with a
 // link count of 1, and the new file is its own inode.
 func TestCopyFromHardlinkOverwrite(t *testing.T) {
+	t.Parallel()
+
 	srcA, err := erofs.Open(bytes.NewReader(buildHardlinkSourceImage(t)))
 	if err != nil {
 		t.Fatal(err)
@@ -439,6 +455,8 @@ func TestCopyFromHardlinkOverwrite(t *testing.T) {
 // TestMknodMode covers the fs.FileMode contract of Mknod: the four special
 // types are accepted, everything else is refused.
 func TestMknodMode(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	w := erofs.Create(&buf)
@@ -488,6 +506,8 @@ func TestMknodMode(t *testing.T) {
 
 // TestChownRange covers the uid/gid bounds on both Chown methods.
 func TestChownRange(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	w := erofs.Create(&buf)

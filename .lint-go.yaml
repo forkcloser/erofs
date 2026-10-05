@@ -27,8 +27,6 @@ golangci:
         # predates it, not yet read. Not a judgment: each entry is a linter and
         # the files it fires in, to be emptied one linter or one package per
         # pull request, and the block deleted with the last one.
-        - path: ^(chunk_xattr_test\.go|erofs_directread_test\.go|erofs_fsconform_test\.go|erofs_loadat_test\.go|erofs_test\.go|format_test\.go|internal/disk/types_test\.go|mkfs_chunkmap_test\.go|mkfs_copy_test\.go|mkfs_limits_test\.go|mkfs_link_test\.go|mkfs_openfile_test\.go|mkfs_remove_test\.go|mkfs_test\.go|mkfs_untrusted_test\.go|perf_audit_test\.go)$
-          linters: [paralleltest]
         - path: ^(erofs_directread_test\.go|erofs_fsconform_test\.go|erofs_loadat_test\.go|format_test\.go|internal/disk/types_test\.go|mkfs_chunkmap_test\.go|mkfs_limits_test\.go|mkfs_openfile_test\.go|mkfs_untrusted_test\.go|perf_audit_test\.go)$
           linters: [testpackage]
     settings:

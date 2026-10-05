@@ -30,6 +30,8 @@ func newTestImage(data []byte, blkBits uint8) *image {
 // final block unreadable — which is exactly where mkfs.erofs puts the shared
 // xattr area of a small image.
 func TestLoadAtShortReadAtEOF(t *testing.T) {
+	t.Parallel()
+
 	const (
 		blkBits = 12
 		blkSize = 1 << blkBits
@@ -71,6 +73,8 @@ func TestLoadAtShortReadAtEOF(t *testing.T) {
 // TestLoadAtBeyondEOF covers reads with nothing to return, which must still
 // fail rather than hand back an empty block.
 func TestLoadAtBeyondEOF(t *testing.T) {
+	t.Parallel()
+
 	img := newTestImage(bytes.Repeat([]byte("z"), 100), 12)
 
 	if _, err := img.loadAt(100, 4096); err == nil {
@@ -92,12 +96,16 @@ func TestLoadAtBeyondEOF(t *testing.T) {
 // Small images put the shared xattr area in the final block, so this is the
 // end-to-end case that used to fail outright with an EOF error.
 func TestReadReferenceImage(t *testing.T) {
+	t.Parallel()
+
 	if _, err := exec.LookPath("mkfs.erofs"); err != nil {
 		t.Skip("mkfs.erofs not available")
 	}
 
 	for _, blockSize := range []string{"4096", "16384"} {
 		t.Run(blockSize, func(t *testing.T) {
+			t.Parallel()
+
 			dir := t.TempDir()
 
 			src := filepath.Join(dir, "src")

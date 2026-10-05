@@ -24,6 +24,8 @@ import (
 // before the fix the chunk index was written 4 bytes early and the file
 // resolved to the wrong device block.
 func TestChunkBasedXattrAlignment(t *testing.T) {
+	t.Parallel()
+
 	dataPath := filepath.Join(t.TempDir(), "data.bin")
 
 	df, err := os.Create(dataPath)
@@ -181,6 +183,8 @@ func (fsys chunkSourceFS) Open(name string) (fs.File, error) {
 // id, aliasing it onto the destination's own data file: the copied file then
 // read back an unrelated file's bytes with no error anywhere along the way.
 func TestMetadataOnlyChunkDeviceZero(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 
 	// Source layer: a data file, so the source image declares a device

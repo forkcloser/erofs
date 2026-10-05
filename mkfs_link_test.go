@@ -39,6 +39,8 @@ func linkStat(tb testing.TB, fsys fs.FS, name string) *erofs.Stat {
 // TestWriterLink verifies that hard-linked names share one inode on disk:
 // same ino, shared data, a correct link count, and shared metadata.
 func TestWriterLink(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	fsys := erofs.Create(&buf)
@@ -147,6 +149,8 @@ func TestWriterLink(t *testing.T) {
 // TestWriterLinkSpecial links non-regular inodes (symlink, device): the tar
 // world produces these, and the dirent file type must follow the target.
 func TestWriterLinkSpecial(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	fsys := erofs.Create(&buf)
@@ -192,6 +196,8 @@ func TestWriterLinkSpecial(t *testing.T) {
 
 // TestWriterLinkErrors covers the refusal cases.
 func TestWriterLinkErrors(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	fsys := erofs.Create(&buf)
@@ -233,6 +239,8 @@ func TestWriterLinkErrors(t *testing.T) {
 // TestWriterLinkDeterministic builds the same linked tree twice and expects
 // byte-identical images (link handling must not disturb reproducibility).
 func TestWriterLinkDeterministic(t *testing.T) {
+	t.Parallel()
+
 	build := func() []byte {
 		var buf testBuffer
 

@@ -22,6 +22,8 @@ import (
 
 // TestCreateFSSpool exercises spool mode: CreateFS without a data file.
 func TestCreateFSSpool(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	fsys := erofs.Create(&buf)
@@ -97,6 +99,8 @@ func TestCreateFSSpool(t *testing.T) {
 
 // TestCreateFSDataFile exercises data file mode (metadata-only).
 func TestCreateFSDataFile(t *testing.T) {
+	t.Parallel()
+
 	dataPath := filepath.Join(t.TempDir(), "data.bin")
 
 	df, err := os.Create(dataPath)
@@ -159,6 +163,8 @@ func TestCreateFSDataFile(t *testing.T) {
 
 // TestCreateFSMetadata verifies Chmod, Chown, Setxattr, SetMtime.
 func TestCreateFSMetadata(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	fsys := erofs.Create(&buf)
@@ -248,6 +254,8 @@ func TestCreateFSMetadata(t *testing.T) {
 
 // TestCreateFSMknod verifies char and block device creation.
 func TestCreateFSMknod(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	fsys := erofs.Create(&buf)
@@ -278,6 +286,8 @@ func TestCreateFSMknod(t *testing.T) {
 // TestCreateFSLargeFile tests a file that spans many blocks and exercises
 // the Chunk.Count uint16 split for files > 65535 blocks.
 func TestCreateFSLargeFile(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	fsys := erofs.Create(&buf)
@@ -318,6 +328,8 @@ func TestCreateFSLargeFile(t *testing.T) {
 // TestCreateFSLargeFileDataFile tests a large file with data file mode,
 // including chunk splitting for files > 65535 blocks.
 func TestCreateFSLargeFileDataFile(t *testing.T) {
+	t.Parallel()
+
 	dataPath := filepath.Join(t.TempDir(), "data.bin")
 
 	df, err := os.Create(dataPath)
@@ -370,7 +382,11 @@ func TestCreateFSLargeFileDataFile(t *testing.T) {
 
 // TestCreateFSErrors tests error cases.
 func TestCreateFSErrors(t *testing.T) {
+	t.Parallel()
+
 	t.Run("duplicate path", func(t *testing.T) {
+		t.Parallel()
+
 		var buf testBuffer
 
 		fsys := erofs.Create(&buf)
@@ -391,6 +407,8 @@ func TestCreateFSErrors(t *testing.T) {
 	})
 
 	t.Run("write after close", func(t *testing.T) {
+		t.Parallel()
+
 		var buf testBuffer
 
 		fsys := erofs.Create(&buf)
@@ -415,6 +433,8 @@ func TestCreateFSErrors(t *testing.T) {
 	})
 
 	t.Run("file double close", func(t *testing.T) {
+		t.Parallel()
+
 		var buf testBuffer
 
 		fsys := erofs.Create(&buf)
@@ -435,6 +455,8 @@ func TestCreateFSErrors(t *testing.T) {
 	})
 
 	t.Run("FS double close", func(t *testing.T) {
+		t.Parallel()
+
 		var buf testBuffer
 
 		fsys := erofs.Create(&buf)
@@ -449,6 +471,8 @@ func TestCreateFSErrors(t *testing.T) {
 	})
 
 	t.Run("create after FS close", func(t *testing.T) {
+		t.Parallel()
+
 		var buf testBuffer
 
 		fsys := erofs.Create(&buf)
@@ -466,6 +490,8 @@ func TestCreateFSErrors(t *testing.T) {
 // TestCreateFSImplicitDirs verifies that parent directories are created
 // implicitly when creating deeply nested files.
 func TestCreateFSImplicitDirs(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	fsys := erofs.Create(&buf)
@@ -515,6 +541,8 @@ func TestCreateFSImplicitDirs(t *testing.T) {
 // that plain entries come back as well-formed fs.FileMode values with no raw
 // on-disk bits left in them.
 func TestCreateFSSpecialModeBits(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	fsys := erofs.Create(&buf)
@@ -601,6 +629,8 @@ func TestCreateFSSpecialModeBits(t *testing.T) {
 
 // TestCreateFSEmpty verifies that an empty FS produces a valid image.
 func TestCreateFSEmpty(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	fsys := erofs.Create(&buf)
@@ -628,8 +658,12 @@ func TestCreateFSEmpty(t *testing.T) {
 // TestCreateFSBlockSize verifies WithBlockSize produces valid images
 // with different block sizes and that invalid sizes are rejected.
 func TestCreateFSBlockSize(t *testing.T) {
+	t.Parallel()
+
 	for _, bs := range []int{512, 1024, 4096, 65536} {
 		t.Run(strconv.Itoa(bs), func(t *testing.T) {
+			t.Parallel()
+
 			var buf testBuffer
 
 			fsys := erofs.Create(&buf, erofs.WithBlockSize(bs))
@@ -697,6 +731,8 @@ func TestCreateFSBlockSize(t *testing.T) {
 		{"too-large", 1 << 17},
 	} {
 		t.Run("invalid/"+c.name, func(t *testing.T) {
+			t.Parallel()
+
 			var buf testBuffer
 
 			fsys := erofs.Create(&buf, erofs.WithBlockSize(c.size))
@@ -718,6 +754,8 @@ func TestCreateFSBlockSize(t *testing.T) {
 	// File.closeDataFile, which use resolveBlockSize and so are sensitive
 	// to a non-default block size.
 	t.Run("dataFile/1024", func(t *testing.T) {
+		t.Parallel()
+
 		const bs = 1024
 
 		dataPath := filepath.Join(t.TempDir(), "data.bin")
@@ -797,6 +835,8 @@ func TestCreateFSBlockSize(t *testing.T) {
 
 // TestCreateFSSetNlink verifies that SetNlink overrides computed nlink.
 func TestCreateFSSetNlink(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	fsys := erofs.Create(&buf)
@@ -837,6 +877,8 @@ func TestCreateFSSetNlink(t *testing.T) {
 
 // TestCreateFSDirNlink verifies that directory nlink = 2 + child_dir_count.
 func TestCreateFSDirNlink(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	fsys := erofs.Create(&buf)
@@ -882,6 +924,8 @@ func TestCreateFSDirNlink(t *testing.T) {
 
 // TestCreateFSWithTempDir verifies that WithTempDir is respected.
 func TestCreateFSWithTempDir(t *testing.T) {
+	t.Parallel()
+
 	tmpDir := t.TempDir()
 
 	var buf testBuffer
@@ -918,6 +962,8 @@ func TestCreateFSWithTempDir(t *testing.T) {
 // TestCreateFSRootMetadata verifies that Mkdir("/") sets root permissions
 // and path-based methods can set metadata on it.
 func TestCreateFSRootMetadata(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	fsys := erofs.Create(&buf)
@@ -954,6 +1000,8 @@ func TestCreateFSRootMetadata(t *testing.T) {
 // TestCreateFSMultipleFiles tests creating many files to exercise the
 // spool and verify ordering.
 func TestCreateFSMultipleFiles(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	fsys := erofs.Create(&buf)
@@ -1003,6 +1051,8 @@ func TestCreateFSMultipleFiles(t *testing.T) {
 
 // TestWriterOpen tests Open and Read for regular files in spool mode.
 func TestWriterOpen(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	fsys := erofs.Create(&buf)
@@ -1039,6 +1089,8 @@ func TestWriterOpen(t *testing.T) {
 
 // TestWriterOpenDataFile tests Open and Read for regular files in data file mode.
 func TestWriterOpenDataFile(t *testing.T) {
+	t.Parallel()
+
 	dataPath := filepath.Join(t.TempDir(), "data.bin")
 
 	df, err := os.Create(dataPath)
@@ -1083,6 +1135,8 @@ func TestWriterOpenDataFile(t *testing.T) {
 
 // TestWriterOpenEmpty tests Open on an empty file.
 func TestWriterOpenEmpty(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	fsys := erofs.Create(&buf)
@@ -1114,6 +1168,8 @@ func TestWriterOpenEmpty(t *testing.T) {
 
 // TestWriterStat tests Stat for various entry types.
 func TestWriterStat(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	fsys := erofs.Create(&buf)
@@ -1234,6 +1290,8 @@ func TestWriterStat(t *testing.T) {
 
 // TestWriterReadDir tests Open on directories and ReadDir.
 func TestWriterReadDir(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	fsys := erofs.Create(&buf)
@@ -1331,7 +1389,11 @@ func TestWriterReadDir(t *testing.T) {
 
 // TestWriterOpenErrors tests error cases for Open.
 func TestWriterOpenErrors(t *testing.T) {
+	t.Parallel()
+
 	t.Run("not found", func(t *testing.T) {
+		t.Parallel()
+
 		var buf testBuffer
 
 		fsys := erofs.Create(&buf)
@@ -1343,6 +1405,8 @@ func TestWriterOpenErrors(t *testing.T) {
 	})
 
 	t.Run("file not yet closed", func(t *testing.T) {
+		t.Parallel()
+
 		var buf testBuffer
 
 		fsys := erofs.Create(&buf)
@@ -1375,6 +1439,8 @@ func TestWriterOpenErrors(t *testing.T) {
 	})
 
 	t.Run("read from dir", func(t *testing.T) {
+		t.Parallel()
+
 		var buf testBuffer
 
 		fsys := erofs.Create(&buf)
@@ -1399,10 +1465,14 @@ func TestWriterOpenErrors(t *testing.T) {
 // contain file data. The EROFS output should hold only inodes, dirents,
 // xattrs, and chunk indexes — never the file content itself.
 func TestMetadataOnlyNoFileData(t *testing.T) {
+	t.Parallel()
+
 	// Use a recognizable, non-trivial pattern that won't appear by coincidence.
 	marker := bytes.Repeat([]byte("EROFS_DATA_LEAK_CHECK!"), 200) // 4400 bytes
 
 	t.Run("MetadataOnly flag", func(t *testing.T) {
+		t.Parallel()
+
 		var meta testBuffer
 
 		w := erofs.Create(&meta)
@@ -1426,6 +1496,8 @@ func TestMetadataOnlyNoFileData(t *testing.T) {
 	})
 
 	t.Run("WithDataFile", func(t *testing.T) {
+		t.Parallel()
+
 		dataPath := filepath.Join(t.TempDir(), "data.bin")
 
 		df, err := os.Create(dataPath)
@@ -1474,6 +1546,8 @@ func TestMetadataOnlyNoFileData(t *testing.T) {
 	})
 
 	t.Run("CopyFrom with pre-existing chunks", func(t *testing.T) {
+		t.Parallel()
+
 		// Simulate a source that provides chunk mappings (like ext4).
 		// The metadata image must not contain file data, and no data
 		// should be written to a data file.
@@ -1636,6 +1710,8 @@ func (*chunkedFile) Close() error { return nil }
 
 // TestMergeBasic verifies that two CopyFrom calls merge entries.
 func TestMergeBasic(t *testing.T) {
+	t.Parallel()
+
 	base := fstest.MapFS{
 		"file1.txt":     {Data: []byte("base1"), Mode: 0o644},
 		"dir/file2.txt": {Data: []byte("base2"), Mode: 0o644},
@@ -1676,6 +1752,8 @@ func TestMergeBasic(t *testing.T) {
 
 // TestMergeWhiteout verifies that .wh.<name> files delete entries.
 func TestMergeWhiteout(t *testing.T) {
+	t.Parallel()
+
 	base := fstest.MapFS{
 		"keep.txt":   {Data: []byte("keep"), Mode: 0o644},
 		"remove.txt": {Data: []byte("gone"), Mode: 0o644},
@@ -1718,6 +1796,8 @@ func TestMergeWhiteout(t *testing.T) {
 
 // TestMergeOpaque verifies that .wh..wh..opq removes all prior children.
 func TestMergeOpaque(t *testing.T) {
+	t.Parallel()
+
 	base := fstest.MapFS{
 		"dir/old1.txt":     {Data: []byte("old1"), Mode: 0o644},
 		"dir/old2.txt":     {Data: []byte("old2"), Mode: 0o644},
@@ -1759,6 +1839,8 @@ func TestMergeOpaque(t *testing.T) {
 
 // TestMergeOverwrite verifies that overlay files replace base files.
 func TestMergeOverwrite(t *testing.T) {
+	t.Parallel()
+
 	base := fstest.MapFS{
 		"file.txt": {Data: []byte("old"), Mode: 0o644},
 	}
@@ -1794,6 +1876,8 @@ func TestMergeOverwrite(t *testing.T) {
 
 // TestMergeWhiteoutDir verifies that a whiteout can remove an entire directory.
 func TestMergeWhiteoutDir(t *testing.T) {
+	t.Parallel()
+
 	base := fstest.MapFS{
 		"dir/file.txt": {Data: []byte("content"), Mode: 0o644},
 	}
@@ -1831,6 +1915,8 @@ func TestMergeWhiteoutDir(t *testing.T) {
 // TestCreateFSUIDGID tests a variety of UID/GID values including boundary
 // values for compact (uint16) and extended (uint32) inodes.
 func TestCreateFSUIDGID(t *testing.T) {
+	t.Parallel()
+
 	type uidgid struct {
 		uid, gid int
 	}
@@ -1850,6 +1936,8 @@ func TestCreateFSUIDGID(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("uid%d_gid%d", tc.uid, tc.gid), func(t *testing.T) {
+			t.Parallel()
+
 			var buf testBuffer
 
 			fsys := erofs.Create(&buf)
@@ -1933,6 +2021,8 @@ func TestCreateFSUIDGID(t *testing.T) {
 // and non-regular entries when be was extracted from *Stat, losing all
 // metadata because entryFromSys does not handle *Stat.
 func TestCopyFromStatSource(t *testing.T) {
+	t.Parallel()
+
 	// Build a source EROFS image with a directory that has xattrs and
 	// custom ownership, plus a file with custom ownership.
 	var srcBuf erofstest.TestBuffer
@@ -2176,9 +2266,13 @@ func (*dataRangerFile) Close() error { return nil }
 // It also verifies that chunksFromRanges rejects invalid inputs (negative
 // offsets, non-positive sizes, unaligned offsets).
 func TestCopyFromDataRange(t *testing.T) {
+	t.Parallel()
+
 	const blockSize = 4096
 
 	t.Run("single contiguous range", func(t *testing.T) {
+		t.Parallel()
+
 		// One file, two blocks starting at physical block 10 on device 0.
 		src := &dataRangerFS{
 			deviceBlocks: 1024,
@@ -2232,6 +2326,8 @@ func TestCopyFromDataRange(t *testing.T) {
 	})
 
 	t.Run("multiple ranges on one device", func(t *testing.T) {
+		t.Parallel()
+
 		// Non-contiguous ranges: block 5 (1 block) and block 20 (3 blocks).
 		src := &dataRangerFS{
 			deviceBlocks: 1024,
@@ -2279,6 +2375,8 @@ func TestCopyFromDataRange(t *testing.T) {
 	})
 
 	t.Run("no data written for metadata-only", func(t *testing.T) {
+		t.Parallel()
+
 		// CopyFrom(MetadataOnly) must not copy any file data into the image.
 		// Read() returns the marker so that if CopyFrom accidentally opens
 		// and reads the file the marker will appear in the output image.
@@ -2310,6 +2408,8 @@ func TestCopyFromDataRange(t *testing.T) {
 	})
 
 	t.Run("sparse_hole_round_trip", func(t *testing.T) {
+		t.Parallel()
+
 		// A full-coverage slice with a hole entry should round-trip correctly.
 		// File layout: 1 data block at physical block 7, then 3-block hole.
 		// After CopyFrom(MetadataOnly) the output image should be valid (fsck),
@@ -2395,6 +2495,8 @@ func TestCopyFromDataRange(t *testing.T) {
 // TestChunksFromRangesValidation verifies that chunksFromRanges rejects
 // invalid DataRange inputs instead of silently producing corrupt chunk entries.
 func TestChunksFromRangesValidation(t *testing.T) {
+	t.Parallel()
+
 	// Use a non-EROFS source that exercises the chunksFromRanges code path.
 	// CopyFrom(MetadataOnly) on a DataRange-implementing source calls it.
 	tryRanges := func(t *testing.T, ranges []erofs.DataRange) error {
@@ -2422,6 +2524,8 @@ func TestChunksFromRangesValidation(t *testing.T) {
 	}
 
 	t.Run("negative offset", func(t *testing.T) {
+		t.Parallel()
+
 		err := tryRanges(t, []erofs.DataRange{{Device: 0, Offset: -4096, Size: 4096}})
 		if err == nil {
 			t.Fatal("expected error for negative Offset, got nil")
@@ -2429,6 +2533,8 @@ func TestChunksFromRangesValidation(t *testing.T) {
 	})
 
 	t.Run("zero size", func(t *testing.T) {
+		t.Parallel()
+
 		err := tryRanges(t, []erofs.DataRange{{Device: 0, Offset: 0, Size: 0}})
 		if err == nil {
 			t.Fatal("expected error for zero Size, got nil")
@@ -2436,6 +2542,8 @@ func TestChunksFromRangesValidation(t *testing.T) {
 	})
 
 	t.Run("negative size", func(t *testing.T) {
+		t.Parallel()
+
 		err := tryRanges(t, []erofs.DataRange{{Device: 0, Offset: 0, Size: -1}})
 		if err == nil {
 			t.Fatal("expected error for negative Size, got nil")
@@ -2443,6 +2551,8 @@ func TestChunksFromRangesValidation(t *testing.T) {
 	})
 
 	t.Run("unaligned offset", func(t *testing.T) {
+		t.Parallel()
+
 		err := tryRanges(t, []erofs.DataRange{{Device: 0, Offset: 100, Size: 4096}})
 		if err == nil {
 			t.Fatal("expected error for unaligned Offset, got nil")
@@ -2450,6 +2560,8 @@ func TestChunksFromRangesValidation(t *testing.T) {
 	})
 
 	t.Run("device out of range", func(t *testing.T) {
+		t.Parallel()
+
 		err := tryRanges(t, []erofs.DataRange{{Device: 1, Offset: 4096, Size: 4096}})
 		if err == nil {
 			t.Fatal("expected error for Device!=0, got nil")
@@ -2457,6 +2569,8 @@ func TestChunksFromRangesValidation(t *testing.T) {
 	})
 
 	t.Run("device wrap overflow", func(t *testing.T) {
+		t.Parallel()
+
 		err := tryRanges(t, []erofs.DataRange{{Device: 0xFFFF, Offset: 4096, Size: 4096}})
 		if err == nil {
 			t.Fatal("expected error for Device=0xFFFF (wraps to DeviceID=0), got nil")
@@ -2464,6 +2578,8 @@ func TestChunksFromRangesValidation(t *testing.T) {
 	})
 
 	t.Run("total_size_mismatch_under", func(t *testing.T) {
+		t.Parallel()
+
 		// Slice total (4096) < file size (16384).
 		err := tryRanges(t, []erofs.DataRange{{Device: 0, Offset: 0, Size: 4096}})
 		if err == nil {
@@ -2472,6 +2588,8 @@ func TestChunksFromRangesValidation(t *testing.T) {
 	})
 
 	t.Run("total_size_mismatch_over", func(t *testing.T) {
+		t.Parallel()
+
 		// Slice total (4096*5) > file size (16384).
 		err := tryRanges(t, []erofs.DataRange{{Device: 0, Offset: 0, Size: 4096 * 5}})
 		if err == nil {
@@ -2480,6 +2598,8 @@ func TestChunksFromRangesValidation(t *testing.T) {
 	})
 
 	t.Run("hole_entry_accepted", func(t *testing.T) {
+		t.Parallel()
+
 		// Full-coverage slice with a hole entry — holes are now supported.
 		// 1 data block + 3-block hole = 4 blocks == file size (16384).
 		err := tryRanges(t, []erofs.DataRange{
@@ -2492,6 +2612,8 @@ func TestChunksFromRangesValidation(t *testing.T) {
 	})
 
 	t.Run("non_final_size_unaligned", func(t *testing.T) {
+		t.Parallel()
+
 		// Middle range has non-block-aligned Size (100 bytes).
 		// total = 100 + (16384-100) = 16384 so coverage is satisfied.
 		err := tryRanges(t, []erofs.DataRange{
@@ -2504,6 +2626,8 @@ func TestChunksFromRangesValidation(t *testing.T) {
 	})
 
 	t.Run("final_size_partial_ok", func(t *testing.T) {
+		t.Parallel()
+
 		// Final range has a partial last block (file size is 16384 = 4*4096 exactly,
 		// but here we use a 3.5-block file to get a partial tail).
 		// Override file size via a separate dataRangerFS with size 4096*3+512.
@@ -2535,6 +2659,8 @@ func TestChunksFromRangesValidation(t *testing.T) {
 	})
 
 	t.Run("valid range passes", func(t *testing.T) {
+		t.Parallel()
+
 		err := tryRanges(t, []erofs.DataRange{{Device: 0, Offset: 4096, Size: 4096 * 4}})
 		if err != nil {
 			t.Fatalf("unexpected error for valid range: %v", err)

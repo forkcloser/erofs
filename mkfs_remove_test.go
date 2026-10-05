@@ -14,6 +14,8 @@ import (
 // TestWriterRemoveFile verifies Remove deletes a regular file and the
 // resulting image contains no trace of it.
 func TestWriterRemoveFile(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	w := erofs.Create(&buf)
@@ -65,6 +67,8 @@ func TestWriterRemoveFile(t *testing.T) {
 
 // TestWriterRemoveEmptyDir verifies that an empty directory can be removed.
 func TestWriterRemoveEmptyDir(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	w := erofs.Create(&buf)
@@ -98,6 +102,8 @@ func TestWriterRemoveEmptyDir(t *testing.T) {
 // TestWriterRemoveNonEmptyDirFails verifies that Remove returns an error
 // for a directory that still has children.
 func TestWriterRemoveNonEmptyDirFails(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	w := erofs.Create(&buf)
@@ -132,6 +138,8 @@ func TestWriterRemoveNonEmptyDirFails(t *testing.T) {
 // TestWriterRemoveMissingReturnsErrNotExist verifies Remove signals
 // fs.ErrNotExist for a path that was never added.
 func TestWriterRemoveMissingReturnsErrNotExist(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	w := erofs.Create(&buf)
@@ -144,6 +152,8 @@ func TestWriterRemoveMissingReturnsErrNotExist(t *testing.T) {
 
 // TestWriterRemoveRootFails verifies Remove cannot delete "/".
 func TestWriterRemoveRootFails(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	w := erofs.Create(&buf)
@@ -154,6 +164,8 @@ func TestWriterRemoveRootFails(t *testing.T) {
 
 // TestWriterRemoveSymlink verifies a symlink can be removed.
 func TestWriterRemoveSymlink(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	w := erofs.Create(&buf)
@@ -199,6 +211,8 @@ func TestWriterRemoveSymlink(t *testing.T) {
 // the canonical path promotes the first surviving alias (POSIX unlink
 // semantics).
 func TestWriterRemoveHardlinkOneName(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name      string
 		remove    string
@@ -208,6 +222,8 @@ func TestWriterRemoveHardlinkOneName(t *testing.T) {
 		{name: "canonical", remove: "/orig", survivors: []string{"alias1", "alias2"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			var buf testBuffer
 
 			w := erofs.Create(&buf)
@@ -272,6 +288,8 @@ func TestWriterRemoveHardlinkOneName(t *testing.T) {
 // TestWriterRemoveHardlinkAllAliases verifies removing every alias of a
 // pair drops both paths and the data along with them.
 func TestWriterRemoveHardlinkAllAliases(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	w := erofs.Create(&buf)
@@ -318,6 +336,8 @@ func TestWriterRemoveHardlinkAllAliases(t *testing.T) {
 // TestWriterRemoveAllRecursive verifies RemoveAll deletes a directory and
 // all of its descendants, leaving unrelated paths untouched.
 func TestWriterRemoveAllRecursive(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	w := erofs.Create(&buf)
@@ -380,6 +400,8 @@ func TestWriterRemoveAllRecursive(t *testing.T) {
 // TestWriterRemoveAllMissing verifies RemoveAll is a no-op (returns nil) on
 // a path that does not exist.
 func TestWriterRemoveAllMissing(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	w := erofs.Create(&buf)
@@ -393,6 +415,8 @@ func TestWriterRemoveAllMissing(t *testing.T) {
 // existing non-directory, matching Writer.Remove instead of silently
 // treating it as a missing path.
 func TestWriterRemoveAllNonDirectoryAncestor(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	w := erofs.Create(&buf)
@@ -414,6 +438,8 @@ func TestWriterRemoveAllNonDirectoryAncestor(t *testing.T) {
 
 // TestWriterRemoveAllRoot verifies RemoveAll cannot delete "/".
 func TestWriterRemoveAllRoot(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	w := erofs.Create(&buf)
@@ -425,6 +451,8 @@ func TestWriterRemoveAllRoot(t *testing.T) {
 // TestWriterRemoveAllFile verifies RemoveAll works on a single regular
 // file, just like Remove.
 func TestWriterRemoveAllFile(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	w := erofs.Create(&buf)
@@ -460,6 +488,8 @@ func TestWriterRemoveAllFile(t *testing.T) {
 // containing a hardlink alias correctly updates the canonical entry's link
 // count when the alias is removed.
 func TestWriterRemoveAllHardlinkInside(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	w := erofs.Create(&buf)
@@ -518,6 +548,8 @@ func TestWriterRemoveAllHardlinkInside(t *testing.T) {
 // serialize and Close failed; now the surviving name carries the inode
 // (unlink(2) semantics) and the merge succeeds.
 func TestMergeWhiteoutHardlinkTarget(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	w := erofs.Create(&buf)
@@ -569,6 +601,8 @@ func TestMergeWhiteoutHardlinkTarget(t *testing.T) {
 // inode must not depend on link creation order, or identical inputs would
 // yield different images.
 func TestWriterRemoveHardlinkPromotionDeterministic(t *testing.T) {
+	t.Parallel()
+
 	build := func(order []string) []byte {
 		var buf testBuffer
 
@@ -614,6 +648,8 @@ func TestWriterRemoveHardlinkPromotionDeterministic(t *testing.T) {
 // TestWriterRemoveOpenFile: the file currently open from Create cannot be
 // removed out from under its writer, directly or via an ancestor.
 func TestWriterRemoveOpenFile(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	w := erofs.Create(&buf)
