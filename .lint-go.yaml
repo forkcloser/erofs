@@ -19,8 +19,6 @@ golangci:
           linters: [errorlint]
         - path: ^(format\.go)$
           linters: [exhaustive]
-        - path: ^(cmd/erofs\-cli/main\.go)$
-          linters: [forbidigo]
         - path: ^(erofs\.go|internal/erofstest/tar\.go|mkfs\.go)$
           linters: [funcorder]
         - path: ^(erofs_fuzz_test\.go|format\.go|internal/erofstest/testcase\.go)$
