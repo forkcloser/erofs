@@ -285,7 +285,7 @@ func BenchmarkDir(b *testing.B) {
 		for range b.N {
 			outPath := filepath.Join(b.TempDir(), "out.erofs")
 
-			cmd := exec.Command("mkfs.erofs", "-Enoinline_data", "--quiet", outPath, dirPath)
+			cmd := exec.CommandContext(b.Context(), "mkfs.erofs", "-Enoinline_data", "--quiet", outPath, dirPath)
 			if out, err := cmd.CombinedOutput(); err != nil {
 				b.Fatalf("mkfs.erofs: %v\n%s", err, out)
 			}
@@ -374,7 +374,7 @@ func prepareMergeSources(b *testing.B) mergeSources {
 		} {
 			outPath := filepath.Join(tmpDir, tc.label+"-full-mkfs.erofs")
 
-			cmd := exec.Command("mkfs.erofs", "-Enoinline_data", "--quiet", outPath, tc.dirPath)
+			cmd := exec.CommandContext(b.Context(), "mkfs.erofs", "-Enoinline_data", "--quiet", outPath, tc.dirPath)
 			if out, err := cmd.CombinedOutput(); err != nil {
 				b.Fatalf("mkfs.erofs %s: %v\n%s", tc.label, err, out)
 			}
@@ -580,7 +580,7 @@ func BenchmarkMerge(b *testing.B) {
 
 		for range b.N {
 			outPath := filepath.Join(b.TempDir(), "out.erofs")
-			cmd := exec.Command("mkfs.erofs",
+			cmd := exec.CommandContext(b.Context(), "mkfs.erofs",
 				"--aufs", "--ovlfs-strip=1", "--quiet", "-Enoinline_data",
 				outPath, src.mkfsBaseFullPath, src.mkfsOverlayFullPath)
 			out, err := cmd.CombinedOutput()
@@ -838,7 +838,7 @@ func BenchmarkMerge10Layer(b *testing.B) {
 		if _, err := exec.LookPath("mkfs.erofs"); err == nil {
 			mkfsPath := filepath.Join(tmpDir, fmt.Sprintf("layer%d-mkfs.erofs", li))
 
-			cmd := exec.Command("mkfs.erofs", "-Enoinline_data", "--quiet", mkfsPath, dirPath)
+			cmd := exec.CommandContext(b.Context(), "mkfs.erofs", "-Enoinline_data", "--quiet", mkfsPath, dirPath)
 			if out, err := cmd.CombinedOutput(); err != nil {
 				b.Fatalf("mkfs.erofs layer %d: %v\n%s", li, err, out)
 			}
@@ -935,7 +935,7 @@ func BenchmarkMerge10Layer(b *testing.B) {
 				args = append(args, lf.mkfsErofsPath)
 			}
 
-			cmd := exec.Command("mkfs.erofs", args...)
+			cmd := exec.CommandContext(b.Context(), "mkfs.erofs", args...)
 			out, err := cmd.CombinedOutput()
 			_ = os.Remove(outPath)
 

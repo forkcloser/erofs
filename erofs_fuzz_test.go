@@ -196,7 +196,7 @@ func skipIfFuzzImageUnavailable(tb testing.TB, img fuzzImage) {
 func buildFuzzImage(tb testing.TB, entries []erofstest.WriterToTar, files, dirs []string) fuzzImage {
 	tb.Helper()
 
-	if _, err := erofstest.CheckMkfsVersion("1.0"); err != nil {
+	if _, err := erofstest.CheckMkfsVersion(tb.Context(), "1.0"); err != nil {
 		tb.Skipf("skipping: %v", err)
 	}
 
@@ -817,7 +817,7 @@ func FuzzDeepReadFileSize(f *testing.F) {
 func buildMinimalImage(tb testing.TB) []byte {
 	tb.Helper()
 
-	if _, err := erofstest.CheckMkfsVersion("1.0"); err != nil {
+	if _, err := erofstest.CheckMkfsVersion(tb.Context(), "1.0"); err != nil {
 		tb.Skipf("skipping: %v", err)
 	}
 

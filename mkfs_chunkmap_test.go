@@ -263,7 +263,7 @@ func fsckWithDevice(t *testing.T, image, blob []byte) {
 		t.Fatal(err)
 	}
 
-	out, err := exec.Command("fsck.erofs", "--device="+blobPath, imgPath).CombinedOutput()
+	out, err := exec.CommandContext(t.Context(), "fsck.erofs", "--device="+blobPath, imgPath).CombinedOutput()
 	if err != nil {
 		t.Errorf("fsck.erofs rejected the image: %v\n%s", err, out)
 	}

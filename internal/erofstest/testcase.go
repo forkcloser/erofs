@@ -2,6 +2,7 @@ package erofstest
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -688,8 +689,8 @@ func verifySparse(tb testing.TB, fsys fs.FS, name string, size, markerOff int64,
 // XattrPrefixFlags returns mkfs.erofs flags to enable long xattr prefix
 // compression for the prefixes used in LongXattrs. Returns nil if the
 // installed mkfs.erofs doesn't support --xattr-prefix (< 1.9).
-func XattrPrefixFlags() []string {
-	tooOld, err := CheckMkfsVersion("1.9")
+func XattrPrefixFlags(ctx context.Context) []string {
+	tooOld, err := CheckMkfsVersion(ctx, "1.9")
 	if err != nil || tooOld {
 		return nil
 	}

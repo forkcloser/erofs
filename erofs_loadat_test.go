@@ -119,7 +119,7 @@ func TestReadReferenceImage(t *testing.T) {
 
 			imgPath := filepath.Join(dir, "img.erofs")
 
-			cmd := exec.Command("mkfs.erofs", "--quiet", "-b", blockSize, imgPath, src)
+			cmd := exec.CommandContext(t.Context(), "mkfs.erofs", "--quiet", "-b", blockSize, imgPath, src)
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Skipf("mkfs.erofs -b %s failed: %v\n%s", blockSize, err, out)
 			}
