@@ -12,10 +12,11 @@ import (
 // syscall.Stat_t this package understands, only a *builder.Entry the source
 // supplies itself carries ownership and link identity; mode, size and
 // modification time still come from the fs.FileInfo.
-func entryFromSys(info fs.FileInfo) *builder.Entry {
+func entryFromSys(info fs.FileInfo) (*builder.Entry, error) {
 	if be, ok := info.Sys().(*builder.Entry); ok {
-		return be
+		return be, nil
 	}
 
-	return nil
+	//nolint:nilnil // nil is no platform stat: each caller then picks its own default entry
+	return nil, nil
 }

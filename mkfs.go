@@ -811,13 +811,16 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 		// For symlinks without LinkTarget, read via ReadLink interface.
 		if info.Mode()&fs.ModeSymlink != 0 && (be == nil || be.LinkTarget == "") {
 			if rl, ok := src.(readLinker); ok {
-				target, err := rl.ReadLink(fpath)
-				if err != nil {
+				var target string
+				if target, err = rl.ReadLink(fpath); err != nil {
 					return fmt.Errorf("readlink %s: %w", fpath, err)
 				}
 
 				if be == nil {
-					be = entryFromSys(info)
+					if be, err = entryFromSys(info); err != nil {
+						return fmt.Errorf("mkfs: %s: %w", p, err)
+					}
+
 					if be == nil {
 						be = &builder.Entry{}
 					}
@@ -832,7 +835,10 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 		// For directories, ensure nlink >= 2.
 		if info.Mode().IsDir() {
 			if be == nil {
-				be = entryFromSys(info)
+				if be, err = entryFromSys(info); err != nil {
+					return fmt.Errorf("mkfs: %s: %w", p, err)
+				}
+
 				if be == nil {
 					be = &builder.Entry{Nlink: 2}
 				}
@@ -1415,7 +1421,11 @@ func (fsys *Writer) addRegular(src fs.FS, fpath, p string, info fs.FileInfo, be 
 	// from the source — no need to open the file.
 	if fsys.copyMetadataOnly {
 		if be == nil {
-			be = entryFromSys(info)
+			var err error
+			if be, err = entryFromSys(info); err != nil {
+				return fmt.Errorf("mkfs: %s: %w", p, err)
+			}
+
 			if be == nil {
 				be = &builder.Entry{}
 			}
@@ -1459,16 +1469,20 @@ func (fsys *Writer) addRegular(src fs.FS, fpath, p string, info fs.FileInfo, be 
 		}
 	}
 
-	f, err := src.Open(fpath)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", fpath, err)
-	}
-
 	if be == nil {
-		be = entryFromSys(info)
+		var err error
+		if be, err = entryFromSys(info); err != nil {
+			return fmt.Errorf("mkfs: %s: %w", p, err)
+		}
+
 		if be == nil {
 			be = &builder.Entry{}
 		}
+	}
+
+	f, err := src.Open(fpath)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", fpath, err)
 	}
 
 	be.Data = f
@@ -1498,7 +1512,11 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 	size := uint64(info.Size())
 	typ := mode & disk.StatTypeMask
 
-	be := entryFromSys(info)
+	be, err := entryFromSys(info)
+	if err != nil {
+		return fmt.Errorf("mkfs: %s: %w", p, err)
+	}
+
 	if be == nil {
 		be = &builder.Entry{}
 	}
