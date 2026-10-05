@@ -53,8 +53,6 @@ golangci:
           linters: [nilnil]
         - path: ^(bench_test\.go|erofs_loadat_test\.go|erofs_test\.go|internal/erofstest/fsck\.go|internal/erofstest/mkfs\.go|mkfs_chunkmap_test\.go|mkfs_limits_test\.go)$
           linters: [noctx]
-        - path: ^(bench_test\.go)$
-          linters: [nolintlint]
         - path: ^(chunk_xattr_test\.go|erofs_directread_test\.go|erofs_fsconform_test\.go|erofs_loadat_test\.go|erofs_test\.go|format_test\.go|internal/disk/types_test\.go|mkfs_chunkmap_test\.go|mkfs_copy_test\.go|mkfs_limits_test\.go|mkfs_link_test\.go|mkfs_openfile_test\.go|mkfs_remove_test\.go|mkfs_test\.go|mkfs_untrusted_test\.go|perf_audit_test\.go)$
           linters: [paralleltest]
         - path: ^(erofs_fuzz_test\.go|internal/erofstest/fsck\.go|internal/erofstest/mkfs\.go|internal/erofstest/testcase\.go|mkfs\.go|mkfs_test\.go)$
