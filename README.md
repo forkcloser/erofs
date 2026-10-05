@@ -92,11 +92,8 @@ The read count is `ReadAt` calls per whole-file `fs.ReadFile`, covering the
 lookup and the inode as well as the data. Writing is bounded by serialization
 rather than by allocation, so fewer allocations there buy little wall time.
 
-**Ported from upstream since the fork.** The `system.posix_acl_access` and
-`system.posix_acl_default` xattr prefixes, which were spelled with a trailing
-dot so a stored ACL could never be matched by name (upstream `03d68d8`).
-Upstream's `Link`, `Remove`, `RemoveAll` and hardlink detection in `CopyFrom`
-arrived here independently and are not ports.
+**Upstream since the fork.** What this fork took from upstream after the fork
+point, and what it did not and why, is in [`UPSTREAM.md`](./UPSTREAM.md).
 
 Requires Go 1.26.
 
