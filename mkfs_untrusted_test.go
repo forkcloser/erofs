@@ -400,6 +400,9 @@ func TestUntrustedDirectoryCycleFullImageTerminates(t *testing.T) {
 	}
 }
 
+// errBudget stops the cyclic walk below once it has visited enough.
+var errBudget = errors.New("visit budget exhausted")
+
 // TestReaderWalkOnCyclicImage records the reader's behaviour on the same
 // image. fs.WalkDir has no cycle detection of its own, so the walk is
 // expected to keep descending; the callback bounds it so this test can
@@ -414,7 +417,6 @@ func TestReaderWalkOnCyclicImage(t *testing.T) {
 
 	const budget = 200
 
-	errBudget := errors.New("visit budget exhausted")
 	visits := 0
 	deepest := ""
 

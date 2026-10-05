@@ -1554,6 +1554,7 @@ func (*chunkedDir) Stat() (fs.FileInfo, error) {
 }
 
 func (*chunkedDir) Read([]byte) (int, error) {
+	//nolint:err113 // a fake's failure fixture
 	return 0, &fs.PathError{Op: "read", Path: ".", Err: errors.New("is a directory")}
 }
 func (*chunkedDir) Close() error { return nil }
@@ -2107,6 +2108,7 @@ func (*dataRangerDir) Stat() (fs.FileInfo, error) {
 }
 
 func (*dataRangerDir) Read([]byte) (int, error) {
+	//nolint:err113 // a fake's failure fixture
 	return 0, &fs.PathError{Op: "read", Path: ".", Err: errors.New("is a directory")}
 }
 func (*dataRangerDir) Close() error { return nil }

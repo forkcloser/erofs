@@ -250,7 +250,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 
 		buf := at(inodeAddr)
 		if len(buf) < disk.SizeInodeCompact {
-			return fmt.Errorf("inode %d out of range", cur.nid)
+			return fmt.Errorf("inode %d out of range: %w", cur.nid, ErrInvalid)
 		}
 
 		format := binary.LittleEndian.Uint16(buf[:2])
@@ -258,11 +258,11 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		compact := format&0x01 == 0
 
 		if compact && len(buf) < disk.SizeInodeCompact {
-			return fmt.Errorf("compact inode %d out of range", cur.nid)
+			return fmt.Errorf("compact inode %d out of range: %w", cur.nid, ErrInvalid)
 		}
 
 		if !compact && len(buf) < disk.SizeInodeExtended {
-			return fmt.Errorf("extended inode %d out of range", cur.nid)
+			return fmt.Errorf("extended inode %d out of range: %w", cur.nid, ErrInvalid)
 		}
 
 		var (

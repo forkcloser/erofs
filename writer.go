@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -23,6 +24,10 @@ const maxBlockSize = 1 << 16
 // a hint only, so exceeding it costs a few reallocations rather than
 // correctness.
 const maxMetaBufferPrealloc = 1 << 30 // 1 GiB
+
+// errMetaOverrun is a planLayout invariant broken at write time: the
+// metadata written so far has run past the nid slot it had to end at.
+var errMetaOverrun = errors.New("metadata overran nid slot")
 
 // onlyWriter wraps an io.Writer to hide io.ReaderFrom so that
 // io.CopyBuffer uses the caller-provided buffer instead of
@@ -414,7 +419,7 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 	// Write device slots right after superblock.
 	for i, blocks := range w.devices {
 		if blocks > math.MaxUint32 {
-			return fmt.Errorf("device %d block count %d exceeds 32-bit limit", i+1, blocks)
+			return fmt.Errorf("device %d block count %d exceeds 32-bit limit: %w", i+1, blocks, ErrInvalid)
 		}
 
 		devSlot := disk.DeviceSlot{
@@ -441,8 +446,8 @@ func (w *erofsWriter) writeMetadataInodes(buf io.Writer) error {
 		// following dirent nid points at misaligned garbage. Fail loudly
 		// rather than emit an image that opens but decodes to nonsense.
 		if expectedOff < metaStart {
-			return fmt.Errorf("write inode for %s: metadata overran nid slot %d by %d bytes",
-				e.path, e.nid, metaStart-expectedOff)
+			return fmt.Errorf("write inode for %s: %w %d by %d bytes",
+				e.path, errMetaOverrun, e.nid, metaStart-expectedOff)
 		}
 
 		if expectedOff > metaStart {
@@ -505,8 +510,8 @@ func (w *erofsWriter) writeMetadataInodes(buf io.Writer) error {
 				// instead of reporting the problem. The flat-plain path in
 				// writeDataBlocks already rejects this.
 				if n != int64(e.size) {
-					return fmt.Errorf("write inline data for %s: short read: got %d bytes, expected %d",
-						e.path, n, e.size)
+					return fmt.Errorf("write inline data for %s: short read: got %d bytes, expected %d: %w",
+						e.path, n, e.size, io.ErrUnexpectedEOF)
 				}
 
 				metaStart += int(n)
@@ -854,7 +859,8 @@ func (w *erofsWriter) writeDataBlocks(out io.Writer) error {
 			}
 
 			if written != expected {
-				return fmt.Errorf("write data for %s: short read: got %d bytes, expected %d", e.path, written, expected)
+				return fmt.Errorf("write data for %s: short read: got %d bytes, expected %d: %w",
+					e.path, written, expected, io.ErrUnexpectedEOF)
 			}
 
 			n = int(written)

@@ -30,6 +30,10 @@ func CheckMkfsVersion(minimum string) (bool, error) {
 	return cur.less(minVer), nil
 }
 
+// errVersionOutput is `mkfs.erofs -V` printing something other than
+// "mkfs.erofs (erofs-utils) <version>" on its first line.
+var errVersionOutput = errors.New("unexpected mkfs.erofs version output")
+
 type semver struct {
 	major, minor, patch int
 }
@@ -53,10 +57,6 @@ func parseVersion(s string) (semver, error) {
 		v   semver
 		err error
 	)
-
-	if len(parts) < 1 {
-		return v, errors.New("empty version string")
-	}
 
 	v.major, err = strconv.Atoi(parts[0])
 	if err != nil {
@@ -90,7 +90,7 @@ func mkfsVersion() (string, error) {
 
 	fields := strings.Fields(line)
 	if len(fields) < 3 {
-		return "", fmt.Errorf("unexpected mkfs.erofs version output: %q", line)
+		return "", fmt.Errorf("%w: %q", errVersionOutput, line)
 	}
 
 	return strings.TrimPrefix(fields[len(fields)-1], "v"), nil

@@ -212,7 +212,7 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 	}
 
 	if n != disk.SizeSuperBlock {
-		return nil, fmt.Errorf("invalid super block: read %d bytes", n)
+		return nil, fmt.Errorf("%w: read %d bytes", ErrInvalidSuperblock, n)
 	}
 
 	i := image{
@@ -246,7 +246,8 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 	if int(ondiskExtraDevices) != len(o.extraDevices) {
 		// TODO: Provide options for skipping extra devices and error out later?
 		return nil, fmt.Errorf(
-			"invalid super block: extra devices count %d does not match provided %d",
+			"%w: extra devices count %d does not match provided %d",
+			ErrInvalidSuperblock,
 			ondiskExtraDevices,
 			len(o.extraDevices),
 		)
@@ -476,7 +477,7 @@ const maxReadFileSize = 128 << 20 // 128 MiB
 func (img *image) mapDev(deviceID uint16, pa int64) (io.ReaderAt, int64, error) {
 	if deviceID > 0 {
 		if int(deviceID) > len(img.devices) {
-			return nil, 0, fmt.Errorf("invalid device id %d", deviceID)
+			return nil, 0, fmt.Errorf("invalid device id %d: %w", deviceID, ErrInvalid)
 		}
 
 		return img.devices[deviceID-1].device, pa, nil
@@ -733,9 +734,10 @@ func (img *image) loadLongPrefixes() error {
 
 			if startOffset > fi.size {
 				img.prefixesErr = fmt.Errorf(
-					"xattr prefix start offset %d exceeds packed inode size %d",
+					"xattr prefix start offset %d exceeds packed inode size %d: %w",
 					startOffset,
 					fi.size,
+					ErrInvalid,
 				)
 
 				return
@@ -778,7 +780,12 @@ func (img *image) getLongPrefix(index uint8) (string, error) {
 	}
 
 	if int(index) >= len(img.longPrefixes) {
-		return "", fmt.Errorf("long xattr prefix index %d out of range (max %d)", index, len(img.longPrefixes)-1)
+		return "", fmt.Errorf(
+			"long xattr prefix index %d out of range (max %d): %w",
+			index,
+			len(img.longPrefixes)-1,
+			ErrInvalid,
+		)
 	}
 
 	return img.longPrefixes[index], nil
@@ -910,7 +917,13 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 		if n, err := img.meta.ReadAt(entryBuf[:unit], entryPos); err != nil {
 			return nil, fmt.Errorf("failed to read chunk entry at %d: %w", entryPos, err)
 		} else if n != unit {
-			return nil, fmt.Errorf("short read of chunk entry at %d: read %d bytes, expected %d", entryPos, n, unit)
+			return nil, fmt.Errorf(
+				"short read of chunk entry at %d: read %d bytes, expected %d: %w",
+				entryPos,
+				n,
+				unit,
+				io.ErrUnexpectedEOF,
+			)
 		}
 
 		var (
@@ -1523,7 +1536,7 @@ func (b *file) readInfo() (ino *inode, err error) {
 	defer b.img.putBlock(blk)
 	defer func() {
 		if v := recover(); v != nil {
-			err = fmt.Errorf("file format error: %v", v)
+			err = fmt.Errorf("file format error: %v: %w", v, ErrInvalid)
 		}
 	}()
 
@@ -2459,7 +2472,7 @@ func decodeSuperBlock(b [disk.SizeSuperBlock]byte, sb *disk.SuperBlock) error {
 	sb.Unmarshal(b[:])
 
 	if sb.MagicNumber != disk.MagicNumber {
-		return fmt.Errorf("invalid super block: invalid magic number %x", sb.MagicNumber)
+		return fmt.Errorf("%w: invalid magic number %x", ErrInvalidSuperblock, sb.MagicNumber)
 	}
 
 	return nil
