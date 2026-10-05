@@ -934,7 +934,7 @@ func exerciseUntrusted(t *testing.T, buf []byte) {
 
 	_ = fs.WalkDir(img, ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			return nil //nolint:nilerr // what the call returns is not the point; the walk goes on
 		}
 
 		if fi, err := d.Info(); err == nil {

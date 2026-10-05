@@ -436,7 +436,7 @@ func fuzzWalk(f *testing.F, img fuzzImage) {
 			// Info must not panic and must be consistent.
 			info, infoErr := d.Info()
 			if infoErr != nil {
-				return nil
+				return nil //nolint:nilerr // an entry whose Info fails has nothing to compare; the walk goes on
 			}
 
 			if info.Name() != d.Name() {
