@@ -49,8 +49,6 @@ golangci:
           linters: [usetesting]
         - path: ^(cmd/erofs\-cli/main\.go|erofs\.go|format\.go|internal/disk/ftypes\.go|internal/erofstest/check\.go|internal/erofstest/fsck\.go|internal/erofstest/mkfs\.go|internal/erofstest/tar\.go|internal/erofstest/testcase\.go|layout\.go|mkfs\.go|mkfs_image\.go|writer\.go|xattr\.go)$
           linters: [varnamelen]
-        - path: ^(erofs\.go|erofs_fuzz_test\.go)$
-          linters: [wastedassign]
         - path: ^(cmd/erofs\-cli/main\.go|erofs\.go|internal/erofstest/tar\.go|mkfs\.go|mkfs_image\.go|writer\.go)$
           linters: [wrapcheck]
 
