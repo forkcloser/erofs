@@ -29,6 +29,8 @@ func randBytes(t *testing.T, n int, seed uint64) []byte {
 }
 
 func TestUnmarshalMatchesBinaryDecode(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name string
 		size int
@@ -92,6 +94,8 @@ func TestUnmarshalMatchesBinaryDecode(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			// The struct's binary size must match the declared constant, or
 			// the two decoders are reading different amounts.
 			if n, err := binary.Decode(make([]byte, tc.size), binary.LittleEndian, mustNew(t, tc)); err != nil {
@@ -191,6 +195,8 @@ func BenchmarkDecodeDirent(b *testing.B) {
 // encoding/binary produces. They exist only to avoid reflection's cost, so any
 // divergence is a bug: these bytes are the on-disk format.
 func TestSuperBlockMarshalMatchesReflection(t *testing.T) {
+	t.Parallel()
+
 	sb := SuperBlock{
 		MagicNumber: MagicNumber, Checksum: 0x11223344, FeatureCompat: 0x55667788,
 		BlkSizeBits: 12, ExtSlots: 3, RootNid: 0xABCD,
@@ -228,6 +234,8 @@ func TestSuperBlockMarshalMatchesReflection(t *testing.T) {
 }
 
 func TestDeviceSlotMarshalMatchesReflection(t *testing.T) {
+	t.Parallel()
+
 	var ds DeviceSlot
 	for i := range ds.Tag {
 		ds.Tag[i] = uint8(i)

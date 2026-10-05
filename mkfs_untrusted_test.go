@@ -102,6 +102,8 @@ func buildTamperableImage(t *testing.T) ([]byte, uint64) {
 // petabyte-scale chunk-based file. The declared size feeds calcTrailingSize,
 // which sizes the chunk-index map written into the in-memory metadata buffer;
 // without a bound, CopyFrom grows that buffer until the process dies.
+//
+//nolint:paralleltest // measures the process's TotalAlloc against a budget; a parallel test's allocations would count against it
 func TestUntrustedChunkSizeIsBounded(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -164,6 +166,8 @@ func TestUntrustedChunkSizeIsBounded(t *testing.T) {
 
 // TestUntrustedInodeCountIsBounded covers sb.Inos, which sized the BFS
 // queue's capacity directly.
+//
+//nolint:paralleltest // measures the process's TotalAlloc against a budget; a parallel test's allocations would count against it
 func TestUntrustedInodeCountIsBounded(t *testing.T) {
 	buf, _ := buildTamperableImage(t)
 
@@ -196,6 +200,8 @@ func TestUntrustedInodeCountIsBounded(t *testing.T) {
 
 // TestUntrustedBlockCountIsRejected covers sb.Blocks, which sized the eager
 // metadata read.
+//
+//nolint:paralleltest // measures the process's TotalAlloc against a budget; a parallel test's allocations would count against it
 func TestUntrustedBlockCountIsRejected(t *testing.T) {
 	buf, _ := buildTamperableImage(t)
 
@@ -308,6 +314,8 @@ func buildCyclicImage(t *testing.T, nameLen int) []byte {
 // TestUntrustedDirectoryCycleTerminates covers a dirent graph that is not a
 // tree. Without a visited set the BFS revisits the same subtree forever,
 // growing the queue and the path strings without bound.
+//
+//nolint:paralleltest // measures the process's TotalAlloc against a budget; a parallel test's allocations would count against it
 func TestUntrustedDirectoryCycleTerminates(t *testing.T) {
 	buf := buildCyclicImage(t, 1)
 
@@ -354,6 +362,8 @@ func TestUntrustedDirectoryCycleTerminates(t *testing.T) {
 // walks the source through fs.WalkDir, which has no cycle detection, so the
 // visited set that bounds the metadata-only path does not help. What stops it
 // is the path length bound, since a cycle yields ever-deeper paths.
+//
+//nolint:paralleltest // measures the process's heap in use against a budget; a parallel test's live heap would count against it
 func TestUntrustedDirectoryCycleFullImageTerminates(t *testing.T) {
 	// Names at the dirent maximum hit the path bound seventeen levels down.
 	// Shorter ones reach it thousands of levels down, and since every step
@@ -408,6 +418,8 @@ var errBudget = errors.New("visit budget exhausted")
 // expected to keep descending; the callback bounds it so this test can
 // assert the exposure without running away.
 func TestReaderWalkOnCyclicImage(t *testing.T) {
+	t.Parallel()
+
 	buf := buildCyclicImage(t, 1)
 
 	img, err := Open(bytes.NewReader(buf))
@@ -517,6 +529,8 @@ func (fsys badSizeFS) Open(name string) (fs.File, error) {
 // entry reserved -1 trailing bytes and every later inode landed one byte off
 // its nid slot — a fully corrupt image built without an error.
 func TestCopyFromNegativeSize(t *testing.T) {
+	t.Parallel()
+
 	out := &seekBuf{}
 	w := Create(out)
 
@@ -541,6 +555,8 @@ func TestCopyFromNegativeSize(t *testing.T) {
 // The writer used to produce such images itself via Symlink("", ...); this one
 // has to be built by hand now that it does not.
 func TestEmptySymlinkTargetRejected(t *testing.T) {
+	t.Parallel()
+
 	out := &seekBuf{}
 	w := Create(out)
 
@@ -614,6 +630,8 @@ func TestEmptySymlinkTargetRejected(t *testing.T) {
 // TestWriterRejectsEmptySymlinkTarget checks both entry points: the direct API
 // and a CopyFrom source that reports an empty target.
 func TestWriterRejectsEmptySymlinkTarget(t *testing.T) {
+	t.Parallel()
+
 	w := Create(&seekBuf{})
 	if err := w.Symlink("", "/el"); err == nil {
 		t.Error("Symlink accepted an empty target")
@@ -686,6 +704,8 @@ func buildSymlinkCycleImage(t *testing.T, target string) []byte {
 // length. A 12 KiB image drove 33 million reads and 94 seconds of CPU through
 // one Open.
 func TestResolveWorkIsBounded(t *testing.T) {
+	t.Parallel()
+
 	// maxSymlinks hops over at most maxPathLen/2 components each, at a couple
 	// of reads per component. Clear of the real figure (~1M) and far below the
 	// tens of millions the unbounded walk reached.
@@ -704,6 +724,8 @@ func TestResolveWorkIsBounded(t *testing.T) {
 		{"absolute", "/" + strings.Repeat("a/", (maxPathLen-4)/2) + "l"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			buf := buildSymlinkCycleImage(t, tc.target)
 
 			cr := &countingReaderAt{ra: bytes.NewReader(buf)}
@@ -732,6 +754,8 @@ func TestResolveWorkIsBounded(t *testing.T) {
 // symlink is involved — and fs.WalkDir over a cyclic image generates exactly
 // those names.
 func TestResolveRejectsOverlongPath(t *testing.T) {
+	t.Parallel()
+
 	buf := buildSymlinkCycleImage(t, "/a/l")
 
 	cr := &countingReaderAt{ra: bytes.NewReader(buf)}
@@ -781,6 +805,8 @@ func patchDirentName(t *testing.T, buf []byte, from, to string) {
 // destination directory the moment it is not: classic zip-slip, driven by the
 // image rather than by the caller.
 func TestDirentNameIsABaseName(t *testing.T) {
+	t.Parallel()
+
 	out := &seekBuf{}
 	w := Create(out)
 
@@ -839,6 +865,8 @@ func TestDirentNameIsABaseName(t *testing.T) {
 // path whose path.Dir collapses to "/" — and the opaque-whiteout branch then
 // removed every entry contributed by every prior layer.
 func TestMergeWhiteoutCannotEscapeItsDirectory(t *testing.T) {
+	t.Parallel()
+
 	out := &seekBuf{}
 
 	w := Create(out)
@@ -969,6 +997,8 @@ func exerciseUntrusted(t *testing.T, buf []byte) {
 // into an error but did nothing about the offset already having escaped, and
 // loadBlock, openDirect and buildChunkDataRanges have no such net at all.
 func TestUntrustedNidStaysInBounds(t *testing.T) {
+	t.Parallel()
+
 	buf, _ := buildTamperableImage(t)
 
 	img0, err := Open(bytes.NewReader(buf))
@@ -993,6 +1023,8 @@ func TestUntrustedNidStaysInBounds(t *testing.T) {
 // only reaches that at the maximum block size, which is why the default-sized
 // fuzz corpus never produced it.
 func TestUntrustedChunkAddrStaysInBounds(t *testing.T) {
+	t.Parallel()
+
 	out := &seekBuf{}
 	w := Create(out, WithBuildTime(1000, 0), WithBlockSize(65536))
 
@@ -1066,6 +1098,8 @@ func TestUntrustedChunkAddrStaysInBounds(t *testing.T) {
 // size and allocated it before the read that would have shown the map is not
 // there, so an 8 KiB image drove a 64 MiB allocation on every Stat or
 // DataRange call.
+//
+//nolint:paralleltest // measures the process's TotalAlloc against a budget; a parallel test's allocations would count against it
 func TestUntrustedChunkIndexAllocIsBacked(t *testing.T) {
 	buf, nid := buildTamperableImage(t)
 
@@ -1126,6 +1160,8 @@ func TestUntrustedChunkIndexAllocIsBacked(t *testing.T) {
 // deliberately not de-duped. 20000 links to one 480-chunk file reserved 9.6 M
 // chunk slots to hold 20001, retaining 162 MiB from a 384 KiB image.
 func TestCopyFromImageSharesChunkMaps(t *testing.T) {
+	t.Parallel()
+
 	const (
 		links  = 2000
 		blocks = 480
@@ -1217,6 +1253,8 @@ func TestCopyFromImageSharesChunkMaps(t *testing.T) {
 // end of a pre-existing data file, and the division truncated it onto an
 // earlier block, so the file read back the bytes already there.
 func TestUnalignedDataFileStart(t *testing.T) {
+	t.Parallel()
+
 	path := filepath.Join(t.TempDir(), "data.bin")
 
 	pre := []byte("PRE-EXISTING BYTES, NOT BLOCK ALIGNED")
@@ -1280,6 +1318,8 @@ func TestUnalignedDataFileStart(t *testing.T) {
 // nil error — a consumer validating a manifest would see attacker-chosen zeros
 // instead of a failure.
 func TestShortReadIsNotZeroFilled(t *testing.T) {
+	t.Parallel()
+
 	buf, nid := buildTamperableImage(t)
 
 	img0, err := Open(bytes.NewReader(buf))
@@ -1314,6 +1354,8 @@ func TestShortReadIsNotZeroFilled(t *testing.T) {
 // the empty prefix and let "security.capability" be spelled out in full, and a
 // plain repeat of a key, which the map silently took last-one-wins.
 func TestXattrPrefixAndDuplicates(t *testing.T) {
+	t.Parallel()
+
 	out := &seekBuf{}
 	w := Create(out, WithBuildTime(1000, 0))
 
@@ -1397,6 +1439,8 @@ func TestXattrPrefixAndDuplicates(t *testing.T) {
 // duplicate last-wins, so an image that the reader refused would still be
 // copied — spoofed security.capability included — by CopyFrom(MetadataOnly).
 func TestCopyFromImageXattrParity(t *testing.T) {
+	t.Parallel()
+
 	build := func(t *testing.T, xattrs map[string]string) []byte {
 		t.Helper()
 
@@ -1436,6 +1480,8 @@ func TestCopyFromImageXattrParity(t *testing.T) {
 	}
 
 	t.Run("undefinedIndex", func(t *testing.T) {
+		t.Parallel()
+
 		buf := build(t, map[string]string{"security.capability": "real"})
 		if err := copyMeta(t, buf); err != nil {
 			t.Fatalf("untampered image failed to copy: %v", err)
@@ -1460,6 +1506,8 @@ func TestCopyFromImageXattrParity(t *testing.T) {
 	})
 
 	t.Run("duplicateKey", func(t *testing.T) {
+		t.Parallel()
+
 		// Two names under the same prefix, then rewrite the second's stored
 		// suffix so both spell the same full key.
 		buf := build(t, map[string]string{
@@ -1494,6 +1542,8 @@ func TestCopyFromImageXattrParity(t *testing.T) {
 // entry, and the copyFromImage fast path silently skipped over it — neither
 // treated the image as the corrupt thing it is.
 func TestEmptyDirentNameIsRejected(t *testing.T) {
+	t.Parallel()
+
 	out := &seekBuf{}
 
 	w := Create(out, WithBuildTime(1000, 0))
@@ -1620,6 +1670,8 @@ func buildFlatPlainImage(t *testing.T) ([]byte, int64) {
 // flat address was handed to the reader as-is — and published as
 // DataRange.Offset — so a slice-backed io.ReaderAt indexed with it.
 func TestFlatPlainAddressIsBounded(t *testing.T) {
+	t.Parallel()
+
 	buf, inodeOff := buildFlatPlainImage(t)
 	// i_u (the data block address for a flat-plain inode) sits at byte 16 of
 	// both inode formats.
@@ -1633,6 +1685,8 @@ func TestFlatPlainAddressIsBounded(t *testing.T) {
 		{"strict", &strictReaderAt{t: t, buf: buf}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			img, err := Open(tc.ra)
 			if err != nil {
 				t.Fatalf("tampered image failed to open: %v", err)
@@ -1658,6 +1712,8 @@ func TestFlatPlainAddressIsBounded(t *testing.T) {
 // metadata-only copy used to take the bytes that followed as the target, or
 // an empty one when nothing followed.
 func TestCopyFromImageInlineCrossingBlock(t *testing.T) {
+	t.Parallel()
+
 	out := &seekBuf{}
 
 	w := Create(out, WithBuildTime(1000, 0))
@@ -1719,6 +1775,8 @@ func TestCopyFromImageInlineCrossingBlock(t *testing.T) {
 // so the entry runs past the inode's xattr area. The reader errors; the
 // metadata-only copy used to stop parsing and drop the attribute silently.
 func TestCopyFromImageTruncatedXattr(t *testing.T) {
+	t.Parallel()
+
 	out := &seekBuf{}
 	w := Create(out, WithBuildTime(1000, 0))
 

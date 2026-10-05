@@ -52,6 +52,8 @@ func readAllVia(t *testing.T, img *image, name string, bufSize int, forceBlockPa
 // must be indistinguishable for every layout and every read size, including
 // sizes that do not divide the file or the block.
 func TestDirectReadMatchesBlockPath(t *testing.T) {
+	t.Parallel()
+
 	const blockSize = 4096
 
 	sizes := []int{
@@ -118,6 +120,8 @@ func TestDirectReadMatchesBlockPath(t *testing.T) {
 
 // TestWriteToMatchesRead covers the io.WriterTo path io.Copy prefers.
 func TestWriteToMatchesRead(t *testing.T) {
+	t.Parallel()
+
 	const blockSize = 4096
 
 	out := &seekBuf{}
@@ -164,6 +168,8 @@ func TestWriteToMatchesRead(t *testing.T) {
 // TestWriteToResumesFromOffset covers io.Copy after a partial Read, where
 // WriteTo must pick up where the reader left off rather than restarting.
 func TestWriteToResumesFromOffset(t *testing.T) {
+	t.Parallel()
+
 	out := &seekBuf{}
 	w := Create(out, WithBuildTime(1000, 0))
 	data := []byte("0123456789abcdef")
@@ -205,6 +211,8 @@ func TestWriteToResumesFromOffset(t *testing.T) {
 // TestDirectReadSparseFile covers a chunk-based file with a hole, where the
 // direct path must decline and leave the block loop to zero-fill.
 func TestDirectReadSparseFile(t *testing.T) {
+	t.Parallel()
+
 	const bs = 4096
 
 	blob := sparseBlob(bs)

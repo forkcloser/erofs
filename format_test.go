@@ -8,6 +8,8 @@ import "testing"
 // and never matched a caller asking for the real name (ported from upstream
 // go-erofs 03d68d8).
 func TestPOSIXACLXattrPrefix(t *testing.T) {
+	t.Parallel()
+
 	for _, name := range []string{"system.posix_acl_access", "system.posix_acl_default"} {
 		index, suffix := xattrSplit(name)
 		if suffix != "" {

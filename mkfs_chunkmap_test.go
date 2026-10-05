@@ -155,8 +155,12 @@ func checkSparseContent(t *testing.T, img fs.FS, bs int, label string) {
 // boundary inside a chunk was silently swallowed, so a hole read back as real
 // blob content.
 func TestChunkMapHonoursBlockSize(t *testing.T) {
+	t.Parallel()
+
 	for _, bs := range []int{512, 1024, 2048, 4096} {
 		t.Run(blockSizeName(bs), func(t *testing.T) {
+			t.Parallel()
+
 			blob := sparseBlob(bs)
 
 			out := &seekBuf{}
@@ -187,6 +191,8 @@ func TestChunkMapHonoursBlockSize(t *testing.T) {
 // the wrong logical position, and every chunked file was marked contiguous so
 // planLayout collapsed its extents into a single mapping.
 func TestChunkMapSurvivesReindex(t *testing.T) {
+	t.Parallel()
+
 	const bs = 4096
 
 	blob := sparseBlob(bs)

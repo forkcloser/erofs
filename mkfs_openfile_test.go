@@ -32,6 +32,8 @@ func writeFile(t *testing.T, w *Writer, name string, data []byte) {
 // shared stream, so the second file's region pointed at the first file's
 // data and its own content was lost entirely.
 func TestCreateRejectsSecondOpenFile(t *testing.T) {
+	t.Parallel()
+
 	w := Create(&seekBuf{}, WithBuildTime(1000, 0))
 
 	f1, err := w.Create("/one")
@@ -70,6 +72,8 @@ func TestCreateRejectsSecondOpenFile(t *testing.T) {
 // TestSequentialFilesKeepTheirData is the positive case: written one at a
 // time, each file's content must round-trip.
 func TestSequentialFilesKeepTheirData(t *testing.T) {
+	t.Parallel()
+
 	for _, useDataFile := range []bool{false, true} {
 		name := "spool"
 		if useDataFile {
@@ -77,6 +81,8 @@ func TestSequentialFilesKeepTheirData(t *testing.T) {
 		}
 
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
 			out := &seekBuf{}
 			opts := []CreateOpt{WithBuildTime(1000, 0)}
 
@@ -150,6 +156,8 @@ func firstByte(b []byte) string {
 // TestCopyFromRejectsOpenFile covers CopyFrom appending to the same stream as
 // an open writer, which would interleave the copied bytes into its region.
 func TestCopyFromRejectsOpenFile(t *testing.T) {
+	t.Parallel()
+
 	w := Create(&seekBuf{}, WithBuildTime(1000, 0))
 
 	f, err := w.Create("/one")
@@ -181,6 +189,8 @@ func TestCopyFromRejectsOpenFile(t *testing.T) {
 // entry's size is recorded by File.Close, so the image would have listed it
 // as empty and dropped everything already written to it.
 func TestWriterCloseRejectsOpenFile(t *testing.T) {
+	t.Parallel()
+
 	w := Create(&seekBuf{}, WithBuildTime(1000, 0))
 
 	f, err := w.Create("/one")

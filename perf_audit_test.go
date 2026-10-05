@@ -48,6 +48,8 @@ func buildPerfImage(tb testing.TB, size int) []byte {
 }
 
 func TestPerfReadCallCount(t *testing.T) {
+	t.Parallel()
+
 	const size = 8 << 20
 
 	buf := buildPerfImage(t, size)

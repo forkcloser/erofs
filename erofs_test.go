@@ -17,6 +17,8 @@ import (
 )
 
 func TestErofs(t *testing.T) {
+	t.Parallel()
+
 	if _, err := erofstest.CheckMkfsVersion(t.Context(), "1.0"); err != nil {
 		t.Skipf("skipping: %v", err)
 	}
@@ -35,6 +37,8 @@ func TestErofs(t *testing.T) {
 		{"LongXattrs", erofstest.LongXattrs, erofstest.XattrPrefixFlags(t.Context())},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			for _, cc := range []struct {
 				name string
 				conv erofstest.Converter
@@ -45,6 +49,8 @@ func TestErofs(t *testing.T) {
 				{"chunk-index", erofstest.MkfsErofsBlobDev(minChunk, tc.flags...)},
 			} {
 				t.Run(cc.name, func(t *testing.T) {
+					t.Parallel()
+
 					tc.test.Run(t, cc.conv)
 				})
 			}
@@ -53,18 +59,24 @@ func TestErofs(t *testing.T) {
 
 	// Large file: 256MB+ to exercise chunk index overflow (run once with 4K chunks).
 	t.Run("LargeFile", func(t *testing.T) {
+		t.Parallel()
+
 		erofstest.LargeFile.Run(t, erofstest.MkfsErofs(fmt.Sprintf("--chunksize=%d", minChunk)))
 	})
 
 	// Sparse files require --chunksize and produce images under 1MB
 	// despite 30MB of logical content.
 	t.Run("SparseFiles", func(t *testing.T) {
+		t.Parallel()
+
 		chunkFlag := fmt.Sprintf("--chunksize=%d", minChunk)
 		erofstest.SparseFiles.Run(t, erofstest.MkfsErofsMaxSize(1024*1024, chunkFlag))
 	})
 
 	// Compression format is unimplemented — verify EroFS returns ErrNotImplemented.
 	t.Run("lz4-unimplemented", func(t *testing.T) {
+		t.Parallel()
+
 		if runtime.GOOS == "windows" {
 			t.Skip("mkfs.erofs compression is not included on Windows")
 		}
@@ -220,6 +232,8 @@ func checkDataRangeCoverage(t *testing.T, fsys fs.FS, name string, fileSize int)
 // layout that contained the headSize bug (inodeData treated as block count
 // instead of block address).
 func TestDataRangeMultiBlockCoverage(t *testing.T) {
+	t.Parallel()
+
 	if _, err := erofstest.CheckMkfsVersion(t.Context(), "1.0"); err != nil {
 		t.Skipf("skipping: %v", err)
 	}
@@ -238,8 +252,12 @@ func TestDataRangeMultiBlockCoverage(t *testing.T) {
 	// tar pipeline: works on all platforms; mkfs.erofs uses -Enoinline_data
 	// so files land in FlatPlain layout (single contiguous range).
 	t.Run("tar-pipeline", func(t *testing.T) {
+		t.Parallel()
+
 		for _, tc := range sizes {
 			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
 				content := bytes.Repeat([]byte("x"), tc.fileSize)
 				tarCtx := erofstest.TarContext{}
 				wt := erofstest.TarAll(tarCtx.File("/file.bin", content, 0o644))
@@ -255,12 +273,16 @@ func TestDataRangeMultiBlockCoverage(t *testing.T) {
 	// Skipped on Windows because the cross-compiled mkfs.erofs there only
 	// supports --tar input.
 	t.Run("dir-source-flatinline", func(t *testing.T) {
+		t.Parallel()
+
 		if runtime.GOOS == "windows" {
 			t.Skip("mkfs.erofs directory-source mode not available on Windows")
 		}
 
 		for _, tc := range sizes {
 			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
 				dir := t.TempDir()
 
 				content := bytes.Repeat([]byte("x"), tc.fileSize)
@@ -302,6 +324,8 @@ func TestDataRangeMultiBlockCoverage(t *testing.T) {
 //   - At least one file has a hole so the hole-emission path in
 //     buildChunkDataRanges is actually exercised.
 func TestDataRangeSparseChunkBased(t *testing.T) {
+	t.Parallel()
+
 	if _, err := erofstest.CheckMkfsVersion(t.Context(), "1.0"); err != nil {
 		t.Skipf("skipping: %v", err)
 	}
@@ -388,6 +412,8 @@ func TestDataRangeSparseChunkBased(t *testing.T) {
 // so the two disagreed: every block's last entry was listed but could not be
 // opened.
 func TestMaxBlockSizeWideDir(t *testing.T) {
+	t.Parallel()
+
 	var buf testBuffer
 
 	w := erofs.Create(&buf, erofs.WithBlockSize(65536))

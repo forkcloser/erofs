@@ -23,6 +23,8 @@ import (
 // accepted, stay visible through the Writer, and then be missing from the
 // image with no error anywhere.
 func TestParentMustBeADirectory(t *testing.T) {
+	t.Parallel()
+
 	newWriterWithFile := func(t *testing.T) *Writer {
 		t.Helper()
 
@@ -33,6 +35,8 @@ func TestParentMustBeADirectory(t *testing.T) {
 	}
 
 	t.Run("Create", func(t *testing.T) {
+		t.Parallel()
+
 		w := newWriterWithFile(t)
 		if f, err := w.Create("/a/b"); err == nil {
 			_ = f.Close()
@@ -44,6 +48,8 @@ func TestParentMustBeADirectory(t *testing.T) {
 	})
 
 	t.Run("Mkdir", func(t *testing.T) {
+		t.Parallel()
+
 		w := newWriterWithFile(t)
 		if err := w.Mkdir("/a/b", 0o755); !errors.Is(err, ErrNotDirectory) {
 			t.Errorf("err = %v; want ErrNotDirectory", err)
@@ -51,6 +57,8 @@ func TestParentMustBeADirectory(t *testing.T) {
 	})
 
 	t.Run("Symlink", func(t *testing.T) {
+		t.Parallel()
+
 		w := newWriterWithFile(t)
 		if err := w.Symlink("target", "/a/b"); !errors.Is(err, ErrNotDirectory) {
 			t.Errorf("err = %v; want ErrNotDirectory", err)
@@ -58,6 +66,8 @@ func TestParentMustBeADirectory(t *testing.T) {
 	})
 
 	t.Run("Mknod", func(t *testing.T) {
+		t.Parallel()
+
 		w := newWriterWithFile(t)
 		if err := w.Mknod("/a/b", fs.ModeDevice|fs.ModeCharDevice|0o666, 0); !errors.Is(err, ErrNotDirectory) {
 			t.Errorf("err = %v; want ErrNotDirectory", err)
@@ -65,6 +75,8 @@ func TestParentMustBeADirectory(t *testing.T) {
 	})
 
 	t.Run("Link", func(t *testing.T) {
+		t.Parallel()
+
 		w := newWriterWithFile(t)
 		if err := w.Link("/a", "/a/b"); !errors.Is(err, ErrNotDirectory) {
 			t.Errorf("err = %v; want ErrNotDirectory", err)
@@ -72,6 +84,8 @@ func TestParentMustBeADirectory(t *testing.T) {
 	})
 
 	t.Run("deeper", func(t *testing.T) {
+		t.Parallel()
+
 		w := newWriterWithFile(t)
 		if err := w.Mkdir("/a/b/c/d", 0o755); !errors.Is(err, ErrNotDirectory) {
 			t.Errorf("err = %v; want ErrNotDirectory", err)
@@ -79,6 +93,8 @@ func TestParentMustBeADirectory(t *testing.T) {
 	})
 
 	t.Run("throughSymlink", func(t *testing.T) {
+		t.Parallel()
+
 		w := Create(&seekBuf{}, WithBuildTime(1000, 0))
 		if err := w.Symlink("elsewhere", "/link"); err != nil {
 			t.Fatal(err)
@@ -91,6 +107,8 @@ func TestParentMustBeADirectory(t *testing.T) {
 
 	// Implicit parents are still created when nothing is in the way.
 	t.Run("implicitParentsStillWork", func(t *testing.T) {
+		t.Parallel()
+
 		out := &seekBuf{}
 		w := Create(out, WithBuildTime(1000, 0))
 		writeFile(t, w, "/x/y/z.txt", []byte("deep"))
@@ -152,6 +170,8 @@ func (i *sizedInfo) Sys() any         { return i.sys }
 // inode, so a short read used to be padded out with NULs and the file read
 // back at its declared size with the tail silently zeroed.
 func TestShortInlineReadIsRejected(t *testing.T) {
+	t.Parallel()
+
 	out := &seekBuf{}
 	w := Create(out, WithBuildTime(1000, 0))
 
@@ -180,6 +200,8 @@ func TestShortInlineReadIsRejected(t *testing.T) {
 // TestShortFlatPlainReadIsRejected is the pre-existing counterpart, kept so
 // both paths stay consistent.
 func TestShortFlatPlainReadIsRejected(t *testing.T) {
+	t.Parallel()
+
 	out := &seekBuf{}
 	w := Create(out, WithBuildTime(1000, 0))
 
@@ -207,6 +229,8 @@ func TestShortFlatPlainReadIsRejected(t *testing.T) {
 // from the superblock, so an entry was only safe to pack compact when its
 // mtime matched both superblock fields, not just the seconds.
 func TestCompactInodeKeepsSubSecondMtime(t *testing.T) {
+	t.Parallel()
+
 	for _, tc := range []struct {
 		name             string
 		buildSec         uint64
@@ -221,6 +245,8 @@ func TestCompactInodeKeepsSubSecondMtime(t *testing.T) {
 		{"zeroBuildNsec", 1000, 0, 1000, 0, 1000, 0, "the common case"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			out := &seekBuf{}
 			w := Create(out, WithBuildTime(tc.buildSec, tc.buildNs))
 			writeFile(t, w, "/f.txt", []byte("hello"))
@@ -260,10 +286,14 @@ func TestCompactInodeKeepsSubSecondMtime(t *testing.T) {
 // --- Finding 9: xattr field widths ---
 
 func TestXattrLimits(t *testing.T) {
+	t.Parallel()
+
 	longName := "user." + strings.Repeat("n", 256)
 	bigValue := strings.Repeat("v", 65536)
 
 	t.Run("SetxattrRejectsLongName", func(t *testing.T) {
+		t.Parallel()
+
 		w := Create(&seekBuf{}, WithBuildTime(1000, 0))
 		if err := w.Mkdir("/d", 0o755); err != nil {
 			t.Fatal(err)
@@ -275,6 +305,8 @@ func TestXattrLimits(t *testing.T) {
 	})
 
 	t.Run("SetxattrRejectsBigValue", func(t *testing.T) {
+		t.Parallel()
+
 		w := Create(&seekBuf{}, WithBuildTime(1000, 0))
 		if err := w.Mkdir("/d", 0o755); err != nil {
 			t.Fatal(err)
@@ -286,6 +318,8 @@ func TestXattrLimits(t *testing.T) {
 	})
 
 	t.Run("BoundaryValuesAccepted", func(t *testing.T) {
+		t.Parallel()
+
 		out := &seekBuf{}
 
 		w := Create(out, WithBuildTime(1000, 0))
@@ -324,6 +358,8 @@ func TestXattrLimits(t *testing.T) {
 
 	// Xattrs also arrive through CopyFrom, where the source picks lengths.
 	t.Run("CopyFromRejectsOversized", func(t *testing.T) {
+		t.Parallel()
+
 		out := &seekBuf{}
 		w := Create(out, WithBuildTime(1000, 0))
 
@@ -366,6 +402,8 @@ func (i *xattrInfo) Sys() any {
 // len(e.chunks), so the image carried chunk-based inodes without declaring
 // the feature.
 func TestChunkedFeatureFlagDeclared(t *testing.T) {
+	t.Parallel()
+
 	const bs = 4096
 
 	blob := sparseBlob(bs)
@@ -436,6 +474,8 @@ func fsckImage(t *testing.T, image []byte) {
 // fails. dataOff stayed at 0, so the first file's chunk indexes pointed at
 // block 0 while its bytes went wherever the file position actually was.
 func TestDataFileSeekErrorIsSticky(t *testing.T) {
+	t.Parallel()
+
 	df, err := os.CreateTemp(t.TempDir(), "blob-*")
 	if err != nil {
 		t.Fatal(err)

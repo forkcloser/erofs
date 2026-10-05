@@ -44,6 +44,8 @@ func conformImage(t *testing.T) fs.FS {
 // were validated this reported 41 violations: absolute paths, "." elements,
 // doubled slashes, trailing "/." and ".." traversal were all accepted.
 func TestFSConformance(t *testing.T) {
+	t.Parallel()
+
 	img := conformImage(t)
 	if err := fstest.TestFS(img, "a.txt", "dir/b.txt", "dir/c.txt", "link"); err != nil {
 		t.Errorf("fstest.TestFS: %v", err)
@@ -52,6 +54,8 @@ func TestFSConformance(t *testing.T) {
 
 // TestInvalidPathsRejected pins the specific shapes that used to resolve.
 func TestInvalidPathsRejected(t *testing.T) {
+	t.Parallel()
+
 	img := conformImage(t)
 
 	for _, name := range []string{
@@ -68,6 +72,8 @@ func TestInvalidPathsRejected(t *testing.T) {
 		"",                   // empty
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
 			if f, err := img.Open(name); err == nil {
 				_ = f.Close()
 
@@ -94,6 +100,8 @@ func TestInvalidPathsRejected(t *testing.T) {
 
 // TestValidPathsAccepted guards against over-rejecting.
 func TestValidPathsAccepted(t *testing.T) {
+	t.Parallel()
+
 	img := conformImage(t)
 
 	for _, name := range []string{".", "a.txt", "dir", "dir/b.txt", "link"} {
@@ -113,6 +121,8 @@ func TestValidPathsAccepted(t *testing.T) {
 // writer can create names that are not valid UTF-8; rejecting them on the read
 // side would hide entries that are really present in the image.
 func TestNonUTF8NamesRemainReachable(t *testing.T) {
+	t.Parallel()
+
 	const raw = "\xff\xfe-name"
 
 	out := &seekBuf{}
@@ -162,6 +172,8 @@ func TestNonUTF8NamesRemainReachable(t *testing.T) {
 
 // TestWalkDirFromRoot covers the traversal the CLI performs.
 func TestWalkDirFromRoot(t *testing.T) {
+	t.Parallel()
+
 	img := conformImage(t)
 
 	var seen []string
