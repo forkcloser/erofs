@@ -367,6 +367,145 @@ type image struct {
 	prefixesErr  error
 }
 
+func (img *image) Open(name string) (fs.File, error) {
+	nid, ftype, basename, err := img.resolve("open", name, true)
+	if err != nil {
+		return nil, err
+	}
+
+	b := file{img: img, name: basename, nid: nid, ftype: ftype}
+	if ftype.IsDir() {
+		return &dir{file: b}, nil
+	}
+
+	return &b, nil
+}
+
+func (img *image) Stat(name string) (fs.FileInfo, error) {
+	nid, ftype, basename, err := img.resolve("stat", name, true)
+	if err != nil {
+		return nil, err
+	}
+
+	f := &file{img: img, name: basename, nid: nid, ftype: ftype}
+
+	return f.statInfo()
+}
+
+// ReadFile reads the named file and returns its contents.
+// Files larger than maxReadFileSize (128 MiB) are rejected;
+// use Open and io.Copy for larger files.
+func (img *image) ReadFile(name string) ([]byte, error) {
+	nid, ftype, basename, err := img.resolve("readfile", name, true)
+	if err != nil {
+		return nil, err
+	}
+
+	if ftype.IsDir() {
+		//nolint:goconst // PathError.Op is spelled as the os package spells it
+		return nil, &fs.PathError{Op: "read", Path: name, Err: ErrIsDirectory}
+	}
+
+	f := &file{img: img, name: basename, nid: nid, ftype: ftype}
+
+	fi, err := f.readInfo()
+	if err != nil {
+		return nil, err
+	}
+
+	if fi.size < 0 || fi.size > maxReadFileSize {
+		return nil, fmt.Errorf(
+			"file size %d exceeds ReadFile limit %d; use Open and io.Copy for large files: %w",
+			fi.size,
+			int64(maxReadFileSize),
+			ErrInvalid,
+		)
+	}
+
+	buf := make([]byte, fi.size)
+	if err := readAll(f, buf); err != nil {
+		return nil, &fs.PathError{Op: "read", Path: name, Err: err}
+	}
+
+	return buf, nil
+}
+
+// readAll fills buf, treating a short read as corruption rather than as a
+// hole to pad with zeros.
+//
+// file.Read only clears io.EOF when it filled the buffer, so a file whose data
+// range runs past the end of the image returns (partial, io.EOF). Callers that
+// waved io.EOF through therefore handed back a zero-padded buffer and a nil
+// error, which is the worst possible answer: a consumer validating a config or
+// a manifest sees attacker-chosen zeros where it should see a failure.
+func readAll(f *file, buf []byte) error {
+	if len(buf) == 0 {
+		return nil
+	}
+
+	if _, err := io.ReadFull(f, buf); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("data ends before the declared size of %d bytes: %w", len(buf), ErrInvalid)
+		}
+
+		return err
+	}
+
+	return nil
+}
+
+func (img *image) ReadDir(name string) ([]fs.DirEntry, error) {
+	nid, ftype, basename, err := img.resolve("readdir", name, true)
+	if err != nil {
+		return nil, err
+	}
+
+	if !ftype.IsDir() {
+		return nil, &fs.PathError{Op: "readdir", Path: name, Err: ErrNotDirectory}
+	}
+
+	d := &dir{file: file{img: img, name: basename, nid: nid, ftype: ftype}}
+
+	entries, err := d.ReadDir(-1)
+	if err != nil {
+		return nil, err
+	}
+	// EROFS keeps dirents sorted within a block — dir.lookup's binary search
+	// depends on it — so for a well-formed image this only has to confirm the
+	// order, not establish it. A hostile image may not be sorted, and
+	// fs.ReadDir's contract says sorted, so the sort still has to be here.
+	byName := func(a, b fs.DirEntry) int { return cmp.Compare(a.Name(), b.Name()) }
+	if !slices.IsSortedFunc(entries, byName) {
+		slices.SortFunc(entries, byName)
+	}
+
+	return entries, nil
+}
+
+func (img *image) ReadLink(name string) (string, error) {
+	nid, ftype, basename, err := img.resolve("readlink", name, false)
+	if err != nil {
+		return "", err
+	}
+
+	if ftype&fs.ModeSymlink == 0 {
+		return "", &fs.PathError{Op: "readlink", Path: name, Err: fs.ErrInvalid}
+	}
+
+	return img.linkTarget(nid, basename)
+}
+
+func (img *image) Lstat(name string) (fs.FileInfo, error) {
+	nid, ftype, basename, err := img.resolve("lstat", name, false)
+	if err != nil {
+		return nil, err
+	}
+
+	f := &file{img: img, name: basename, nid: nid, ftype: ftype}
+
+	return f.statInfo()
+}
+
 // start physical offset of the separate metadata zone.
 func (img *image) metaStartPos() int64 {
 	return int64(img.sb.MetaBlkAddr) << int64(img.sb.BlkSizeBits)
@@ -1352,145 +1491,6 @@ func (img *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.Fi
 	return nid, ftype, basename, nil
 }
 
-func (img *image) Open(name string) (fs.File, error) {
-	nid, ftype, basename, err := img.resolve("open", name, true)
-	if err != nil {
-		return nil, err
-	}
-
-	b := file{img: img, name: basename, nid: nid, ftype: ftype}
-	if ftype.IsDir() {
-		return &dir{file: b}, nil
-	}
-
-	return &b, nil
-}
-
-func (img *image) Stat(name string) (fs.FileInfo, error) {
-	nid, ftype, basename, err := img.resolve("stat", name, true)
-	if err != nil {
-		return nil, err
-	}
-
-	f := &file{img: img, name: basename, nid: nid, ftype: ftype}
-
-	return f.statInfo()
-}
-
-// ReadFile reads the named file and returns its contents.
-// Files larger than maxReadFileSize (128 MiB) are rejected;
-// use Open and io.Copy for larger files.
-func (img *image) ReadFile(name string) ([]byte, error) {
-	nid, ftype, basename, err := img.resolve("readfile", name, true)
-	if err != nil {
-		return nil, err
-	}
-
-	if ftype.IsDir() {
-		//nolint:goconst // PathError.Op is spelled as the os package spells it
-		return nil, &fs.PathError{Op: "read", Path: name, Err: ErrIsDirectory}
-	}
-
-	f := &file{img: img, name: basename, nid: nid, ftype: ftype}
-
-	fi, err := f.readInfo()
-	if err != nil {
-		return nil, err
-	}
-
-	if fi.size < 0 || fi.size > maxReadFileSize {
-		return nil, fmt.Errorf(
-			"file size %d exceeds ReadFile limit %d; use Open and io.Copy for large files: %w",
-			fi.size,
-			int64(maxReadFileSize),
-			ErrInvalid,
-		)
-	}
-
-	buf := make([]byte, fi.size)
-	if err := readAll(f, buf); err != nil {
-		return nil, &fs.PathError{Op: "read", Path: name, Err: err}
-	}
-
-	return buf, nil
-}
-
-// readAll fills buf, treating a short read as corruption rather than as a
-// hole to pad with zeros.
-//
-// file.Read only clears io.EOF when it filled the buffer, so a file whose data
-// range runs past the end of the image returns (partial, io.EOF). Callers that
-// waved io.EOF through therefore handed back a zero-padded buffer and a nil
-// error, which is the worst possible answer: a consumer validating a config or
-// a manifest sees attacker-chosen zeros where it should see a failure.
-func readAll(f *file, buf []byte) error {
-	if len(buf) == 0 {
-		return nil
-	}
-
-	if _, err := io.ReadFull(f, buf); err != nil {
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return fmt.Errorf("data ends before the declared size of %d bytes: %w", len(buf), ErrInvalid)
-		}
-
-		return err
-	}
-
-	return nil
-}
-
-func (img *image) ReadDir(name string) ([]fs.DirEntry, error) {
-	nid, ftype, basename, err := img.resolve("readdir", name, true)
-	if err != nil {
-		return nil, err
-	}
-
-	if !ftype.IsDir() {
-		return nil, &fs.PathError{Op: "readdir", Path: name, Err: ErrNotDirectory}
-	}
-
-	d := &dir{file: file{img: img, name: basename, nid: nid, ftype: ftype}}
-
-	entries, err := d.ReadDir(-1)
-	if err != nil {
-		return nil, err
-	}
-	// EROFS keeps dirents sorted within a block — dir.lookup's binary search
-	// depends on it — so for a well-formed image this only has to confirm the
-	// order, not establish it. A hostile image may not be sorted, and
-	// fs.ReadDir's contract says sorted, so the sort still has to be here.
-	byName := func(a, b fs.DirEntry) int { return cmp.Compare(a.Name(), b.Name()) }
-	if !slices.IsSortedFunc(entries, byName) {
-		slices.SortFunc(entries, byName)
-	}
-
-	return entries, nil
-}
-
-func (img *image) ReadLink(name string) (string, error) {
-	nid, ftype, basename, err := img.resolve("readlink", name, false)
-	if err != nil {
-		return "", err
-	}
-
-	if ftype&fs.ModeSymlink == 0 {
-		return "", &fs.PathError{Op: "readlink", Path: name, Err: fs.ErrInvalid}
-	}
-
-	return img.linkTarget(nid, basename)
-}
-
-func (img *image) Lstat(name string) (fs.FileInfo, error) {
-	nid, ftype, basename, err := img.resolve("lstat", name, false)
-	if err != nil {
-		return nil, err
-	}
-
-	f := &file{img: img, name: basename, nid: nid, ftype: ftype}
-
-	return f.statInfo()
-}
-
 type file struct {
 	img   *image
 	name  string
@@ -1507,6 +1507,122 @@ type file struct {
 	// to prove contiguity, which must not happen on every Read.
 	direct        *io.SectionReader
 	directChecked bool
+}
+
+func (b *file) Stat() (fs.FileInfo, error) {
+	return b.statInfo()
+}
+
+//nolint:gocognit // the read path perf_audit_test.go measures: the whole-file fast path, else the block loop
+func (b *file) Read(p []byte) (int, error) {
+	fi, err := b.readInfo()
+	if err != nil {
+		return 0, err
+	}
+
+	// Whole-file fast path. The block loop below issues one ReadAt per
+	// filesystem block no matter how much the caller asked for, which for a
+	// large file means thousands of round trips to serve a single Read.
+	if sr := b.directReader(fi); sr != nil {
+		if b.offset >= fi.size {
+			return 0, io.EOF
+		}
+
+		if remaining := fi.size - b.offset; int64(len(p)) > remaining {
+			p = p[:remaining]
+		}
+		// ReadAt fills p completely or reports why not, which preserves the
+		// block loop's guarantee that a single Read fills the buffer.
+		n, err := sr.ReadAt(p, b.offset)
+
+		b.offset += int64(n)
+		if errors.Is(err, io.EOF) && n == len(p) {
+			err = nil
+		}
+
+		return n, err
+	}
+
+	var n int
+
+	for len(p) > 0 {
+		if b.offset >= fi.size {
+			return n, io.EOF
+		}
+
+		blk, err := b.img.loadBlock(fi, b.offset)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				// b.offset already advanced by each block copied above.
+				err = io.EOF
+			}
+
+			return n, err
+		}
+
+		buf := blk.bytes()
+		copied := copy(p, buf)
+		n += copied
+		p = p[copied:]
+		b.offset += int64(copied)
+
+		b.img.putBlock(blk)
+	}
+
+	return n, nil
+}
+
+// WriteTo streams the rest of the file to w.
+//
+// Implementing io.WriterTo lets io.Copy hand the whole range to the
+// destination at once instead of shuttling it through a fixed-size
+// intermediate buffer, which is what makes extracting a file cost a handful
+// of reads rather than one per buffer's worth.
+func (b *file) WriteTo(w io.Writer) (int64, error) {
+	fi, err := b.readInfo()
+	if err != nil {
+		return 0, err
+	}
+
+	if b.offset >= fi.size {
+		return 0, nil
+	}
+
+	if sr := b.directReader(fi); sr != nil {
+		n, err := io.Copy(w, io.NewSectionReader(sr, b.offset, fi.size-b.offset))
+		b.offset += n
+
+		return n, err
+	}
+
+	var total int64
+
+	for b.offset < fi.size {
+		blk, err := b.img.loadBlock(fi, b.offset)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return total, nil
+			}
+
+			return total, err
+		}
+
+		nw, werr := w.Write(blk.bytes())
+		b.img.putBlock(blk)
+
+		total += int64(nw)
+		b.offset += int64(nw)
+
+		if werr != nil {
+			return total, werr
+		}
+	}
+
+	return total, nil
+}
+
+func (*file) Close() error {
+	return nil
 }
 
 // directReader returns a whole-file reader when the layout allows one.
@@ -1863,122 +1979,6 @@ func (b *file) buildChunkDataRanges(ino *inode) []DataRange {
 	}
 
 	return ranges
-}
-
-func (b *file) Stat() (fs.FileInfo, error) {
-	return b.statInfo()
-}
-
-//nolint:gocognit // the read path perf_audit_test.go measures: the whole-file fast path, else the block loop
-func (b *file) Read(p []byte) (int, error) {
-	fi, err := b.readInfo()
-	if err != nil {
-		return 0, err
-	}
-
-	// Whole-file fast path. The block loop below issues one ReadAt per
-	// filesystem block no matter how much the caller asked for, which for a
-	// large file means thousands of round trips to serve a single Read.
-	if sr := b.directReader(fi); sr != nil {
-		if b.offset >= fi.size {
-			return 0, io.EOF
-		}
-
-		if remaining := fi.size - b.offset; int64(len(p)) > remaining {
-			p = p[:remaining]
-		}
-		// ReadAt fills p completely or reports why not, which preserves the
-		// block loop's guarantee that a single Read fills the buffer.
-		n, err := sr.ReadAt(p, b.offset)
-
-		b.offset += int64(n)
-		if errors.Is(err, io.EOF) && n == len(p) {
-			err = nil
-		}
-
-		return n, err
-	}
-
-	var n int
-
-	for len(p) > 0 {
-		if b.offset >= fi.size {
-			return n, io.EOF
-		}
-
-		blk, err := b.img.loadBlock(fi, b.offset)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				// b.offset already advanced by each block copied above.
-				err = io.EOF
-			}
-
-			return n, err
-		}
-
-		buf := blk.bytes()
-		copied := copy(p, buf)
-		n += copied
-		p = p[copied:]
-		b.offset += int64(copied)
-
-		b.img.putBlock(blk)
-	}
-
-	return n, nil
-}
-
-// WriteTo streams the rest of the file to w.
-//
-// Implementing io.WriterTo lets io.Copy hand the whole range to the
-// destination at once instead of shuttling it through a fixed-size
-// intermediate buffer, which is what makes extracting a file cost a handful
-// of reads rather than one per buffer's worth.
-func (b *file) WriteTo(w io.Writer) (int64, error) {
-	fi, err := b.readInfo()
-	if err != nil {
-		return 0, err
-	}
-
-	if b.offset >= fi.size {
-		return 0, nil
-	}
-
-	if sr := b.directReader(fi); sr != nil {
-		n, err := io.Copy(w, io.NewSectionReader(sr, b.offset, fi.size-b.offset))
-		b.offset += n
-
-		return n, err
-	}
-
-	var total int64
-
-	for b.offset < fi.size {
-		blk, err := b.img.loadBlock(fi, b.offset)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return total, nil
-			}
-
-			return total, err
-		}
-
-		nw, werr := w.Write(blk.bytes())
-		b.img.putBlock(blk)
-
-		total += int64(nw)
-		b.offset += int64(nw)
-
-		if werr != nil {
-			return total, werr
-		}
-	}
-
-	return total, nil
-}
-
-func (*file) Close() error {
-	return nil
 }
 
 type direntry struct {

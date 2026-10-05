@@ -280,17 +280,6 @@ func (fsys *Writer) Create(name string) (*File, error) {
 	return f, nil
 }
 
-// checkNoOpenFile reports an error when a file from Create is still open.
-// action names what the caller was attempting, for the message.
-func (fsys *Writer) checkNoOpenFile(action string) error {
-	if fsys.openFile == nil {
-		return nil
-	}
-
-	return fmt.Errorf("mkfs: %q is %w; close it before you %s",
-		fsys.openFile.entry.path, errFileOpen, action)
-}
-
 // Mkdir creates a directory. Only permission bits from perm are used,
 // including setuid, setgid and sticky as os.Mkdir does; type bits are forced
 // to directory. Mkdir("/", perm) sets root permissions.
@@ -671,86 +660,12 @@ var (
 	errFileOpen = errors.New("still open for writing")
 )
 
-// checkNotOpen refuses to act on the file currently open from Create.
-func (fsys *Writer) checkNotOpen(e *fsEntry, action string) error {
-	if fsys.openFile != nil && fsys.openFile.entry == e {
-		return fmt.Errorf("mkfs: %q is %w; close it before you %s it",
-			e.path, errFileOpen, action)
-	}
-
-	return nil
-}
-
 // hardlinkKey identifies a source inode during one CopyFrom call: the
 // device and inode number a stat reported, or an EROFS nid with device 0.
 // The map it keys is created fresh per call, so an identity that only
 // means something within its own source is safe to use on its own.
 type hardlinkKey struct {
 	dev, ino uint64
-}
-
-// addAlias registers p as another name for target's inode — what Link does,
-// minus the argument checks the caller has already made. A previous entry
-// at p is dropped the way Remove drops it, so that if it was itself one
-// name of a hardlink group the group's count stays right.
-func (fsys *Writer) addAlias(p string, target *fsEntry) error {
-	if target.linkTo != nil {
-		target = target.linkTo
-	}
-
-	if existing, ok := fsys.byPath[p]; ok {
-		if existing == target {
-			return nil
-		}
-
-		if existing.mode&disk.StatTypeMask == disk.StatTypeDir {
-			return fmt.Errorf("mkfs: %s: cannot replace a directory with a hardlink: %w", p, ErrIsDirectory)
-		}
-
-		fsys.unlinkEntry(existing)
-	}
-
-	e := &fsEntry{
-		path:   p,
-		mode:   target.mode,
-		linkTo: target,
-	}
-	fsys.addChild(e)
-
-	target.extraLinks++
-
-	return nil
-}
-
-// placeEntry attaches a freshly built entry to the tree, replacing any
-// entry already at its path (overwrite semantics, as when a later layer
-// re-adds a name). It returns the pointer that now lives in the tree, which
-// is not always fe: an ordinary overwrite copies fe over the old entry so
-// its place among its parent's children is kept. An old entry that was one
-// name of a hardlink group is instead dropped the way Remove drops it, so
-// the group's inode and link count stay right.
-func (fsys *Writer) placeEntry(fe *fsEntry) *fsEntry {
-	existing, ok := fsys.byPath[fe.path]
-	if !ok {
-		fsys.addChild(fe)
-
-		return fe
-	}
-
-	if existing.linkTo != nil || existing.extraLinks > 0 {
-		fsys.unlinkEntry(existing)
-		fsys.addChild(fe)
-
-		return fe
-	}
-
-	savedParent := existing.parent
-	savedChildren := existing.children
-	*existing = *fe
-	existing.parent = savedParent
-	existing.children = savedChildren
-
-	return existing
 }
 
 // --- Writer bulk copy ---
@@ -1709,6 +1624,27 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 	return nil
 }
 
+// checkNoOpenFile reports an error when a file from Create is still open.
+// action names what the caller was attempting, for the message.
+func (fsys *Writer) checkNoOpenFile(action string) error {
+	if fsys.openFile == nil {
+		return nil
+	}
+
+	return fmt.Errorf("mkfs: %q is %w; close it before you %s",
+		fsys.openFile.entry.path, errFileOpen, action)
+}
+
+// checkNotOpen refuses to act on the file currently open from Create.
+func (fsys *Writer) checkNotOpen(e *fsEntry, action string) error {
+	if fsys.openFile != nil && fsys.openFile.entry == e {
+		return fmt.Errorf("mkfs: %q is %w; close it before you %s it",
+			e.path, errFileOpen, action)
+	}
+
+	return nil
+}
+
 // checkPath validates that a path hasn't already been registered.
 func (fsys *Writer) checkPath(name string) error {
 	if fsys.closed {
@@ -1931,6 +1867,70 @@ func (fsys *Writer) promoteAlias(target *fsEntry) {
 			fsys.copyLinks[k] = heir
 		}
 	}
+}
+
+// addAlias registers p as another name for target's inode — what Link does,
+// minus the argument checks the caller has already made. A previous entry
+// at p is dropped the way Remove drops it, so that if it was itself one
+// name of a hardlink group the group's count stays right.
+func (fsys *Writer) addAlias(p string, target *fsEntry) error {
+	if target.linkTo != nil {
+		target = target.linkTo
+	}
+
+	if existing, ok := fsys.byPath[p]; ok {
+		if existing == target {
+			return nil
+		}
+
+		if existing.mode&disk.StatTypeMask == disk.StatTypeDir {
+			return fmt.Errorf("mkfs: %s: cannot replace a directory with a hardlink: %w", p, ErrIsDirectory)
+		}
+
+		fsys.unlinkEntry(existing)
+	}
+
+	e := &fsEntry{
+		path:   p,
+		mode:   target.mode,
+		linkTo: target,
+	}
+	fsys.addChild(e)
+
+	target.extraLinks++
+
+	return nil
+}
+
+// placeEntry attaches a freshly built entry to the tree, replacing any
+// entry already at its path (overwrite semantics, as when a later layer
+// re-adds a name). It returns the pointer that now lives in the tree, which
+// is not always fe: an ordinary overwrite copies fe over the old entry so
+// its place among its parent's children is kept. An old entry that was one
+// name of a hardlink group is instead dropped the way Remove drops it, so
+// the group's inode and link count stay right.
+func (fsys *Writer) placeEntry(fe *fsEntry) *fsEntry {
+	existing, ok := fsys.byPath[fe.path]
+	if !ok {
+		fsys.addChild(fe)
+
+		return fe
+	}
+
+	if existing.linkTo != nil || existing.extraLinks > 0 {
+		fsys.unlinkEntry(existing)
+		fsys.addChild(fe)
+
+		return fe
+	}
+
+	savedParent := existing.parent
+	savedChildren := existing.children
+	*existing = *fe
+	existing.parent = savedParent
+	existing.children = savedChildren
+
+	return existing
 }
 
 // buildErofsTree converts the fsEntry tree into an erofsEntry tree via BFS.
