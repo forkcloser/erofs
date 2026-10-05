@@ -493,6 +493,7 @@ func (d badSizeDir) ReadDir(int) ([]fs.DirEntry, error) {
 
 type badSizeFile struct {
 	io.Reader
+
 	info badSizeInfo
 }
 
