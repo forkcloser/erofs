@@ -2,7 +2,6 @@ package erofs_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -206,17 +205,17 @@ func buildFuzzImage(tb testing.TB, entries []erofstest.WriterToTar, files, dirs 
 	tarStream := erofstest.TarFromWriterTo(wt)
 	defer func() { _ = tarStream.Close() }()
 
-	// Use os.MkdirTemp instead of tb.TempDir() because the opened file
-	// handle must outlive the test that calls buildFuzzImage (the fuzzImage
-	// is shared across tests via sync.Once). On Windows, tb.TempDir()'s
-	// automatic cleanup fails because the file is still open.
+	// Not tb.TempDir(): the opened image outlives the test that builds it
+	// (shared across tests via sync.Once), and on Windows TempDir's cleanup
+	// fails while the file is still open.
+	//nolint:usetesting // the image outlives this test
 	dir, err := os.MkdirTemp("", "fuzz-erofs-*")
 	if err != nil {
 		tb.Fatal(err)
 	}
 
 	path := filepath.Join(dir, "fuzz.erofs")
-	if err = erofstest.ConvertTarErofs(context.Background(), tarStream, path, "", nil); err != nil {
+	if err = erofstest.ConvertTarErofs(tb.Context(), tarStream, path, "", nil); err != nil {
 		tb.Fatal(err)
 	}
 
@@ -834,7 +833,7 @@ func buildMinimalImage(tb testing.TB) []byte {
 	defer func() { _ = tarStream.Close() }()
 
 	path := filepath.Join(tb.TempDir(), "minimal.erofs")
-	if err := erofstest.ConvertTarErofs(context.Background(), tarStream, path, "", nil); err != nil {
+	if err := erofstest.ConvertTarErofs(tb.Context(), tarStream, path, "", nil); err != nil {
 		tb.Fatal(err)
 	}
 

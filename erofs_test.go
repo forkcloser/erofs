@@ -2,7 +2,6 @@ package erofs_test
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -83,7 +82,7 @@ func TestErofs(t *testing.T) {
 		}()
 
 		path := filepath.Join(t.TempDir(), "compressed.erofs")
-		if err := erofstest.ConvertTarErofs(context.Background(), tarStream, path, "", []string{"-zlz4"}); err != nil {
+		if err := erofstest.ConvertTarErofs(t.Context(), tarStream, path, "", []string{"-zlz4"}); err != nil {
 			t.Fatal(err)
 		}
 
