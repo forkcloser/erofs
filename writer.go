@@ -60,6 +60,11 @@ func inodeCoreSize(e *erofsEntry) int {
 	return disk.SizeInodeExtended
 }
 
+// inodeSlotAlign rounds an inode's on-disk size up to whole inode slots.
+func inodeSlotAlign(size int) int {
+	return (size + disk.SizeInodeSlot - 1) &^ (disk.SizeInodeSlot - 1)
+}
+
 // entryChunkBits returns the chunk bits for a specific entry.
 // Contiguous entries use a larger chunk size to minimize chunk indexes.
 func (w *erofsWriter) entryChunkBits(e *erofsEntry) uint8 {
@@ -186,7 +191,7 @@ func (w *erofsWriter) write(out io.WriteSeeker) error {
 		return err
 	}
 
-	w.copyBuf = make([]byte, 256*1024) // shared io.CopyBuffer buffer
+	w.copyBuf = make([]byte, 256*1024) //nolint:mnd // 256 KiB shared io.CopyBuffer buffer
 
 	return w.writeSeekable(out)
 }
@@ -252,10 +257,7 @@ func (w *erofsWriter) newMetaBuffer() *bytes.Buffer {
 			isz = disk.SizeInodeCompact
 		}
 
-		sz := isz + e.xattrSize + e.chunkPad + e.trailingSize
-		if sz%32 != 0 {
-			sz = (sz + 31) & ^31
-		}
+		sz := inodeSlotAlign(isz + e.xattrSize + e.chunkPad + e.trailingSize)
 
 		totalMetaBytes += sz
 	}
@@ -285,10 +287,7 @@ func (w *erofsWriter) assignDataBlocks() {
 		for _, e := range w.entries {
 			expectedOff := int(e.nid) * 32
 
-			sz := inodeCoreSize(e) + e.xattrSize + e.chunkPad + e.trailingSize
-			if sz%32 != 0 {
-				sz = (sz + 31) & ^31
-			}
+			sz := inodeSlotAlign(inodeCoreSize(e) + e.xattrSize + e.chunkPad + e.trailingSize)
 
 			end := expectedOff + sz
 			if end > totalMetaBytes {
@@ -621,7 +620,7 @@ func (w *erofsWriter) writeInode(buf io.Writer, e *erofsEntry) error {
 func (w *erofsWriter) writeXattrs(buf io.Writer, e *erofsEntry) error {
 	// XattrHeader: 4-byte name filter + 1-byte shared count + 7 reserved = 12 bytes
 	var xhdr [12]byte
-	binary.LittleEndian.PutUint32(xhdr[0:4], 0xFFFFFFFF) // name filter unused
+	binary.LittleEndian.PutUint32(xhdr[0:4], math.MaxUint32) // name filter unused
 
 	if _, err := buf.Write(xhdr[:]); err != nil {
 		return err
@@ -672,7 +671,7 @@ func (w *erofsWriter) writeChunkIndexes(buf io.Writer, e *erofsEntry) error {
 
 	// Null chunk index (no mapping): StartBlkHi=0xFFFF, DeviceID=0, StartBlkLo=NullAddr.
 	var nullIdx [disk.SizeChunkIndex]byte
-	binary.LittleEndian.PutUint16(nullIdx[0:2], 0xFFFF)
+	binary.LittleEndian.PutUint16(nullIdx[0:2], math.MaxUint16)
 	binary.LittleEndian.PutUint32(nullIdx[4:8], nullAddr)
 
 	if len(e.chunks) > 0 {

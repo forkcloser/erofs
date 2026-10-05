@@ -16,6 +16,12 @@ golangci:
       - varnamelen
     exclusions:
       rules:
+        # internal/erofstest is test support, compiled into tests only: its
+        # numbers are fixture data (sizes, counts, modes), what mnd already
+        # leaves alone in a _test.go file.
+        - path: ^internal/erofstest/
+          linters:
+            - mnd
         # ONBOARDING BACKLOG (book/mandatory-files.md, "onboarding an existing
         # repository"): the findings limen v0.7.2's baseline reports on code that
         # predates it, not yet read. Not a judgment: each entry is a linter and
@@ -23,8 +29,6 @@ golangci:
         # pull request, and the block deleted with the last one.
         - path: ^(cmd/erofs\-cli/main\.go|erofs\.go|format\.go|internal/erofstest/convert\.go|internal/erofstest/fsck\.go|internal/erofstest/testcase\.go|layout\.go|mkfs\.go|mkfs_image\.go|writer\.go|xattr\.go)$
           linters: [gosec]
-        - path: ^(erofs\.go|internal/disk/ftypes\.go|internal/erofstest/tar\.go|internal/erofstest/testcase\.go|layout\.go|mkfs\.go|mkfs_image\.go|writer\.go|xattr\.go)$
-          linters: [mnd]
         - path: ^(chunk_xattr_test\.go|erofs_directread_test\.go|erofs_fsconform_test\.go|erofs_loadat_test\.go|erofs_test\.go|format_test\.go|internal/disk/types_test\.go|mkfs_chunkmap_test\.go|mkfs_copy_test\.go|mkfs_limits_test\.go|mkfs_link_test\.go|mkfs_openfile_test\.go|mkfs_remove_test\.go|mkfs_test\.go|mkfs_untrusted_test\.go|perf_audit_test\.go)$
           linters: [paralleltest]
         - path: ^(erofs_directread_test\.go|erofs_fsconform_test\.go|erofs_loadat_test\.go|format_test\.go|internal/disk/types_test\.go|mkfs_chunkmap_test\.go|mkfs_limits_test\.go|mkfs_openfile_test\.go|mkfs_untrusted_test\.go|perf_audit_test\.go)$

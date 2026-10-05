@@ -99,7 +99,7 @@ func Create(out io.WriteSeeker, opts ...CreateOpt) *Writer {
 
 	root := &fsEntry{
 		path: "/",
-		mode: disk.StatTypeDir | 0o755,
+		mode: disk.StatTypeDir | 0o755, //nolint:mnd // rwxr-xr-x, a directory's default
 	}
 	fsys := &Writer{
 		out:          out,
@@ -249,7 +249,7 @@ func (fsys *Writer) Create(name string) (*File, error) {
 
 	e := &fsEntry{
 		path: name,
-		mode: disk.StatTypeReg | 0o644,
+		mode: disk.StatTypeReg | 0o644, //nolint:mnd // rw-r--r--, a file's default
 	}
 	fsys.addChild(e)
 
@@ -288,7 +288,7 @@ func (fsys *Writer) Mkdir(name string, perm fs.FileMode) error {
 		return fsys.wErr
 	}
 
-	dirMode := disk.StatTypeDir | goModeToUnixMode(perm)&0o7777
+	dirMode := disk.StatTypeDir | goModeToUnixMode(perm)&^disk.StatTypeMask
 
 	name = cleanPath(name)
 	if name == "/" {
@@ -338,7 +338,7 @@ func (fsys *Writer) Symlink(oldname, newname string) error {
 
 	e := &fsEntry{
 		path:       newname,
-		mode:       disk.StatTypeSymlink | 0o777,
+		mode:       disk.StatTypeSymlink | 0o777, //nolint:mnd // a symlink's permissions are always rwxrwxrwx
 		linkTarget: oldname,
 	}
 	fsys.addChild(e)
@@ -455,7 +455,7 @@ func (fsys *Writer) Chmod(name string, mode fs.FileMode) error {
 		return err
 	}
 
-	perm := goModeToUnixMode(mode) & 0o7777
+	perm := goModeToUnixMode(mode) &^ disk.StatTypeMask
 	e.mode = (e.mode & disk.StatTypeMask) | perm
 
 	return nil
@@ -1053,7 +1053,7 @@ func (f *File) Close() error {
 
 // Chmod sets permission bits on the file, matching os.File.Chmod.
 func (f *File) Chmod(mode fs.FileMode) error {
-	perm := goModeToUnixMode(mode) & 0o7777
+	perm := goModeToUnixMode(mode) &^ disk.StatTypeMask
 	f.entry.mode = (f.entry.mode & disk.StatTypeMask) | perm
 
 	return nil
@@ -1716,7 +1716,7 @@ func (fsys *Writer) ensureParent(name string) error {
 	for _, d := range slices.Backward(missing) {
 		e := &fsEntry{
 			path: d,
-			mode: disk.StatTypeDir | 0o755,
+			mode: disk.StatTypeDir | 0o755, //nolint:mnd // rwxr-xr-x, a directory's default
 		}
 		fsys.addChild(e)
 	}
@@ -2137,7 +2137,7 @@ func (fsys *Writer) resolveBlockSize() int {
 // copyBuf returns a shared 32KB buffer for io.Copy operations.
 func (fsys *Writer) copyBuf() []byte {
 	if fsys.cpBuf == nil {
-		fsys.cpBuf = make([]byte, 32*1024)
+		fsys.cpBuf = make([]byte, 32*1024) //nolint:mnd // 32 KiB, io.Copy's own buffer size
 	}
 
 	return fsys.cpBuf
@@ -2158,9 +2158,9 @@ func (fsys *Writer) zeroPad() []byte {
 // holds at most 65535 devices. Appending past that wrapped the id arithmetic
 // and produced chunks pointing at an unrelated device.
 func (fsys *Writer) checkDeviceCount(adding int) error {
-	if total := len(fsys.devices) + adding; total > 65535 {
+	if total := len(fsys.devices) + adding; total > math.MaxUint16 {
 		return fmt.Errorf("mkfs: %d devices exceeds the %d a 16-bit device id can name: %w",
-			total, 65535, ErrInvalid)
+			total, math.MaxUint16, ErrInvalid)
 	}
 
 	return nil
@@ -2271,7 +2271,7 @@ func (fsys *Writer) chunksFromRanges(ranges []DataRange, fileSize int64) ([]buil
 			// Hole: emit NullPhysicalBlock chunks covering the hole span.
 			totalBlocks := (uint64(r.Size) + blockSize - 1) / blockSize
 			for totalBlocks > 0 {
-				count := min(totalBlocks, 65535)
+				count := min(totalBlocks, math.MaxUint16)
 				chunks = append(chunks, builder.Chunk{
 					PhysicalBlock: builder.NullPhysicalBlock,
 					Count:         uint16(count),
@@ -2312,7 +2312,7 @@ func (fsys *Writer) chunksFromRanges(ranges []DataRange, fileSize int64) ([]buil
 
 		totalBlocks := (uint64(r.Size) + blockSize - 1) / blockSize
 		for totalBlocks > 0 {
-			count := min(totalBlocks, 65535)
+			count := min(totalBlocks, math.MaxUint16)
 			chunks = append(chunks, builder.Chunk{
 				PhysicalBlock: startBlock,
 				Count:         uint16(count),
@@ -2414,7 +2414,7 @@ func (f *File) closeDataFile() error {
 	totalBlocks := (uint64(f.written) + uint64(f.fs.resolveBlockSize()) - 1) / uint64(f.fs.resolveBlockSize())
 
 	for totalBlocks > 0 {
-		count := min(totalBlocks, 65535)
+		count := min(totalBlocks, math.MaxUint16)
 		f.entry.chunks = append(f.entry.chunks, builder.Chunk{
 			PhysicalBlock: startBlock,
 			Count:         uint16(count),

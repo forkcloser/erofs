@@ -1690,8 +1690,8 @@ func (b *file) readInfo() (ino *inode, err error) {
 
 	format := binary.LittleEndian.Uint16(buf[:2])
 
-	layout := uint8((format & 0x0E) >> 1)
-	if format&0x01 == 0 {
+	layout := uint8((format & disk.InodeFormatLayoutMask) >> 1)
+	if format&disk.InodeFormatExtended == 0 {
 		var di disk.InodeCompact
 		di.Unmarshal(buf)
 		b.info = &inode{
@@ -2032,7 +2032,7 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 		}
 
 		buf := b.bytes()
-		if len(buf) < 12 {
+		if len(buf) < disk.SizeDirent {
 			d.img.putBlock(b)
 			break
 		}

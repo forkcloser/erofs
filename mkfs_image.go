@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"path"
 	"slices"
 
@@ -24,6 +25,9 @@ const maxEagerMetaBytes = 1 << 30 // 1 GiB
 // needs — so capping it costs nothing and keeps a corrupt inode count from
 // requesting an enormous allocation up front.
 const maxQueuePrealloc = 1 << 16
+
+// minQueuePrealloc is the BFS queue's smallest initial capacity.
+const minQueuePrealloc = 64
 
 // imageSize reports the readable size of an image, when the io.ReaderAt can
 // say. *bytes.Reader, *io.SectionReader and *os.File all can, which covers
@@ -202,8 +206,8 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		inodeCount = maxQueuePrealloc
 	}
 
-	if inodeCount < 64 {
-		inodeCount = 64
+	if inodeCount < minQueuePrealloc {
+		inodeCount = minQueuePrealloc
 	}
 
 	queue := make([]imgQEntry, 0, inodeCount)
@@ -258,8 +262,8 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		}
 
 		format := binary.LittleEndian.Uint16(buf[:2])
-		layout := uint8((format & 0x0E) >> 1)
-		compact := format&0x01 == 0
+		layout := uint8((format & disk.InodeFormatLayoutMask) >> 1)
+		compact := format&disk.InodeFormatExtended == 0
 
 		if compact && len(buf) < disk.SizeInodeCompact {
 			return fmt.Errorf("compact inode %d out of range: %w", cur.nid, ErrInvalid)
@@ -608,7 +612,7 @@ func (*Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPath str
 // obvious int conversion overflows to a negative count for sizes past 2^63.
 func chunkMapBytes(chunkFmt uint16, fileSize uint64, blkBits uint8, unit int64) (int64, error) {
 	chunkBits := blkBits + uint8(chunkFmt&disk.LayoutChunkFormatBits)
-	if chunkBits >= 64 {
+	if chunkBits >= 64 { //nolint:mnd // the width of the uint64 the file size is shifted in
 		return 0, fmt.Errorf("chunk size of 2^%d bytes is out of range: %w", chunkBits, ErrInvalid)
 	}
 
@@ -656,7 +660,7 @@ func (*Writer) parseChunks(
 
 	// builder.Chunk counts blocks in a uint16, so a chunk spanning more
 	// blocks than that cannot be represented at all.
-	if blocksPerChunk > 65535 {
+	if blocksPerChunk > math.MaxUint16 {
 		return nil, fmt.Errorf("chunk size of %d blocks is not representable: %w", blocksPerChunk, ErrInvalid)
 	}
 
@@ -692,7 +696,7 @@ func (*Writer) parseChunks(
 			if len(chunks) > 0 {
 				prev := &chunks[len(chunks)-1]
 				if prev.PhysicalBlock == builder.NullPhysicalBlock &&
-					int(prev.Count)+blocksPerChunk <= 65535 {
+					int(prev.Count)+blocksPerChunk <= math.MaxUint16 {
 					prev.Count += uint16(blocksPerChunk)
 
 					continue
@@ -719,7 +723,7 @@ func (*Writer) parseChunks(
 			if prev.PhysicalBlock != builder.NullPhysicalBlock &&
 				prev.DeviceID == deviceID &&
 				prev.PhysicalBlock+uint64(prev.Count) == physBlock &&
-				int(prev.Count)+blocksPerChunk <= 65535 {
+				int(prev.Count)+blocksPerChunk <= math.MaxUint16 {
 				prev.Count += uint16(blocksPerChunk)
 				continue
 			}
@@ -863,13 +867,14 @@ func parseXattrsFromBuf(
 func xattrName(xe disk.XattrEntry, rawName []byte, longPrefix func(uint8) (string, error)) (string, error) {
 	var prefix string
 
-	if xe.NameIndex&0x80 != 0 {
+	if xe.NameIndex&disk.XattrLongPrefixFlag != 0 {
 		// Long prefix: high bit set, low 7 bits index the prefix table.
+		index := xe.NameIndex & disk.XattrLongPrefixMask
 		if longPrefix == nil {
-			return "", fmt.Errorf("long xattr prefix %d without a prefix table: %w", xe.NameIndex&0x7F, ErrInvalid)
+			return "", fmt.Errorf("long xattr prefix %d without a prefix table: %w", index, ErrInvalid)
 		}
 
-		p, err := longPrefix(xe.NameIndex & 0x7F)
+		p, err := longPrefix(index)
 		if err != nil {
 			return "", err
 		}

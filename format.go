@@ -111,7 +111,7 @@ func sortedXattrKeys(m map[string]string) []string {
 func inodeFormat(layout uint8, compact bool) uint16 {
 	f := uint16(layout) << 1
 	if !compact {
-		f |= 1 // bit 0 = extended
+		f |= disk.InodeFormatExtended
 	}
 
 	return f

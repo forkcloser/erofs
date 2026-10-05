@@ -27,6 +27,8 @@ const (
 	SizeXattrEntry      = 4
 	SizeDeviceSlot      = 128
 	SizeChunkIndex      = 8
+	// The unit a nid counts in: every inode starts on a slot boundary.
+	SizeInodeSlot = 32
 
 	LayoutFlatPlain         = 0
 	LayoutCompressedFull    = 1
@@ -37,6 +39,16 @@ const (
 	LayoutChunkFormatBits    = 0x001F
 	LayoutChunkFormatIndexes = 0x0020
 	LayoutChunkFormat48Bit   = 0x0040
+
+	// An inode's i_format: bit 0 set for an extended inode, the data layout
+	// in bits 1 to 3.
+	InodeFormatExtended   = 0x0001
+	InodeFormatLayoutMask = 0x000E
+
+	// An xattr entry's NameIndex: with the high bit set, the low seven bits
+	// index the long-prefix table instead of naming a built-in prefix.
+	XattrLongPrefixFlag = 0x80
+	XattrLongPrefixMask = 0x7F
 )
 
 // SuperBlock represents the EROFS on-disk superblock.
