@@ -11,8 +11,6 @@ golangci:
         # predates it, not yet read. Not a judgment: each entry is a linter and
         # the files it fires in, to be emptied one linter or one package per
         # pull request, and the block deleted with the last one.
-        - path: ^(erofs\.go|internal/erofstest/tar\.go|mkfs\.go)$
-          linters: [funcorder]
         - path: ^(cmd/erofs\-cli/main\.go|erofs\.go|format\.go|internal/erofstest/convert\.go|internal/erofstest/fsck\.go|internal/erofstest/testcase\.go|layout\.go|mkfs\.go|mkfs_image\.go|writer\.go|xattr\.go)$
           linters: [gosec]
         - path: ^(erofs\.go|internal/disk/ftypes\.go|internal/erofstest/tar\.go|internal/erofstest/testcase\.go|layout\.go|mkfs\.go|mkfs_image\.go|writer\.go|xattr\.go)$

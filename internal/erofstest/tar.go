@@ -96,48 +96,6 @@ type TarContext struct {
 	Xattrs map[string]string
 }
 
-// paxXattrs spells xattrs the way archive/tar writes them: the deprecated
-// Header.Xattrs field produced exactly these SCHILY.xattr. PAX records.
-func paxXattrs(xattrs map[string]string) map[string]string {
-	if len(xattrs) == 0 {
-		return nil
-	}
-
-	records := make(map[string]string, len(xattrs))
-	for k, v := range xattrs {
-		records["SCHILY.xattr."+k] = v
-	}
-
-	return records
-}
-
-func (tc TarContext) newHeader(mode os.FileMode, name, link string, size int64) *tar.Header {
-	ti := tarInfo{
-		name: name,
-		mode: mode,
-		size: size,
-		modt: tc.ModTime,
-		hdr: &tar.Header{
-			Uid:        tc.UID,
-			Gid:        tc.GID,
-			PAXRecords: paxXattrs(tc.Xattrs),
-		},
-	}
-
-	if mode&os.ModeSymlink == 0 && link != "" {
-		ti.hdr.Typeflag = tar.TypeLink
-		ti.hdr.Linkname = link
-	}
-
-	hdr, err := tar.FileInfoHeader(ti, link)
-	if err != nil {
-		// Only returns an error on bad input mode
-		panic(err)
-	}
-
-	return hdr
-}
-
 type tarInfo struct {
 	name string
 	mode os.FileMode
@@ -278,6 +236,48 @@ func (tc TarContext) Device(name string, ftype os.FileMode, major, minor int64) 
 
 		return writeHeaderAndContent(tw, hdr, nil)
 	})
+}
+
+// paxXattrs spells xattrs the way archive/tar writes them: the deprecated
+// Header.Xattrs field produced exactly these SCHILY.xattr. PAX records.
+func paxXattrs(xattrs map[string]string) map[string]string {
+	if len(xattrs) == 0 {
+		return nil
+	}
+
+	records := make(map[string]string, len(xattrs))
+	for k, v := range xattrs {
+		records["SCHILY.xattr."+k] = v
+	}
+
+	return records
+}
+
+func (tc TarContext) newHeader(mode os.FileMode, name, link string, size int64) *tar.Header {
+	ti := tarInfo{
+		name: name,
+		mode: mode,
+		size: size,
+		modt: tc.ModTime,
+		hdr: &tar.Header{
+			Uid:        tc.UID,
+			Gid:        tc.GID,
+			PAXRecords: paxXattrs(tc.Xattrs),
+		},
+	}
+
+	if mode&os.ModeSymlink == 0 && link != "" {
+		ti.hdr.Typeflag = tar.TypeLink
+		ti.hdr.Linkname = link
+	}
+
+	hdr, err := tar.FileInfoHeader(ti, link)
+	if err != nil {
+		// Only returns an error on bad input mode
+		panic(err)
+	}
+
+	return hdr
 }
 
 func typeFlag(ftype os.FileMode) byte {
