@@ -230,7 +230,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 						target = "/" + base[len(whiteoutPrefix):]
 					}
 
-					fsys.remove(target)
+					fsys.removeTree(target)
 				}
 
 				continue
@@ -513,7 +513,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 
 // parseDirBlock extracts directory entries from dirent data and enqueues
 // child inodes for BFS traversal.
-func (fsys *Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPath string, queue *[]imgQEntry) error {
+func (*Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPath string, queue *[]imgQEntry) error {
 	pos := 0
 	for pos < dirSize {
 		blockEnd := min(pos+blockSize, dirSize)
@@ -628,7 +628,7 @@ func chunkMapBytes(chunkFmt uint16, fileSize uint64, blkBits uint8, unit int64) 
 // reader will ever parse back (maxChunkIndexBytes). Both mean the size field
 // cannot be trusted, and carrying it forward would let a corrupt source drive
 // the writer's own allocations — the entry's trailing size is derived from it.
-func (fsys *Writer) parseChunks(
+func (*Writer) parseChunks(
 	data []byte,
 	chunkFmt uint16,
 	fileSize uint64,

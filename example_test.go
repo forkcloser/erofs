@@ -25,7 +25,7 @@ func ExampleOpen() {
 		log.Fatal(err)
 	}
 
-	err = fs.WalkDir(img, ".", func(path string, d fs.DirEntry, err error) error {
+	err = fs.WalkDir(img, ".", func(path string, _ fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -48,6 +48,8 @@ func ExampleOpen() {
 
 // buildExampleImage writes a small image to a temporary file and returns
 // its path.
+//
+//revive:disable:deep-exit an example helper fails as an example does, with log.Fatal
 func buildExampleImage() string {
 	path := filepath.Join(os.TempDir(), fmt.Sprintf("erofs-example-%d.img", os.Getpid()))
 
@@ -84,6 +86,8 @@ func buildExampleImage() string {
 
 	return path
 }
+
+//revive:enable:deep-exit
 
 func ExampleCreate() {
 	var buf testBuffer

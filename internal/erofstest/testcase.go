@@ -827,7 +827,7 @@ func CheckReadLink(t testing.TB, fsys fs.FS, name, target string) {
 
 	rlfs, ok := fsys.(readLinkFS)
 	if !ok {
-		t.Errorf("FS does not implement ReadLink")
+		t.Error("FS does not implement ReadLink")
 		return
 	}
 
@@ -848,7 +848,7 @@ func CheckLstat(t testing.TB, fsys fs.FS, name string, wantType fs.FileMode) {
 
 	rlfs, ok := fsys.(readLinkFS)
 	if !ok {
-		t.Errorf("FS does not implement Lstat")
+		t.Error("FS does not implement Lstat")
 		return
 	}
 
@@ -933,7 +933,7 @@ func CheckReadDirFile(t testing.TB, fsys fs.FS, name string) {
 
 	rdfs, ok := fsys.(readDirFS)
 	if !ok {
-		t.Errorf("FS does not implement ReadDir")
+		t.Error("FS does not implement ReadDir")
 		return
 	}
 
@@ -951,7 +951,7 @@ func CheckReadLinkFile(t testing.TB, fsys fs.FS, name string) {
 
 	rlfs, ok := fsys.(readLinkFS)
 	if !ok {
-		t.Errorf("FS does not implement ReadLink")
+		t.Error("FS does not implement ReadLink")
 		return
 	}
 

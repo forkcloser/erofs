@@ -23,6 +23,8 @@ import (
 	"os/exec"
 )
 
+// ConvertTarErofs runs mkfs.erofs on the tar stream r, writing the image to
+// layerPath with the given uuid (if any) and extra mkfs options.
 func ConvertTarErofs(ctx context.Context, r io.Reader, layerPath, uuid string, mkfsExtraOpts []string) error {
 	args := append([]string{"--tar=f", "--aufs", "--quiet", "-Enoinline_data"}, mkfsExtraOpts...)
 	if uuid != "" {

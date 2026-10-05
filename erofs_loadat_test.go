@@ -50,7 +50,7 @@ func TestLoadAtShortReadAtEOF(t *testing.T) {
 	}
 
 	if !bytes.Equal(got, data) {
-		t.Errorf("content mismatch")
+		t.Error("content mismatch")
 	}
 
 	img.putBlock(blk)

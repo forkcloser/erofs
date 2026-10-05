@@ -210,7 +210,11 @@ func BenchmarkPerfReadDir(b *testing.B) {
 
 // BenchmarkPerfStatInode isolates inode decoding.
 func BenchmarkPerfStatInode(b *testing.B) {
-	img := buildWideImage(b, 8).(*image)
+	img, ok := buildWideImage(b, 8).(*image)
+	if !ok {
+		b.Fatal("buildWideImage did not return an *image")
+	}
+
 	b.ReportAllocs()
 	b.ResetTimer()
 

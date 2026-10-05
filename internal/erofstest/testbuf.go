@@ -29,6 +29,7 @@ func (b *TestBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// Seek implements io.Seeker.
 func (b *TestBuffer) Seek(offset int64, whence int) (int64, error) {
 	var abs int64
 
@@ -52,6 +53,7 @@ func (b *TestBuffer) Seek(offset int64, whence int) (int64, error) {
 	return abs, nil
 }
 
+// Bytes returns the written data.
 func (b *TestBuffer) Bytes() []byte {
 	return b.buf
 }

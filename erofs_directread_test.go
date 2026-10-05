@@ -88,7 +88,10 @@ func TestDirectReadMatchesBlockPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	img := fsys.(*image)
+	img, ok := fsys.(*image)
+	if !ok {
+		t.Fatalf("Open returned %T, want *image", fsys)
+	}
 
 	for name, expect := range want {
 		for _, bufSize := range []int{1, 7, 512, 4096, 5000, 1 << 20} {
@@ -221,7 +224,10 @@ func TestDirectReadSparseFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	img := fsys.(*image)
+	img, ok := fsys.(*image)
+	if !ok {
+		t.Fatalf("Open returned %T, want *image", fsys)
+	}
 
 	nid, ftype, base, err := img.resolve("open", "f", true)
 	if err != nil {

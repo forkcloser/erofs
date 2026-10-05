@@ -25,7 +25,7 @@ type sparseFS struct {
 
 func (s *sparseFS) BlockSize() uint32    { return s.blockSize }
 func (s *sparseFS) DeviceBlocks() uint64 { return s.blocks }
-func (s *sparseFS) BuildTime() uint64    { return 1000 }
+func (*sparseFS) BuildTime() uint64      { return 1000 }
 
 func (s *sparseFS) Open(name string) (fs.File, error) {
 	switch name {
@@ -41,24 +41,24 @@ func (s *sparseFS) Open(name string) (fs.File, error) {
 type sparseDir struct{ s *sparseFS }
 
 func (d *sparseDir) Stat() (fs.FileInfo, error) { return &sparseInfo{s: d.s, dir: true}, nil }
-func (d *sparseDir) Read([]byte) (int, error)   { return 0, io.EOF }
-func (d *sparseDir) Close() error               { return nil }
+func (*sparseDir) Read([]byte) (int, error)     { return 0, io.EOF }
+func (*sparseDir) Close() error                 { return nil }
 func (d *sparseDir) ReadDir(int) ([]fs.DirEntry, error) {
 	return []fs.DirEntry{&sparseEnt{s: d.s}}, nil
 }
 
 type sparseEnt struct{ s *sparseFS }
 
-func (e *sparseEnt) Name() string               { return "f" }
-func (e *sparseEnt) IsDir() bool                { return false }
-func (e *sparseEnt) Type() fs.FileMode          { return 0 }
+func (*sparseEnt) Name() string                 { return "f" }
+func (*sparseEnt) IsDir() bool                  { return false }
+func (*sparseEnt) Type() fs.FileMode            { return 0 }
 func (e *sparseEnt) Info() (fs.FileInfo, error) { return &sparseInfo{s: e.s}, nil }
 
 type sparseFile struct{ s *sparseFS }
 
 func (f *sparseFile) Stat() (fs.FileInfo, error) { return &sparseInfo{s: f.s}, nil }
-func (f *sparseFile) Read([]byte) (int, error)   { return 0, io.EOF }
-func (f *sparseFile) Close() error               { return nil }
+func (*sparseFile) Read([]byte) (int, error)     { return 0, io.EOF }
+func (*sparseFile) Close() error                 { return nil }
 
 type sparseInfo struct {
 	s   *sparseFS
@@ -89,9 +89,9 @@ func (i *sparseInfo) Mode() fs.FileMode {
 	return 0o644
 }
 
-func (i *sparseInfo) ModTime() time.Time { return time.Unix(1000, 0) }
-func (i *sparseInfo) IsDir() bool        { return i.dir }
-func (i *sparseInfo) Sys() any           { return nil }
+func (*sparseInfo) ModTime() time.Time { return time.Unix(1000, 0) }
+func (i *sparseInfo) IsDir() bool      { return i.dir }
+func (*sparseInfo) Sys() any           { return nil }
 
 func (i *sparseInfo) DataRange() []DataRange {
 	if i.dir || i.s.noRanges {

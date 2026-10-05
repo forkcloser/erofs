@@ -236,7 +236,7 @@ func (fsys *Writer) Create(name string) (*File, error) {
 
 	name = cleanPath(name)
 	if name == "/" {
-		return nil, fmt.Errorf("mkfs: cannot create file at root")
+		return nil, errors.New("mkfs: cannot create file at root")
 	}
 
 	if err := fsys.checkPath(name); err != nil {
@@ -332,7 +332,7 @@ func (fsys *Writer) Symlink(oldname, newname string) error {
 
 	newname = cleanPath(newname)
 	if newname == "/" {
-		return fmt.Errorf("mkfs: cannot create symlink at root")
+		return errors.New("mkfs: cannot create symlink at root")
 	}
 
 	if oldname == "" {
@@ -373,7 +373,7 @@ func (fsys *Writer) Link(oldname, newname string) error {
 
 	newname = cleanPath(newname)
 	if newname == "/" {
-		return fmt.Errorf("mkfs: cannot link at root")
+		return errors.New("mkfs: cannot link at root")
 	}
 
 	target, ok := fsys.byPath[oldname]
@@ -423,7 +423,7 @@ func (fsys *Writer) Mknod(name string, mode fs.FileMode, rdev uint32) error {
 
 	name = cleanPath(name)
 	if name == "/" {
-		return fmt.Errorf("mkfs: cannot mknod at root")
+		return errors.New("mkfs: cannot mknod at root")
 	}
 
 	if err := fsys.checkPath(name); err != nil {
@@ -499,7 +499,7 @@ func (fsys *Writer) Chown(name string, uid, gid int) error {
 
 // checkOwner converts a uid:gid pair to the on-disk widths, refusing values
 // that do not fit.
-func checkOwner(uid, gid int) (uint32, uint32, error) {
+func checkOwner(uid, gid int) (uid32, gid32 uint32, err error) {
 	if uid < 0 || int64(uid) > math.MaxUint32 {
 		return 0, 0, fmt.Errorf("uid %d out of range: %w", uid, ErrInvalid)
 	}
@@ -654,7 +654,7 @@ func (fsys *Writer) RemoveAll(name string) error {
 		return fsys.checkNotOpen(fsys.openFile.entry, "remove")
 	}
 
-	fsys.remove(name)
+	fsys.removeTree(name)
 
 	return nil
 }
@@ -860,7 +860,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 				} else {
 					// File whiteout: remove the named entry.
 					target := path.Join(path.Dir(p), base[len(whiteoutPrefix):])
-					fsys.remove(target)
+					fsys.removeTree(target)
 				}
 
 				return nil
@@ -892,69 +892,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 
 		// For regular files, get a data reader.
 		if info.Mode().IsRegular() && info.Size() > 0 && (be == nil || be.Data == nil) {
-			// In metadata-only mode, data is referenced via chunk indexes
-			// from the source — no need to open the file.
-			if fsys.copyMetadataOnly {
-				if be == nil {
-					be = entryFromSys(info)
-					if be == nil {
-						be = &builder.Entry{}
-					}
-				}
-				// Generate chunks from DataRange if available.
-				if len(be.Chunks) == 0 {
-					if dr, ok := info.(dataRanger); ok {
-						if ranges := dr.DataRange(); len(ranges) > 0 {
-							chunks, err := fsys.chunksFromRanges(ranges, info.Size())
-							if err != nil {
-								return fmt.Errorf("chunksFromRanges %s: %w", p, err)
-							}
-
-							be.Chunks = chunks
-							// Contiguous: a single non-hole range whose total-size
-							// invariant is satisfied (guaranteed by chunksFromRanges)
-							// means the file is fully covered by one contiguous extent.
-							be.Contiguous = len(ranges) == 1 && ranges[0].Offset != holeOffset
-						}
-					}
-				}
-
-				return fsys.add(p, &entryFileInfo{info: info, sys: be})
-			}
-			// For EROFS sources, use direct SectionReader (bypasses
-			// block-at-a-time reader for contiguous flat-plain data).
-			if srcImg, ok := src.(*image); ok {
-				if st, ok := info.Sys().(*Stat); ok {
-					f := file{img: srcImg, nid: st.Ino}
-					if ino, err := f.readInfo(); err == nil {
-						if dr := srcImg.openDirect(ino); dr != nil {
-							if be == nil {
-								be = &builder.Entry{}
-							}
-
-							be.Data = dr
-
-							return fsys.add(p, &entryFileInfo{info: info, sys: be})
-						}
-					}
-				}
-			}
-
-			f, err := src.Open(fpath)
-			if err != nil {
-				return fmt.Errorf("open %s: %w", fpath, err)
-			}
-
-			if be == nil {
-				be = entryFromSys(info)
-				if be == nil {
-					be = &builder.Entry{}
-				}
-			}
-
-			be.Data = f.(io.Reader)
-
-			return fsys.add(p, &entryFileInfo{info: info, sys: be})
+			return fsys.addRegular(src, fpath, p, info, be)
 		}
 
 		// For symlinks without LinkTarget, read via ReadLink interface.
@@ -1014,7 +952,7 @@ func (fsys *Writer) Close() error {
 	}
 
 	if fsys.closed {
-		return fmt.Errorf("mkfs: FS already closed")
+		return errors.New("mkfs: FS already closed")
 	}
 	// A file's size is recorded by File.Close. Serializing now would emit it
 	// as empty and drop whatever was already written to it.
@@ -1109,7 +1047,7 @@ func (fsys *Writer) Open(name string) (fs.File, error) {
 
 	case disk.StatTypeReg:
 		if !e.fileClosed {
-			return nil, &fs.PathError{Op: "open", Path: name, Err: fmt.Errorf("file not yet closed for writing")}
+			return nil, &fs.PathError{Op: "open", Path: name, Err: errors.New("file not yet closed for writing")}
 		}
 
 		var sr *io.SectionReader
@@ -1132,7 +1070,7 @@ func (fsys *Writer) Open(name string) (fs.File, error) {
 // Write appends data to the file.
 func (f *File) Write(p []byte) (int, error) {
 	if f.closed {
-		return 0, fmt.Errorf("mkfs: write to closed file")
+		return 0, errors.New("mkfs: write to closed file")
 	}
 
 	if f.fs.dataFile != nil {
@@ -1182,7 +1120,7 @@ func (f *File) ReadFrom(r io.Reader) (int64, error) {
 // boundary and records chunk indexes.
 func (f *File) Close() error {
 	if f.closed {
-		return fmt.Errorf("mkfs: file already closed")
+		return errors.New("mkfs: file already closed")
 	}
 
 	f.closed = true
@@ -1416,7 +1354,7 @@ func (fi *writerFileInfo) ModTime() time.Time {
 }
 
 func (fi *writerFileInfo) IsDir() bool { return fi.entry.mode&disk.StatTypeMask == disk.StatTypeDir }
-func (fi *writerFileInfo) Sys() any    { return nil }
+func (*writerFileInfo) Sys() any       { return nil }
 
 // readFile implements fs.File for reading back a finalized file's data.
 type readFile struct {
@@ -1431,7 +1369,7 @@ func (f *readFile) Stat() (fs.FileInfo, error) {
 
 func (f *readFile) Read(p []byte) (int, error) {
 	if f.closed {
-		return 0, fmt.Errorf("mkfs: read from closed file")
+		return 0, errors.New("mkfs: read from closed file")
 	}
 
 	if f.reader == nil {
@@ -1443,7 +1381,7 @@ func (f *readFile) Read(p []byte) (int, error) {
 
 func (f *readFile) Close() error {
 	if f.closed {
-		return fmt.Errorf("mkfs: file already closed")
+		return errors.New("mkfs: file already closed")
 	}
 
 	f.closed = true
@@ -1465,12 +1403,12 @@ func (d *readDir) Stat() (fs.FileInfo, error) {
 }
 
 func (d *readDir) Read([]byte) (int, error) {
-	return 0, &fs.PathError{Op: "read", Path: d.entry.path, Err: fmt.Errorf("is a directory")}
+	return 0, &fs.PathError{Op: "read", Path: d.entry.path, Err: errors.New("is a directory")}
 }
 
 func (d *readDir) Close() error {
 	if d.closed {
-		return fmt.Errorf("mkfs: dir already closed")
+		return errors.New("mkfs: dir already closed")
 	}
 
 	d.closed = true
@@ -1480,7 +1418,7 @@ func (d *readDir) Close() error {
 
 func (d *readDir) ReadDir(n int) ([]fs.DirEntry, error) {
 	if d.closed {
-		return nil, fmt.Errorf("mkfs: read from closed dir")
+		return nil, errors.New("mkfs: read from closed dir")
 	}
 
 	if d.children == nil {
@@ -1540,6 +1478,76 @@ func (de *dirEntry) IsDir() bool  { return de.entry.mode&disk.StatTypeMask == di
 
 func (de *dirEntry) Type() fs.FileMode          { return disk.EroFSModeToGoFileMode(de.entry.mode).Type() }
 func (de *dirEntry) Info() (fs.FileInfo, error) { return &writerFileInfo{entry: de.entry}, nil }
+
+// addRegular adds the regular file at fpath (p once normalized) whose data
+// the source did not hand over in be: as chunk indexes in metadata-only
+// mode, through a direct section reader when the source is an EROFS image,
+// and by opening the file otherwise.
+func (fsys *Writer) addRegular(src fs.FS, fpath, p string, info fs.FileInfo, be *builder.Entry) error {
+	// In metadata-only mode, data is referenced via chunk indexes
+	// from the source — no need to open the file.
+	if fsys.copyMetadataOnly {
+		if be == nil {
+			be = entryFromSys(info)
+			if be == nil {
+				be = &builder.Entry{}
+			}
+		}
+		// Generate chunks from DataRange if available.
+		if len(be.Chunks) == 0 {
+			if dr, ok := info.(dataRanger); ok {
+				if ranges := dr.DataRange(); len(ranges) > 0 {
+					chunks, err := fsys.chunksFromRanges(ranges, info.Size())
+					if err != nil {
+						return fmt.Errorf("chunksFromRanges %s: %w", p, err)
+					}
+
+					be.Chunks = chunks
+					// Contiguous: a single non-hole range whose total-size
+					// invariant is satisfied (guaranteed by chunksFromRanges)
+					// means the file is fully covered by one contiguous extent.
+					be.Contiguous = len(ranges) == 1 && ranges[0].Offset != holeOffset
+				}
+			}
+		}
+
+		return fsys.add(p, &entryFileInfo{info: info, sys: be})
+	}
+	// For EROFS sources, use direct SectionReader (bypasses
+	// block-at-a-time reader for contiguous flat-plain data).
+	if srcImg, ok := src.(*image); ok {
+		if st, ok := info.Sys().(*Stat); ok {
+			f := file{img: srcImg, nid: st.Ino}
+			if ino, err := f.readInfo(); err == nil {
+				if dr := srcImg.openDirect(ino); dr != nil {
+					if be == nil {
+						be = &builder.Entry{}
+					}
+
+					be.Data = dr
+
+					return fsys.add(p, &entryFileInfo{info: info, sys: be})
+				}
+			}
+		}
+	}
+
+	f, err := src.Open(fpath)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", fpath, err)
+	}
+
+	if be == nil {
+		be = entryFromSys(info)
+		if be == nil {
+			be = &builder.Entry{}
+		}
+	}
+
+	be.Data = f
+
+	return fsys.add(p, &entryFileInfo{info: info, sys: be})
+}
 
 // add adds a single entry. Mode and Size come from info; extended metadata
 // comes from info.Sys(). Checks Sys() for *builder.Entry first, then
@@ -1690,7 +1698,7 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 // checkPath validates that a path hasn't already been registered.
 func (fsys *Writer) checkPath(name string) error {
 	if fsys.closed {
-		return fmt.Errorf("mkfs: FS is closed")
+		return errors.New("mkfs: FS is closed")
 	}
 
 	if err := checkPathLen(name); err != nil {
@@ -1779,9 +1787,9 @@ func (fsys *Writer) addChild(e *fsEntry) {
 	fsys.byPath[e.path] = e
 }
 
-// remove marks an entry and all its descendants as removed.
+// removeTree marks an entry and all its descendants as removed.
 // Used by Merge to process whiteout deletions.
-func (fsys *Writer) remove(p string) {
+func (fsys *Writer) removeTree(p string) {
 	p = cleanPath(p)
 
 	e, ok := fsys.byPath[p]
@@ -1887,9 +1895,9 @@ func (fsys *Writer) promoteAlias(target *fsEntry) {
 
 	// The heir takes over the inode wholesale, keeping only its own name
 	// and place in the tree.
-	path, parent := heir.path, heir.parent
+	heirPath, heirParent := heir.path, heir.parent
 	*heir = *target
-	heir.path, heir.parent = path, parent
+	heir.path, heir.parent = heirPath, heirParent
 	heir.linkTo = nil
 	heir.removed = false
 

@@ -662,7 +662,7 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 	}
 }
 
-func (img *image) readMetadata(r io.Reader) ([]byte, error) {
+func (*image) readMetadata(r io.Reader) ([]byte, error) {
 	// - A 2-byte little-endian length field, which is aligned to a 4-byte boundary
 	// - The length bytes of payload data
 	var lenBuf [2]byte
@@ -1032,6 +1032,7 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 }
 
 func (img *image) getBlock() *block {
+	//revive:disable-next-line:unchecked-type-assertion New and putBlock are the pool's only sources, both *block
 	return img.blkPool.Get().(*block)
 }
 
@@ -1064,8 +1065,8 @@ const maxSymlinkSize = 4096
 const maxResolveComponents = maxSymlinks * (maxSymlinkSize / 2)
 
 // readLink reads the symlink target for the given nid.
-func (i *image) readLink(nid uint64, name string) (string, error) {
-	f := &file{img: i, name: name, nid: nid, ftype: fs.ModeSymlink}
+func (img *image) linkTarget(nid uint64, name string) (string, error) {
+	f := &file{img: img, name: name, nid: nid, ftype: fs.ModeSymlink}
 
 	fi, err := f.readInfo()
 	if err != nil {
@@ -1168,7 +1169,9 @@ func checkDirentName(name []byte) error {
 // even though fs.ReadFile(sub, "../outside") is refused. io/fs does not
 // promise otherwise, and neither does a kernel mount. A caller that needs
 // containment has to walk with Lstat and refuse symlinks itself.
-func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.FileMode, basename string, err error) {
+//
+//revive:disable-next-line:function-result-limit the walk yields the inode, its type and its final name together.
+func (img *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.FileMode, basename string, err error) {
 	original := name
 	if !validPath(name) {
 		return 0, 0, "", &fs.PathError{Op: op, Path: name, Err: fs.ErrInvalid}
@@ -1189,7 +1192,7 @@ func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.File
 		name = ""
 	}
 
-	nid = uint64(i.sb.RootNid)
+	nid = uint64(img.sb.RootNid)
 	ftype = fs.ModeDir
 
 	// curPath tracks the full resolved path of the current directory
@@ -1229,7 +1232,7 @@ func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.File
 
 		d := &dir{
 			file: file{
-				img:   i,
+				img:   img,
 				name:  basename,
 				nid:   nid,
 				ftype: ftype,
@@ -1253,7 +1256,7 @@ func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.File
 				return 0, 0, "", &fs.PathError{Op: op, Path: original, Err: ErrLoop}
 			}
 
-			target, err := i.readLink(nid, basename)
+			target, err := img.linkTarget(nid, basename)
 			if err != nil {
 				return 0, 0, "", &fs.PathError{Op: op, Path: original, Err: err}
 			}
@@ -1293,7 +1296,7 @@ func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.File
 				)}
 			}
 
-			nid = uint64(i.sb.RootNid)
+			nid = uint64(img.sb.RootNid)
 			ftype = fs.ModeDir
 			curPath = ""
 
@@ -1323,13 +1326,13 @@ func (i *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.File
 	return nid, ftype, basename, nil
 }
 
-func (i *image) Open(name string) (fs.File, error) {
-	nid, ftype, basename, err := i.resolve("open", name, true)
+func (img *image) Open(name string) (fs.File, error) {
+	nid, ftype, basename, err := img.resolve("open", name, true)
 	if err != nil {
 		return nil, err
 	}
 
-	b := file{img: i, name: basename, nid: nid, ftype: ftype}
+	b := file{img: img, name: basename, nid: nid, ftype: ftype}
 	if ftype.IsDir() {
 		return &dir{file: b}, nil
 	}
@@ -1337,13 +1340,13 @@ func (i *image) Open(name string) (fs.File, error) {
 	return &b, nil
 }
 
-func (i *image) Stat(name string) (fs.FileInfo, error) {
-	nid, ftype, basename, err := i.resolve("stat", name, true)
+func (img *image) Stat(name string) (fs.FileInfo, error) {
+	nid, ftype, basename, err := img.resolve("stat", name, true)
 	if err != nil {
 		return nil, err
 	}
 
-	f := &file{img: i, name: basename, nid: nid, ftype: ftype}
+	f := &file{img: img, name: basename, nid: nid, ftype: ftype}
 
 	return f.statInfo()
 }
@@ -1351,8 +1354,8 @@ func (i *image) Stat(name string) (fs.FileInfo, error) {
 // ReadFile reads the named file and returns its contents.
 // Files larger than maxReadFileSize (128 MiB) are rejected;
 // use Open and io.Copy for larger files.
-func (i *image) ReadFile(name string) ([]byte, error) {
-	nid, ftype, basename, err := i.resolve("readfile", name, true)
+func (img *image) ReadFile(name string) ([]byte, error) {
+	nid, ftype, basename, err := img.resolve("readfile", name, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1361,7 +1364,7 @@ func (i *image) ReadFile(name string) ([]byte, error) {
 		return nil, &fs.PathError{Op: "read", Path: name, Err: ErrIsDirectory}
 	}
 
-	f := &file{img: i, name: basename, nid: nid, ftype: ftype}
+	f := &file{img: img, name: basename, nid: nid, ftype: ftype}
 
 	fi, err := f.readInfo()
 	if err != nil {
@@ -1409,8 +1412,8 @@ func readAll(f *file, buf []byte) error {
 	return nil
 }
 
-func (i *image) ReadDir(name string) ([]fs.DirEntry, error) {
-	nid, ftype, basename, err := i.resolve("readdir", name, true)
+func (img *image) ReadDir(name string) ([]fs.DirEntry, error) {
+	nid, ftype, basename, err := img.resolve("readdir", name, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1419,7 +1422,7 @@ func (i *image) ReadDir(name string) ([]fs.DirEntry, error) {
 		return nil, &fs.PathError{Op: "readdir", Path: name, Err: ErrNotDirectory}
 	}
 
-	d := &dir{file: file{img: i, name: basename, nid: nid, ftype: ftype}}
+	d := &dir{file: file{img: img, name: basename, nid: nid, ftype: ftype}}
 
 	entries, err := d.ReadDir(-1)
 	if err != nil {
@@ -1437,8 +1440,8 @@ func (i *image) ReadDir(name string) ([]fs.DirEntry, error) {
 	return entries, nil
 }
 
-func (i *image) ReadLink(name string) (string, error) {
-	nid, ftype, basename, err := i.resolve("readlink", name, false)
+func (img *image) ReadLink(name string) (string, error) {
+	nid, ftype, basename, err := img.resolve("readlink", name, false)
 	if err != nil {
 		return "", err
 	}
@@ -1447,16 +1450,16 @@ func (i *image) ReadLink(name string) (string, error) {
 		return "", &fs.PathError{Op: "readlink", Path: name, Err: fs.ErrInvalid}
 	}
 
-	return i.readLink(nid, basename)
+	return img.linkTarget(nid, basename)
 }
 
-func (i *image) Lstat(name string) (fs.FileInfo, error) {
-	nid, ftype, basename, err := i.resolve("lstat", name, false)
+func (img *image) Lstat(name string) (fs.FileInfo, error) {
+	nid, ftype, basename, err := img.resolve("lstat", name, false)
 	if err != nil {
 		return nil, err
 	}
 
-	f := &file{img: i, name: basename, nid: nid, ftype: ftype}
+	f := &file{img: img, name: basename, nid: nid, ftype: ftype}
 
 	return f.statInfo()
 }
@@ -1944,7 +1947,7 @@ func (b *file) WriteTo(w io.Writer) (int64, error) {
 	return total, nil
 }
 
-func (b *file) Close() error {
+func (*file) Close() error {
 	return nil
 }
 

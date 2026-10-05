@@ -144,7 +144,7 @@ func TestUntrustedChunkSizeIsBounded(t *testing.T) {
 			grew := after.TotalAlloc - before.TotalAlloc
 
 			if err == nil {
-				t.Fatalf("CopyFrom accepted an inode claiming a 1 PiB chunk-based file")
+				t.Fatal("CopyFrom accepted an inode claiming a 1 PiB chunk-based file")
 			}
 
 			if !errors.Is(err, ErrInvalid) {
@@ -283,7 +283,10 @@ func buildCyclicImage(t *testing.T, nameLen int) []byte {
 		t.Fatal(err)
 	}
 
-	i := img.(*image)
+	i, ok := img.(*image)
+	if !ok {
+		t.Fatalf("Open returned %T, want *image", img)
+	}
 
 	dNid, _, _, err := i.resolve("x", d, false)
 	if err != nil {
@@ -374,6 +377,7 @@ func TestUntrustedDirectoryCycleFullImageTerminates(t *testing.T) {
 	case err := <-done:
 		var after runtime.MemStats
 
+		//revive:disable-next-line:call-to-gc resident memory is measured from a collected heap
 		runtime.GC()
 		runtime.ReadMemStats(&after)
 
@@ -462,9 +466,9 @@ func (i badSizeInfo) Mode() fs.FileMode {
 
 	return 0o644
 }
-func (i badSizeInfo) ModTime() time.Time { return time.Unix(0, 0) }
-func (i badSizeInfo) IsDir() bool        { return i.dir }
-func (i badSizeInfo) Sys() any           { return nil }
+func (badSizeInfo) ModTime() time.Time { return time.Unix(0, 0) }
+func (i badSizeInfo) IsDir() bool      { return i.dir }
+func (badSizeInfo) Sys() any           { return nil }
 
 type badSizeDirent struct{ info badSizeInfo }
 
@@ -477,7 +481,7 @@ type badSizeDir struct{ fsys badSizeFS }
 
 func (badSizeDir) Close() error             { return nil }
 func (badSizeDir) Read([]byte) (int, error) { return 0, fs.ErrInvalid }
-func (d badSizeDir) Stat() (fs.FileInfo, error) {
+func (badSizeDir) Stat() (fs.FileInfo, error) {
 	return badSizeInfo{name: ".", size: 4096, dir: true}, nil
 }
 
@@ -654,7 +658,10 @@ func buildSymlinkCycleImage(t *testing.T, target string) []byte {
 		t.Fatal(err)
 	}
 
-	i := img.(*image)
+	i, ok := img.(*image)
+	if !ok {
+		t.Fatalf("Open returned %T, want *image", img)
+	}
 
 	aNid, _, _, err := i.resolve("x", "a", false)
 	if err != nil {
@@ -1334,7 +1341,14 @@ func TestXattrPrefixAndDuplicates(t *testing.T) {
 	var fi fs.FileInfo
 	if fi, err = fs.Stat(img0, "f"); err != nil {
 		t.Fatal(err)
-	} else if st := fi.Sys().(*Stat); st.Xattrs["security.capability"] != "real" {
+	}
+
+	st, ok := fi.Sys().(*Stat)
+	if !ok {
+		t.Fatalf("Sys returned %T, want *Stat", fi.Sys())
+	}
+
+	if st.Xattrs["security.capability"] != "real" {
 		t.Fatalf("xattr did not round-trip: %v", st.Xattrs)
 	}
 
@@ -1727,7 +1741,7 @@ func TestCopyFromImageTruncatedXattr(t *testing.T) {
 	// then the little-endian value length.
 	i := bytes.Index(buf, []byte("capability"))
 	if i < 0 || buf[i-3] != 6 {
-		t.Fatalf("could not locate the stored xattr entry")
+		t.Fatal("could not locate the stored xattr entry")
 	}
 
 	binary.LittleEndian.PutUint16(buf[i-2:], 4000)
