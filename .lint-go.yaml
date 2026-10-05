@@ -15,8 +15,6 @@ golangci:
           linters: [dupl]
         - path: ^(mkfs_untrusted_test\.go)$
           linters: [embeddedstructfieldcheck]
-        - path: ^(format\.go)$
-          linters: [exhaustive]
         - path: ^(erofs\.go|internal/erofstest/tar\.go|mkfs\.go)$
           linters: [funcorder]
         - path: ^(erofs\.go|internal/erofstest/testcase\.go|layout\.go|mkfs\.go|mkfs_image\.go|writer\.go|xattr\.go)$
