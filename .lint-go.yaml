@@ -4,6 +4,16 @@
 # carve-outs"). `just do lint go` renders the two on every run.
 golangci:
   linters:
+    disable:
+      # An image is written and read through a handful of objects, each
+      # named the way the format and io/fs name it: e for the entry being
+      # laid out, fi for the inode being read, f for the open file, de, xe
+      # and xh for a dirent, an xattr entry and its header, sb for the
+      # superblock, bn for a block number. A function is about one of them,
+      # and is long because it walks the on-disk layout field by field;
+      # spelled out, the name prefixes every line and says nothing more.
+      # forkcloser/xz disables it for its codec on the same grounds.
+      - varnamelen
     exclusions:
       rules:
         # ONBOARDING BACKLOG (book/mandatory-files.md, "onboarding an existing
@@ -21,8 +31,6 @@ golangci:
           linters: [paralleltest]
         - path: ^(erofs_directread_test\.go|erofs_fsconform_test\.go|erofs_loadat_test\.go|format_test\.go|internal/disk/types_test\.go|mkfs_chunkmap_test\.go|mkfs_limits_test\.go|mkfs_openfile_test\.go|mkfs_untrusted_test\.go|perf_audit_test\.go)$
           linters: [testpackage]
-        - path: ^(cmd/erofs\-cli/main\.go|erofs\.go|format\.go|internal/disk/ftypes\.go|internal/erofstest/check\.go|internal/erofstest/fsck\.go|internal/erofstest/mkfs\.go|internal/erofstest/tar\.go|internal/erofstest/testcase\.go|layout\.go|mkfs\.go|mkfs_image\.go|writer\.go|xattr\.go)$
-          linters: [varnamelen]
         - path: ^(cmd/erofs\-cli/main\.go|erofs\.go|internal/erofstest/tar\.go|mkfs\.go|mkfs_image\.go|writer\.go)$
           linters: [wrapcheck]
 
