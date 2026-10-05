@@ -1,4 +1,4 @@
-package erofs
+package erofs_test
 
 import (
 	"bytes"
@@ -7,10 +7,12 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/forkcloser/erofs"
 )
 
 // writeFile creates, fills and closes one file.
-func writeFile(t *testing.T, w *Writer, name string, data []byte) {
+func writeFile(t *testing.T, w *erofs.Writer, name string, data []byte) {
 	t.Helper()
 
 	f, err := w.Create(name)
@@ -34,7 +36,7 @@ func writeFile(t *testing.T, w *Writer, name string, data []byte) {
 func TestCreateRejectsSecondOpenFile(t *testing.T) {
 	t.Parallel()
 
-	w := Create(&seekBuf{}, WithBuildTime(1000, 0))
+	w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(1000, 0))
 
 	f1, err := w.Create("/one")
 	if err != nil {
@@ -83,8 +85,8 @@ func TestSequentialFilesKeepTheirData(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			out := &seekBuf{}
-			opts := []CreateOpt{WithBuildTime(1000, 0)}
+			out := &testBuffer{}
+			opts := []erofs.CreateOpt{erofs.WithBuildTime(1000, 0)}
 
 			var blobPath string
 
@@ -96,10 +98,10 @@ func TestSequentialFilesKeepTheirData(t *testing.T) {
 				defer func() { _ = df.Close() }()
 
 				blobPath = df.Name()
-				opts = append(opts, WithDataFile(df))
+				opts = append(opts, erofs.WithDataFile(df))
 			}
 
-			w := Create(out, opts...)
+			w := erofs.Create(out, opts...)
 
 			want := map[string][]byte{
 				"one":   bytes.Repeat([]byte("1"), 32),
@@ -114,7 +116,7 @@ func TestSequentialFilesKeepTheirData(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			var readOpts []OpenOpt
+			var readOpts []erofs.OpenOpt
 
 			if useDataFile {
 				blob, err := os.ReadFile(blobPath)
@@ -122,10 +124,10 @@ func TestSequentialFilesKeepTheirData(t *testing.T) {
 					t.Fatal(err)
 				}
 
-				readOpts = append(readOpts, WithExtraDevices(bytes.NewReader(blob)))
+				readOpts = append(readOpts, erofs.WithExtraDevices(bytes.NewReader(blob)))
 			}
 
-			img, err := Open(bytes.NewReader(out.buf), readOpts...)
+			img, err := erofs.Open(bytes.NewReader(out.Bytes()), readOpts...)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -145,20 +147,12 @@ func TestSequentialFilesKeepTheirData(t *testing.T) {
 	}
 }
 
-func firstByte(b []byte) string {
-	if len(b) == 0 {
-		return ""
-	}
-
-	return string(b[:1])
-}
-
 // TestCopyFromRejectsOpenFile covers CopyFrom appending to the same stream as
 // an open writer, which would interleave the copied bytes into its region.
 func TestCopyFromRejectsOpenFile(t *testing.T) {
 	t.Parallel()
 
-	w := Create(&seekBuf{}, WithBuildTime(1000, 0))
+	w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(1000, 0))
 
 	f, err := w.Create("/one")
 	if err != nil {
@@ -191,7 +185,7 @@ func TestCopyFromRejectsOpenFile(t *testing.T) {
 func TestWriterCloseRejectsOpenFile(t *testing.T) {
 	t.Parallel()
 
-	w := Create(&seekBuf{}, WithBuildTime(1000, 0))
+	w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(1000, 0))
 
 	f, err := w.Create("/one")
 	if err != nil {

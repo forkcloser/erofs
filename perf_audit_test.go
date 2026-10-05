@@ -1,4 +1,4 @@
-package erofs
+package erofs //nolint:testpackage // white-box: BenchmarkPerfStatInode times the unexported inode decoder alone
 
 import (
 	"bytes"

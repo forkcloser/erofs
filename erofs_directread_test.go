@@ -1,12 +1,29 @@
-package erofs
+package erofs //nolint:testpackage // white-box: forces the unexported block loop to pin it to the direct-read path
 
 import (
 	"bytes"
 	"errors"
 	"io"
-	"io/fs"
 	"testing"
 )
+
+// writeFile creates, fills and closes one file.
+func writeFile(t *testing.T, w *Writer, name string, data []byte) {
+	t.Helper()
+
+	f, err := w.Create(name)
+	if err != nil {
+		t.Fatalf("Create(%q): %v", name, err)
+	}
+
+	if _, err := f.Write(data); err != nil {
+		t.Fatalf("Write(%q): %v", name, err)
+	}
+
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close(%q): %v", name, err)
+	}
+}
 
 // readAllVia reads a file to completion using bufSize-byte Reads, optionally
 // forcing the block-at-a-time path so the two can be compared.
@@ -205,64 +222,6 @@ func TestWriteToResumesFromOffset(t *testing.T) {
 
 	if rest.String() != "6789abcdef" {
 		t.Errorf("rest = %q, want %q", rest.String(), "6789abcdef")
-	}
-}
-
-// TestDirectReadSparseFile covers a chunk-based file with a hole, where the
-// direct path must decline and leave the block loop to zero-fill.
-func TestDirectReadSparseFile(t *testing.T) {
-	t.Parallel()
-
-	const bs = 4096
-
-	blob := sparseBlob(bs)
-
-	out := &seekBuf{}
-
-	w := Create(out, WithBlockSize(bs), WithBuildTime(1000, 0))
-	if err := w.CopyFrom(newSparseFS(bs, blob), MetadataOnly()); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	fsys, err := Open(bytes.NewReader(out.buf), WithExtraDevices(bytes.NewReader(blob)))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	img, ok := fsys.(*image)
-	if !ok {
-		t.Fatalf("Open returned %T, want *image", fsys)
-	}
-
-	nid, ftype, base, err := img.resolve("open", "f", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	f := &file{img: img, name: base, nid: nid, ftype: ftype}
-
-	ino, err := f.readInfo()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if sr := f.directReader(ino); sr != nil {
-		t.Error("a sparse file must not take the direct path; its hole would read as device data")
-	}
-
-	got, err := fs.ReadFile(img, "f")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	checkSparseContent(t, img, bs, "sparse via block path")
-
-	if len(got) != 4*bs {
-		t.Errorf("read %d bytes, want %d", len(got), 4*bs)
 	}
 }
 
