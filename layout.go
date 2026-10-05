@@ -145,11 +145,7 @@ func (w *erofsWriter) planLayout(root *erofsEntry) {
 		e.trailingSize = w.calcTrailingSize(e)
 		e.chunkPad = chunkIndexPad(e)
 
-		totalInodeSize := headerSize + e.chunkPad + e.trailingSize
-		// Pad to 32-byte boundary
-		if totalInodeSize%32 != 0 {
-			totalInodeSize = (totalInodeSize + 31) & ^31
-		}
+		totalInodeSize := inodeSlotAlign(headerSize + e.chunkPad + e.trailingSize)
 
 		// Check block boundary: inode core must not cross a block boundary
 		blockOff := currentOff % w.blockSize
@@ -168,10 +164,7 @@ func (w *erofsWriter) planLayout(root *erofsEntry) {
 				e.trailingSize = w.calcTrailingSize(e)
 				e.chunkPad = chunkIndexPad(e)
 
-				totalInodeSize = headerSize + e.chunkPad + e.trailingSize
-				if totalInodeSize%32 != 0 {
-					totalInodeSize = (totalInodeSize + 31) & ^31
-				}
+				totalInodeSize = inodeSlotAlign(headerSize + e.chunkPad + e.trailingSize)
 			}
 		}
 

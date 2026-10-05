@@ -147,9 +147,9 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 		sb = sb[disk.SizeXattrEntry:]
 
 		var prefix string
-		if xattrEntry.NameIndex&0x80 == 0x80 {
+		if xattrEntry.NameIndex&disk.XattrLongPrefixFlag != 0 {
 			// Long prefix: highest bit set
-			longPrefixIndex := xattrEntry.NameIndex & 0x7F
+			longPrefixIndex := xattrEntry.NameIndex & disk.XattrLongPrefixMask
 
 			prefix, err = b.img.getLongPrefix(longPrefixIndex)
 			if err != nil {
@@ -212,9 +212,9 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 
 		var prefix string
 
-		if xattrEntry.NameIndex&0x80 == 0x80 {
+		if xattrEntry.NameIndex&disk.XattrLongPrefixFlag != 0 {
 			// Long prefix: highest bit set
-			longPrefixIndex := xattrEntry.NameIndex & 0x7F
+			longPrefixIndex := xattrEntry.NameIndex & disk.XattrLongPrefixMask
 
 			var err error
 

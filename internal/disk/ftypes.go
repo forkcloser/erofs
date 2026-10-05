@@ -55,7 +55,7 @@ func EroFSFtypeToFileMode(ftype uint8) fs.FileMode {
 func EroFSModeToGoFileMode(mode uint16) fs.FileMode {
 	var m fs.FileMode
 
-	m |= fs.FileMode(mode & 0o777)
+	m |= fs.FileMode(mode) & fs.ModePerm
 	switch mode & StatTypeMask {
 	case StatTypeReg:
 	case StatTypeDir:
