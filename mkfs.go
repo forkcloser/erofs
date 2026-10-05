@@ -591,6 +591,7 @@ func (fsys *Writer) Remove(name string) error {
 
 	name = cleanPath(name)
 	if name == "/" {
+		//nolint:goconst // PathError.Op is spelled as the os package spells it
 		return &fs.PathError{Op: "remove", Path: name, Err: fs.ErrInvalid}
 	}
 	// Deliberately not lookup(): that resolves a hardlink name to the
@@ -1409,6 +1410,7 @@ func (d *readDir) Stat() (fs.FileInfo, error) {
 }
 
 func (d *readDir) Read([]byte) (int, error) {
+	//nolint:goconst // PathError.Op is spelled as the os package spells it
 	return 0, &fs.PathError{Op: "read", Path: d.entry.path, Err: ErrIsDirectory}
 }
 

@@ -21,8 +21,6 @@ golangci:
           linters: [funcorder]
         - path: ^(erofs\.go|internal/erofstest/testcase\.go|layout\.go|mkfs\.go|mkfs_image\.go|writer\.go|xattr\.go)$
           linters: [gocognit]
-        - path: ^(erofs\.go|internal/erofstest/testcase\.go|mkfs\.go)$
-          linters: [goconst]
         - path: ^(erofs\.go|internal/erofstest/testcase\.go|layout\.go|mkfs\.go|writer\.go)$
           linters: [gocritic]
         - path: ^(cmd/erofs\-cli/main\.go|erofs\.go|format\.go|internal/erofstest/convert\.go|internal/erofstest/fsck\.go|internal/erofstest/testcase\.go|layout\.go|mkfs\.go|mkfs_image\.go|writer\.go|xattr\.go)$
