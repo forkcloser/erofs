@@ -23,8 +23,6 @@ golangci:
           linters: [gocritic]
         - path: ^(cmd/erofs\-cli/main\.go|erofs\.go|format\.go|internal/erofstest/convert\.go|internal/erofstest/fsck\.go|internal/erofstest/testcase\.go|layout\.go|mkfs\.go|mkfs_image\.go|writer\.go|xattr\.go)$
           linters: [gosec]
-        - path: ^(erofs\.go|mkfs_image\.go|xattr\.go)$
-          linters: [intrange]
         - path: ^(erofs\.go|internal/disk/ftypes\.go|internal/erofstest/tar\.go|internal/erofstest/testcase\.go|layout\.go|mkfs\.go|mkfs_image\.go|writer\.go|xattr\.go)$
           linters: [mnd]
         - path: ^(erofs\.go|mkfs_remove_test\.go)$

@@ -752,7 +752,7 @@ func (img *image) loadLongPrefixes() error {
 		}
 
 		img.longPrefixes = make([]string, img.sb.XattrPrefixCount)
-		for i := 0; i < int(img.sb.XattrPrefixCount); i++ {
+		for i := range int(img.sb.XattrPrefixCount) {
 			data, err := img.readMetadata(r)
 			if err != nil {
 				img.prefixesErr = fmt.Errorf("failed to read long xattr prefix %d: %w", i, err)
