@@ -122,7 +122,7 @@ type Dirent struct {
 //
 // inline xattrs must starts in erofs_xattr_ibody_header,
 // for read-only fs, no need to introduce h_refcount
-// Actual name is prefix | long prefix (prefix + infix) + name
+// Actual name is prefix | long prefix (prefix + infix) + name.
 type XattrHeader struct {
 	NameFilter  uint32 // bit value 1 indicate not-present
 	SharedCount uint8

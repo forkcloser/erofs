@@ -61,7 +61,7 @@ import (
 	"github.com/forkcloser/erofs/internal/disk"
 )
 
-// Errors
+// Errors.
 var (
 	// ErrInvalid occurs when an invalid value is detected in the erofs data.
 	// Whether this invalid data is the result of corruption or bad input
@@ -71,11 +71,11 @@ var (
 
 	// ErrInvalidSuperblock occurs when the super block could not be validated
 	// when initially loading the erofs input. Unlike other corruption cases,
-	// invalid super block should be returned immediately
+	// invalid super block should be returned immediately.
 	ErrInvalidSuperblock = fmt.Errorf("invalid super block: %w", ErrInvalid)
 
 	// ErrNotImplemented is returned when a feature is known but not implemented
-	// yet by this library
+	// yet by this library.
 	ErrNotImplemented = errors.New("not implemented")
 
 	// ErrNotDirectory is returned when a path component is not a directory.
@@ -163,11 +163,11 @@ type options struct {
 	extraDevices []io.ReaderAt
 }
 
-// OpenOpt is an option for configuring the EROFS reader
+// OpenOpt is an option for configuring the EROFS reader.
 type OpenOpt func(*options)
 
 // WithExtraDevices specifies additional devices to read
-// chunk data from
+// chunk data from.
 func WithExtraDevices(devices ...io.ReaderAt) OpenOpt {
 	return func(o *options) {
 		o.extraDevices = append(o.extraDevices, devices...)
@@ -364,7 +364,7 @@ type image struct {
 	prefixesErr  error
 }
 
-// start physical offset of the separate metadata zone
+// start physical offset of the separate metadata zone.
 func (img *image) metaStartPos() int64 {
 	return int64(img.sb.MetaBlkAddr) << int64(img.sb.BlkSizeBits)
 }
@@ -771,7 +771,7 @@ func (img *image) loadLongPrefixes() error {
 	return img.prefixesErr
 }
 
-// getLongPrefix returns the long xattr prefix at the given index
+// getLongPrefix returns the long xattr prefix at the given index.
 func (img *image) getLongPrefix(index uint8) (string, error) {
 	if err := img.loadLongPrefixes(); err != nil {
 		return "", err
@@ -821,7 +821,7 @@ func (img *image) loadAt(addr, size int64) (*block, error) {
 	return b, nil
 }
 
-// loadBlock loads the block with the given data
+// loadBlock loads the block with the given data.
 func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 	nblocks := calculateBlocks(img.sb.BlkSizeBits, fi.size)
 
@@ -1037,7 +1037,7 @@ func (img *image) getBlock() *block {
 }
 
 // putBlock returns a block after complete so its
-// buffer can be put back into the buffer pool
+// buffer can be put back into the buffer pool.
 func (img *image) putBlock(b *block) {
 	img.blkPool.Put(b)
 }

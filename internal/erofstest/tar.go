@@ -25,7 +25,7 @@ import (
 	"time"
 )
 
-// WriterToTar is a type which writes to a tar writer
+// WriterToTar is a type which writes to a tar writer.
 type WriterToTar interface {
 	// WriteTo writes the entry to tw.
 	WriteTo(*tar.Writer) error
@@ -84,7 +84,7 @@ func TarFromWriterTo(wt WriterToTar) io.ReadCloser {
 	return r
 }
 
-// TarContext is used to create tar records
+// TarContext is used to create tar records.
 type TarContext struct {
 	UID int
 	GID int
@@ -174,7 +174,7 @@ func (ti tarInfo) Sys() any {
 	return ti.hdr
 }
 
-// WithUIDGID sets the UID and GID for tar entries
+// WithUIDGID sets the UID and GID for tar entries.
 func (tc TarContext) WithUIDGID(uid, gid int) TarContext {
 	ntc := tc
 	ntc.UID = uid
@@ -183,7 +183,7 @@ func (tc TarContext) WithUIDGID(uid, gid int) TarContext {
 	return ntc
 }
 
-// WithModTime sets the ModTime for tar entries
+// WithModTime sets the ModTime for tar entries.
 func (tc TarContext) WithModTime(modtime time.Time) TarContext {
 	ntc := tc
 	ntc.ModTime = &modtime
@@ -192,7 +192,7 @@ func (tc TarContext) WithModTime(modtime time.Time) TarContext {
 }
 
 // WithXattrs adds these xattrs to all files, merges with any
-// previously added xattrs
+// previously added xattrs.
 func (tc TarContext) WithXattrs(xattrs map[string]string) TarContext {
 	ntc := tc
 	if ntc.Xattrs == nil {
@@ -204,7 +204,7 @@ func (tc TarContext) WithXattrs(xattrs map[string]string) TarContext {
 	return ntc
 }
 
-// File returns a regular file tar entry using the provided bytes
+// File returns a regular file tar entry using the provided bytes.
 func (tc TarContext) File(name string, content []byte, perm os.FileMode) WriterToTar {
 	return writerToFn(func(tw *tar.Writer) error {
 		return writeHeaderAndContent(tw, tc.newHeader(perm, name, "", int64(len(content))), content)
@@ -247,21 +247,21 @@ func (tc TarContext) SparseFile(name string, size int64, data []byte, dataOffset
 	})
 }
 
-// Dir returns a directory tar entry
+// Dir returns a directory tar entry.
 func (tc TarContext) Dir(name string, perm os.FileMode) WriterToTar {
 	return writerToFn(func(tw *tar.Writer) error {
 		return writeHeaderAndContent(tw, tc.newHeader(perm|os.ModeDir, name, "", 0), nil)
 	})
 }
 
-// Symlink returns a symlink tar entry
+// Symlink returns a symlink tar entry.
 func (tc TarContext) Symlink(oldname, newname string) WriterToTar {
 	return writerToFn(func(tw *tar.Writer) error {
 		return writeHeaderAndContent(tw, tc.newHeader(0o777|os.ModeSymlink, newname, oldname, 0), nil)
 	})
 }
 
-// Link returns a hard link tar entry
+// Link returns a hard link tar entry.
 func (tc TarContext) Link(oldname, newname string) WriterToTar {
 	return writerToFn(func(tw *tar.Writer) error {
 		return writeHeaderAndContent(tw, tc.newHeader(0o777, newname, oldname, 0), nil)
