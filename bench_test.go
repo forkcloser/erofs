@@ -26,7 +26,7 @@ const benchMergeOverlayFraction = 8
 func populateBenchDir(b *testing.B, root string, targetSize int64) {
 	b.Helper()
 
-	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
 	written := int64(0)
 
 	writeFile := func(name string, size int, mode os.FileMode) {
@@ -107,7 +107,7 @@ func populateBenchDir(b *testing.B, root string, targetSize int64) {
 func populateOverlayDir(b *testing.B, root string, targetSize int64) {
 	b.Helper()
 
-	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
 	written := int64(0)
 
 	writeFile := func(name string, size int, mode os.FileMode) {
@@ -633,7 +633,7 @@ func BenchmarkMerge10Layer(b *testing.B) {
 	}
 
 	tmpDir := b.TempDir()
-	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC)
 
 	// Build dir + EROFS for each layer.
 	type layerFiles struct {

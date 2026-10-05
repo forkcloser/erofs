@@ -47,7 +47,7 @@ func initFuzzFlat(tb testing.TB) fuzzImage {
 	tb.Helper()
 
 	fuzzFlatOnce.Do(func() {
-		tc := erofstest.TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+		tc := erofstest.TarContext{}.WithModTime(time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC))
 
 		// Flat: all files in root directory, no subdirectories.
 		var (
@@ -76,7 +76,7 @@ func initFuzzNested(tb testing.TB) fuzzImage {
 	tb.Helper()
 
 	fuzzNestedOnce.Do(func() {
-		tc := erofstest.TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+		tc := erofstest.TarContext{}.WithModTime(time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC))
 
 		// Nested: 2-level directory structure with files at each level.
 		var (
@@ -110,7 +110,7 @@ func initFuzzDeep(tb testing.TB) fuzzImage {
 	tb.Helper()
 
 	fuzzDeepOnce.Do(func() {
-		tc := erofstest.TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+		tc := erofstest.TarContext{}.WithModTime(time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC))
 
 		// Deep: 10-level nested directory chain with files at each level.
 		var (
@@ -154,7 +154,7 @@ func initFuzzWide(tb testing.TB) fuzzImage {
 	tb.Helper()
 
 	fuzzWideOnce.Do(func() {
-		tc := erofstest.TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+		tc := erofstest.TarContext{}.WithModTime(time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC))
 
 		// Wide: many directories at the same level (stress directory lookup).
 		var (
@@ -821,7 +821,7 @@ func buildMinimalImage(tb testing.TB) []byte {
 		tb.Skipf("skipping: %v", err)
 	}
 
-	tc := erofstest.TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	tc := erofstest.TarContext{}.WithModTime(time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC))
 	wt := erofstest.TarAll(
 		tc.Dir("/dir", 0o755),
 		tc.File("/dir/hello.txt", []byte("hello world\n"), 0o644),

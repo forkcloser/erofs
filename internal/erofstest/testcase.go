@@ -145,7 +145,7 @@ func (tc *testCase) Run(tb testing.TB, conv Converter) {
 // xattrs (including long prefixes), and device files.
 var Basic TestCase = &testCase{ //nolint:gochecknoglobals // immutable fixture: Run rebuilds the tar on every call
 	tar: func() WriterToTar {
-		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+		tc := TarContext{}.WithModTime(time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC))
 
 		lotsOfFilesC := make(chan WriterToTar)
 
@@ -316,7 +316,7 @@ const (
 // so this test case is not suitable for the ext4 converter.
 var LongXattrs TestCase = &testCase{ //nolint:gochecknoglobals // immutable fixture: Run rebuilds the tar on every call
 	tar: func() WriterToTar {
-		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+		tc := TarContext{}.WithModTime(time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC))
 
 		return TarAll(
 			tc.Dir("/usr", 0o755),
@@ -351,7 +351,7 @@ var LongXattrs TestCase = &testCase{ //nolint:gochecknoglobals // immutable fixt
 // a well-formed fs.FileMode (no raw on-disk bits) for ordinary entries too.
 var SpecialModeBits TestCase = &testCase{ //nolint:gochecknoglobals // immutable fixture: Run rebuilds the tar on every call
 	tar: func() WriterToTar {
-		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+		tc := TarContext{}.WithModTime(time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC))
 
 		return TarAll(
 			tc.Dir("/bin", 0o755),
@@ -403,7 +403,7 @@ var SpecialModeBits TestCase = &testCase{ //nolint:gochecknoglobals // immutable
 //   - 1MB: many blocks, exercises sustained sequential reads
 var FileSizes TestCase = &testCase{ //nolint:gochecknoglobals // immutable fixture: Run rebuilds the tar on every call
 	tar: func() WriterToTar {
-		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+		tc := TarContext{}.WithModTime(time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC))
 
 		return TarAll(
 			tc.File("/exact-block.bin", generateContent(4096), 0o644),
@@ -427,7 +427,7 @@ var FileSizes TestCase = &testCase{ //nolint:gochecknoglobals // immutable fixtu
 // redundant work.
 var LargeFile TestCase = &testCase{ //nolint:gochecknoglobals // immutable fixture: Run rebuilds the tar on every call
 	tar: func() WriterToTar {
-		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+		tc := TarContext{}.WithModTime(time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC))
 		// 256MB + 4KB to push past the 65535-block boundary.
 		return TarAll(
 			tc.File("/large.bin", generateContent(256*1024*1024+4096), 0o644),
@@ -460,7 +460,7 @@ var uidgidTestValues = []struct{ uid, gid int }{ //nolint:gochecknoglobals // re
 // on a regular file, directory, and symlink.
 var UIDGIDValues TestCase = &testCase{ //nolint:gochecknoglobals // immutable fixture: Run rebuilds the tar on every call
 	tar: func() WriterToTar {
-		base := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+		base := TarContext{}.WithModTime(time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC))
 
 		var entries []WriterToTar
 
@@ -572,7 +572,7 @@ func verifyContent(tb testing.TB, fsys fs.FS, name string, size int) {
 // chunks, so only the mkfs.erofs converter produces correct results.
 var SparseFiles TestCase = &testCase{ //nolint:gochecknoglobals // immutable fixture: Run rebuilds the tar on every call
 	tar: func() WriterToTar {
-		tc := TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+		tc := TarContext{}.WithModTime(time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC))
 		marker := []byte("hello sparse world!\n")
 
 		return TarAll(

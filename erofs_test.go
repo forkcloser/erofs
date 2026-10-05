@@ -109,7 +109,7 @@ func BenchmarkLookup(b *testing.B) {
 		b.Skipf("skipping: %v", err)
 	}
 
-	tc := erofstest.TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	tc := erofstest.TarContext{}.WithModTime(time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC))
 
 	// Build a tar with directories of varying sizes.
 	lotsOfFiles := make(chan erofstest.WriterToTar)
@@ -307,7 +307,7 @@ func TestDataRangeSparseChunkBased(t *testing.T) {
 		t.Skipf("skipping: %v", err)
 	}
 
-	tc := erofstest.TarContext{}.WithModTime(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	tc := erofstest.TarContext{}.WithModTime(time.Date(2025, time.January, 1, 0, 0, 0, 0, time.UTC))
 	marker := []byte("hello sparse world!\n")
 	fsys := erofstest.MkfsErofsBlobDev(os.Getpagesize())(t, erofstest.TarAll(
 		tc.SparseFile("/sparse.bin", 2*1024*1024, marker, 1024*1024, 0o644),
