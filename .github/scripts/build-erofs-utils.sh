@@ -19,8 +19,8 @@ set -euo pipefail
 MINGW_HOST="x86_64-w64-mingw32"
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-patches="$repo/.github/workflows/patches/erofs-utils"
-headers="$repo/.github/workflows/mingw-compat-headers"
+patches="$repo/.github/scripts/patches/erofs-utils"
+headers="$repo/.github/scripts/mingw-compat-headers"
 work="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/erofs-utils-build"
 prefix="$repo/build/erofs-utils"
 
