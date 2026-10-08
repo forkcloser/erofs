@@ -8,6 +8,8 @@ commit `44d5e74`.
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-10-08
+
 ### Added
 
 - `ErrCorrupt`: every error the reader reports for a malformed image (an
