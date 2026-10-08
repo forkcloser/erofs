@@ -56,7 +56,7 @@ func (idx xattrIndex) prefix() (string, error) {
 		return p, nil
 	}
 
-	return "", fmt.Errorf("unknown xattr name index %d: %w", uint8(idx), ErrInvalid)
+	return "", fmt.Errorf("unknown xattr name index %d: %w", uint8(idx), ErrCorrupt)
 }
 
 // setXattr records one attribute, rejecting a name already present.
@@ -67,7 +67,7 @@ func (idx xattrIndex) prefix() (string, error) {
 // act on whichever copy the parser happened to write second.
 func setXattr(stat *Stat, nid uint64, name, value string) error {
 	if _, dup := stat.Xattrs[name]; dup {
-		return fmt.Errorf("duplicate xattr %q for nid %d: %w", name, nid, ErrInvalid)
+		return fmt.Errorf("duplicate xattr %q for nid %d: %w", name, nid, ErrCorrupt)
 	}
 
 	stat.Xattrs[name] = value
@@ -99,12 +99,20 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 
 	xb := blk.bytes()
 	if len(xb) < disk.SizeXattrBodyHeader {
-		return fmt.Errorf("xattr body too small for nid %d: %w", b.nid, ErrInvalid)
+		return fmt.Errorf("xattr body too small for nid %d: %w", b.nid, ErrCorrupt)
 	}
 
 	var xh disk.XattrHeader
 	xh.Unmarshal(xb)
 	xb = xb[disk.SizeXattrBodyHeader:]
+
+	// The shared references sit between the header and the inline entries,
+	// so the area i_xattr_icount sizes must hold them all. Checked here, by
+	// name, rather than left to the reload below to run out of bytes.
+	if disk.SizeXattrBodyHeader+int(xh.SharedCount)*4 > xsize {
+		return fmt.Errorf("nid %d declares %d shared xattrs, more than its %d byte xattr area holds: %w",
+			b.nid, xh.SharedCount, xsize, ErrCorrupt)
+	}
 
 	for i := range int(xh.SharedCount) {
 		if len(xb) < 4 {
@@ -119,7 +127,7 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 
 			xb = blk.bytes()
 			if len(xb) < 4 {
-				return fmt.Errorf("xattr shared block too small for nid %d: %w", b.nid, ErrInvalid)
+				return fmt.Errorf("xattr shared block too small for nid %d: %w", b.nid, ErrCorrupt)
 			}
 		}
 
@@ -140,7 +148,7 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 		sb := sblk.bytes()
 		if len(sb) < disk.SizeXattrEntry {
 			b.img.putBlock(sblk)
-			return fmt.Errorf("shared xattr block too small for nid %d: %w", b.nid, ErrInvalid)
+			return fmt.Errorf("shared xattr block too small for nid %d: %w", b.nid, ErrCorrupt)
 		}
 
 		var xattrEntry disk.XattrEntry
@@ -164,7 +172,7 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 
 		if len(sb) < int(xattrEntry.NameLen)+int(xattrEntry.ValueLen) {
 			b.img.putBlock(sblk)
-			return fmt.Errorf("shared xattr too long for nid %d: %w", b.nid, ErrInvalid)
+			return fmt.Errorf("shared xattr too long for nid %d: %w", b.nid, ErrCorrupt)
 		}
 
 		name := prefix + string(sb[:xattrEntry.NameLen])
@@ -201,7 +209,7 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 			}
 
 			if len(xb) < disk.SizeXattrEntry {
-				return fmt.Errorf("xattr block too small for entry at pos %d for nid %d: %w", pos, b.nid, ErrInvalid)
+				return fmt.Errorf("xattr block too small for entry at pos %d for nid %d: %w", pos, b.nid, ErrCorrupt)
 			}
 		}
 
@@ -240,7 +248,7 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 					"xattr block too small for name of length %d for nid %d: %w",
 					xattrEntry.NameLen,
 					b.nid,
-					ErrInvalid,
+					ErrCorrupt,
 				)
 			}
 		}
@@ -264,7 +272,7 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 
 					copySize = len(xb)
 					if copySize == 0 {
-						return fmt.Errorf("empty xattr block while reading value: %w", ErrInvalid)
+						return fmt.Errorf("empty xattr block while reading value: %w", ErrCorrupt)
 					}
 				}
 

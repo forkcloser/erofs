@@ -8,6 +8,15 @@ commit `44d5e74`.
 
 ## [Unreleased]
 
+### Added
+
+- `ErrCorrupt`: every error the reader reports for a malformed image (an
+  inode, dirent, chunk index or xattr whose fields disagree with the format
+  or point outside the image, a bad superblock) now matches it, so a caller
+  can tell a bad image from a bad argument (`ErrInvalid` alone) and from a
+  failing reader (whose error is passed through untouched). `ErrCorrupt`
+  also matches `ErrInvalid`, which every such error reported before.
+
 ## [1.0.1] - 2026-10-05
 
 ### Fixed
