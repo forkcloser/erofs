@@ -224,7 +224,10 @@ The `fs.FS` from `Open` is safe for concurrent use; the files it opens and a
 
 Versions are signed annotated tags following semantic versioning, cut from
 `main`; the library has no build artefacts. Before tagging: `just lint` and
-`just test` green on CI, `CHANGELOG.md` moved from *Unreleased* to the
-version with the date, and the tag message naming the headline changes.
+`just test` green on CI, every merged pull request's title saying what
+changed for a user (the release notes are those titles, published with
+`gh release create vX.Y.Z --verify-tag --generate-notes`; one that breaks a
+consumer carries the `breaking` label), and the tag message naming the
+headline changes.
 Changes to exported names or documented behaviour after 1.0 are a major
 version.
