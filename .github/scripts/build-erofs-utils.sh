@@ -47,11 +47,7 @@ die() {
 fetch() {
     local url=$1 sum=$2 dest=$3 actual
     curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 3 --retry-all-errors -o "$dest" "$url"
-    if command -v sha256sum > /dev/null 2>&1; then
         actual=$(sha256sum "$dest" | awk '{print $1}')
-    else
-        actual=$(shasum -a 256 "$dest" | awk '{print $1}')
-    fi
     [ "$actual" = "$sum" ] || die "checksum mismatch for $url: want $sum, got $actual"
 }
 
