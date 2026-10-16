@@ -3,7 +3,7 @@
 Fork of <https://github.com/erofs/go-erofs> (`main`).
 
 - Forked from: [`44d5e74`](https://github.com/erofs/go-erofs/commit/44d5e74d4dfbc6c23985fa805cec66cc57fb8558), committed 2026-08-02
-- Reviewed through: [`03d68d8`](https://github.com/erofs/go-erofs/commit/03d68d88381cdf8133a0adcc248468d33aa457f5), reviewed 2026-10-05
+- Reviewed through: [`3772b1e`](https://github.com/erofs/go-erofs/commit/3772b1e68e1ac60347bfb379d3d81375c9f7ab02), reviewed 2026-10-16
 
 Every upstream commit after the fork point, through the reviewed one, is in
 exactly one of the tables below. A port is a commit of this repository,
@@ -14,6 +14,7 @@ adapted to the fork; nothing is merged from upstream.
 | Upstream commit | Here | What |
 | --- | --- | --- |
 | [`03d68d8`](https://github.com/erofs/go-erofs/commit/03d68d88381cdf8133a0adcc248468d33aa457f5) | [`37b9c5c`](https://github.com/forkcloser/erofs/commit/37b9c5cfad78d7a05d426600a63b902679c1bcac) | `system.posix_acl_*` xattr prefixes lose their trailing dot |
+| [`3772b1e`](https://github.com/erofs/go-erofs/commit/3772b1e68e1ac60347bfb379d3d81375c9f7ab02) | [`270909d`](https://github.com/forkcloser/erofs/commit/270909d373edbddaff68b8599c19bbf04b8b0f83) | `WithNoInlineData` stores every regular file in whole blocks (`-E ^inline_data`) |
 
 ## Not incorporated
 
@@ -47,3 +48,4 @@ adapted to the fork; nothing is merged from upstream.
 | A structure outside a complete image is `ErrCorrupt`, not the reader's end of file | https://github.com/forkcloser/erofs/pull/131 |
 | A flat file's blocks are placed through the device table, as the kernel places them | https://github.com/forkcloser/erofs/pull/132 |
 | The writer refuses what its reader and the kernel refuse (symlink targets over 4095 bytes or with a NUL, names over 255 bytes, empty or bare-prefix xattr names, from the API and from `CopyFrom` alike), and `Writer.Stat` reads an entry back before `Close` with its `Stat` and accessors | https://github.com/forkcloser/erofs/pull/135 |
+| The writer stamps the superblock checksum (`SB_CHKSUM`), as `mkfs.erofs` does by default, over the span the kernel verifies | https://github.com/forkcloser/erofs/pull/138 |
