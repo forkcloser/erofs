@@ -22,6 +22,22 @@ golangci:
         - path: ^internal/erofstest/
           linters:
             - mnd
+        # internal/corpus is the same kind of test support: the described
+        # tree's sizes, ids, modes, times, names and option strings are
+        # fixture data, what mnd and goconst already leave alone in a
+        # _test.go file.
+        - path: ^internal/corpus/
+          linters:
+            - mnd
+            - goconst
+        # internal/erofsspec is the reference reader of the on-disk format:
+        # its literals are the format's field offsets, widths and bit
+        # positions in the specification's shape (erofs_fs.h), each cited
+        # where it is read; a named constant per offset would say less than
+        # the struct it is read from.
+        - path: ^internal/erofsspec/
+          linters:
+            - mnd
     settings:
       wrapcheck:
         # A list here replaces wrapcheck's own, so its defaults come first.

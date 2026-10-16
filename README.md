@@ -31,6 +31,38 @@ rather than by allocation, so fewer allocations there buy little wall time.
 
 Requires Go 1.26.
 
+## Assurance
+
+The reader is held to a reference reader of the on-disk format
+(`internal/erofsspec`), written from the kernel's `erofs_fs.h` and the rules
+its reader applies (`super.c`, `inode.c`, `dir.c`, `namei.c`, `xattr.c`,
+`data.c`), sharing no code with the package. The reference is anchored first:
+it parses images built by the pinned `mkfs.erofs` from a described tree back
+to the tree, field for field. Committed under `internal/corpus/testdata` with
+a digest manifest, so that every CI lane judges the same bytes: 17 such images
+(block sizes 512, 1024, 4096 and 16384, compact and extended inodes, inline
+and plain data, chunk maps as block arrays and as indexes, a blob device, long
+xattr prefixes, no checksum, the dot-omitted layout) and 5 from a small
+assembler for the states `mkfs.erofs` never writes from a tar (shared xattrs,
+a header-only xattr body, a flat file at the null address, an xattr name under
+index 0). Where `mkfs.erofs` is present, the committed images are rebuilt,
+read back to the tree and passed to `fsck.erofs`, and under the build the
+manifest names (`erofs-utils` 1.9.4 on Darwin) compared byte for byte; the
+full tree is built under the whole option matrix, 30 sets over every block
+size from 512 to 16384.
+
+Over that corpus, and over the writer's own images at the block sizes
+`mkfs.erofs` refuses, `Open` serves what the reference reads: every `Lstat`
+and `Stat` field and accessor, `DataRange` against the reference's extents,
+every read path, `ReadDir` and `ReadDirFile`, `ReadLink` and `Stat` through
+links. Over single-byte edits and truncations of four small images (every one
+of them in the full sweep, an opt-in for a local run), the reader's verdict
+is the kernel's: a sound image reads to the same tree, a
+corrupt or truncated one is refused as `ErrCorrupt`, an unsupported one as
+`ErrNotImplemented` or `ErrCorrupt`, with the documented divergences named in
+the test. The defects the differential found in the reader are listed in the
+commit that added `contract_test.go`.
+
 ## Features
 
 - **Read** EROFS images through Go's `fs.FS` interface
