@@ -58,6 +58,10 @@ const (
 	// FeatureCompatSBChksum says the superblock carries a CRC-32C of its
 	// block in Checksum (EROFS_FEATURE_COMPAT_SB_CHKSUM).
 	FeatureCompatSBChksum = 0x00000001
+	// FeatureCompatIshareXattrs says IshareXattrPrefixID names a long xattr
+	// prefix; the kernel refuses the superblock when the id is not below
+	// XattrPrefixCount (EROFS_FEATURE_COMPAT_ISHARE_XATTRS).
+	FeatureCompatIshareXattrs = 0x00000020
 	// NullAddr is the start block of a flat-plain inode with no data: the
 	// kernel maps such a file as a hole (EROFS_NULL_ADDR, 32-bit mode).
 	NullAddr = 0xFFFFFFFF
@@ -71,30 +75,31 @@ const (
 // SuperBlock represents the EROFS on-disk superblock.
 // See: https://docs.kernel.org/filesystems/erofs.html#on-disk-layout
 type SuperBlock struct {
-	MagicNumber      uint32
-	Checksum         uint32
-	FeatureCompat    uint32
-	BlkSizeBits      uint8
-	ExtSlots         uint8
-	RootNid          uint16
-	Inos             uint64
-	BuildTime        uint64
-	BuildTimeNs      uint32
-	Blocks           uint32
-	MetaBlkAddr      uint32
-	XattrBlkAddr     uint32
-	UUID             [16]uint8
-	VolumeName       [16]uint8
-	FeatureIncompat  uint32
-	ComprAlgs        uint16
-	ExtraDevices     uint16
-	DevtSlotOff      uint16
-	DirBlkBits       uint8
-	XattrPrefixCount uint8
-	XattrPrefixStart uint32
-	PackedNid        uint64 // Nid of the special "packed" inode for shared data/prefixes
-	XattrFilterRes   uint8
-	Reserved         [23]uint8
+	MagicNumber         uint32
+	Checksum            uint32
+	FeatureCompat       uint32
+	BlkSizeBits         uint8
+	ExtSlots            uint8
+	RootNid             uint16
+	Inos                uint64
+	BuildTime           uint64
+	BuildTimeNs         uint32
+	Blocks              uint32
+	MetaBlkAddr         uint32
+	XattrBlkAddr        uint32
+	UUID                [16]uint8
+	VolumeName          [16]uint8
+	FeatureIncompat     uint32
+	ComprAlgs           uint16
+	ExtraDevices        uint16
+	DevtSlotOff         uint16
+	DirBlkBits          uint8
+	XattrPrefixCount    uint8
+	XattrPrefixStart    uint32
+	PackedNid           uint64 // Nid of the special "packed" inode for shared data/prefixes
+	XattrFilterRes      uint8
+	IshareXattrPrefixID uint8
+	Reserved            [22]uint8
 }
 
 // InodeCompact represents the 32-byte on-disk compact inode.
@@ -297,7 +302,8 @@ func (s *SuperBlock) Marshal(b []byte) {
 	binary.LittleEndian.PutUint32(b[92:96], s.XattrPrefixStart)
 	binary.LittleEndian.PutUint64(b[96:104], s.PackedNid)
 	b[104] = s.XattrFilterRes
-	copy(b[105:128], s.Reserved[:])
+	b[105] = s.IshareXattrPrefixID
+	copy(b[106:128], s.Reserved[:])
 }
 
 // Unmarshal decodes a superblock from b, which must be at least
@@ -327,7 +333,8 @@ func (s *SuperBlock) Unmarshal(b []byte) {
 	s.XattrPrefixStart = binary.LittleEndian.Uint32(b[92:96])
 	s.PackedNid = binary.LittleEndian.Uint64(b[96:104])
 	s.XattrFilterRes = b[104]
-	copy(s.Reserved[:], b[105:128])
+	s.IshareXattrPrefixID = b[105]
+	copy(s.Reserved[:], b[106:128])
 }
 
 // Marshal encodes the device slot into b, which must be at least
