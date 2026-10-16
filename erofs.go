@@ -1068,6 +1068,13 @@ func (img *image) loadAt(addr, size int64) (*block, error) {
 	if size <= 0 {
 		return nil, fmt.Errorf("failed to read %d bytes at %d: %w", size, addr, ErrCorrupt)
 	}
+	// So is a structure that starts outside the image (a shared xattr id, a
+	// directory block): with the image's extent known, that is corruption,
+	// not the reader's end of file. A structure that starts inside and runs
+	// past the end is still read short, as an inode in the final bytes is.
+	if addr < 0 || (img.size > 0 && addr >= img.size) {
+		return nil, fmt.Errorf("structure at %d lies outside the %d byte image: %w", addr, img.size, ErrCorrupt)
+	}
 
 	b := img.getBlock()
 
