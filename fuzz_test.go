@@ -3,6 +3,7 @@ package erofs_test
 import (
 	"archive/tar"
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -23,12 +24,13 @@ import (
 // tree shapes by seven operations and one target per writer field, are
 // folded into these three.
 
-// FuzzReaderEdits: a committed small image with up to two byte edits and a
-// truncation. The reader's verdict on it (the tree it reads, or the class
-// of its refusal) is the reference's, under the differential's rules in
-// contract_test.go; a panic is a verdict of its own and never agrees.
+// FuzzReaderEdits: a committed image, the four small ones and the tree at
+// 512, with up to two byte edits and a truncation. The reader's verdict on
+// it (the tree it reads, or the class of its refusal) is the reference's,
+// under the differential's rules in contract_test.go; a panic is a verdict
+// of its own and never agrees.
 func FuzzReaderEdits(f *testing.F) {
-	images := smallImages(f)
+	images := editImages(f)
 
 	for i, im := range images {
 		// The seeds are the sweep's kinds of edit: the superblock's
@@ -39,6 +41,20 @@ func FuzzReaderEdits(f *testing.F) {
 		f.Add(uint8(i), uint32(1152), byte(0x7f), uint32(1152+4), byte(0x01), uint32(0))
 		f.Add(uint8(i), uint32(len(im.Img)-1), byte(0), uint32(0), byte(0), uint32(0))
 		f.Add(uint8(i), uint32(0), byte(0), uint32(0), byte(0), uint32(min(len(im.Img), 2048)))
+
+		// And the directory blocks' own edges: the first byte of the first
+		// and of the last name of a block zeroed (the last name then has
+		// length zero, a bogus dirent to dir.c's erofs_fill_dentries; the
+		// first keeps its length with a NUL inside) and a cut inside a
+		// directory's second block.
+		names, cuts := direntEdges(f, im)
+		for _, off := range names {
+			f.Add(uint8(i), off, byte(0), uint32(0), byte(0), uint32(0))
+		}
+
+		for _, cut := range cuts {
+			f.Add(uint8(i), uint32(0), byte(0), uint32(0), byte(0), cut)
+		}
 	}
 
 	f.Fuzz(func(t *testing.T, which uint8, off1 uint32, b1 byte, off2 uint32, b2 byte, truncate uint32) {
@@ -72,23 +88,81 @@ func FuzzReaderEdits(f *testing.F) {
 	})
 }
 
-// smallImages are the committed images of the small tree, the sweep's.
-func smallImages(tb testing.TB) []corpus.Image {
+// editImages are the committed images of the small tree, the sweep's, and
+// the tree at 512 for its many-block directory.
+func editImages(tb testing.TB) []corpus.Image {
 	tb.Helper()
 
 	var out []corpus.Image
 
 	for _, im := range corpus.Committed(tb) {
-		if strings.HasPrefix(im.Name, "small-") {
+		if strings.HasPrefix(im.Name, "small-") || im.Name == "b512" {
 			out = append(out, im)
 		}
 	}
 
-	if len(out) == 0 {
-		tb.Fatal("no small committed image")
+	if len(out) < 2 {
+		tb.Fatal("the committed small images and b512 are missing")
 	}
 
 	return out
+}
+
+// direntEdges finds, through the reference, the first byte of the first
+// and of the last name in every directory block of an image, and a point
+// inside the second block of every directory that has one. A dirent is
+// twelve bytes, its nameoff at offset 8 (erofs_fs.h, erofs_dirent); the
+// first nameoff, over twelve, counts the block's entries.
+func direntEdges(tb testing.TB, im corpus.Image) (names, cuts []uint32) {
+	tb.Helper()
+
+	ref := parseImage(tb, im)
+	bs := int64(ref.Super.BlockSize)
+
+	err := ref.Walk(func(e erofsspec.Entry) error {
+		if !e.Inode.IsDir() {
+			return nil
+		}
+
+		extents, err := ref.Extents(e.Inode)
+		if err != nil {
+			return err
+		}
+
+		for _, x := range extents {
+			if x.Hole || x.Device != 0 {
+				continue
+			}
+
+			if x.Length > bs {
+				cuts = append(cuts, uint32(x.Physical+bs+7))
+			}
+
+			for off := x.Physical; off < x.Physical+x.Length; off += bs {
+				blk := im.Img[off:min(off+bs, x.Physical+x.Length)]
+				if len(blk) < 12 {
+					continue
+				}
+
+				first := binary.LittleEndian.Uint16(blk[8:])
+				count := int(first) / 12
+
+				if count == 0 || int(first) >= len(blk) {
+					continue
+				}
+
+				last := binary.LittleEndian.Uint16(blk[(count-1)*12+8:])
+				names = append(names, uint32(off)+uint32(first), uint32(off)+uint32(last))
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		tb.Fatalf("%s: %v", im.Name, err)
+	}
+
+	return names, cuts
 }
 
 // pathImage is an image FuzzReaderPaths looks paths up in.

@@ -612,8 +612,10 @@ func checkFileReads(t *testing.T, fsys fs.FS, name string, want []byte, bs int) 
 
 	var buf bytes.Buffer
 
-	if _, cerr := io.Copy(&buf, f); cerr != nil || !bytes.Equal(buf.Bytes(), want) {
-		t.Errorf("%s: io.Copy %d bytes, %v, want %d", name, buf.Len(), cerr, len(want))
+	// io.Copy takes the file's WriteTo; the count it returns is the bytes
+	// written, which the inherited tests never read.
+	if n, cerr := io.Copy(&buf, f); cerr != nil || n != int64(len(want)) || !bytes.Equal(buf.Bytes(), want) {
+		t.Errorf("%s: io.Copy %d bytes (%d returned), %v, want %d", name, buf.Len(), n, cerr, len(want))
 	}
 
 	if cerr := f.Close(); cerr != nil {
@@ -639,8 +641,9 @@ func checkFileReads(t *testing.T, fsys fs.FS, name string, want []byte, bs int) 
 
 	buf.Reset()
 
-	if _, cerr := io.Copy(&buf, f); cerr != nil || !bytes.Equal(slices.Concat(head, buf.Bytes()), want) {
-		t.Errorf("%s: io.Copy after %d bytes: %d bytes, %v", name, k, buf.Len(), cerr)
+	n, cerr := io.Copy(&buf, f)
+	if cerr != nil || n != int64(len(want)-k) || !bytes.Equal(slices.Concat(head, buf.Bytes()), want) {
+		t.Errorf("%s: io.Copy after %d bytes: %d bytes (%d returned), %v", name, k, buf.Len(), n, cerr)
 	}
 
 	_ = f.Close()

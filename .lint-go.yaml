@@ -75,10 +75,3 @@ golangci:
           # os errors are *PathError and *LinkError: the operation and the
           # path are already in them.
           - os
-
-nilaway:
-  exclude-errors-in-files:
-    # Slicing the result of a ReadDir whose error the fuzz target deliberately
-    # ignores: a nil slice bounded by min(len, 16) cannot panic. NilAway has no
-    # per-line directive, so the whole file is excluded.
-    - erofs_fuzz_test.go
