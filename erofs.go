@@ -52,6 +52,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"io/fs"
 	"math"
@@ -139,6 +140,14 @@ type Stat struct {
 	Nlink   uint64
 	Xattrs  map[string]string
 }
+
+const (
+	// checksumEnd is the offset of the first checksummed byte in the
+	// superblock: after the magic and the checksum field.
+	checksumEnd = 8
+	// superblockChecksumSeed is the kernel's CRC-32C seed for the superblock.
+	superblockChecksumSeed = 0x5045B54A
+)
 
 // holeOffset is the sentinel value for DataRange.Offset that marks a hole
 // (a sparse region of zeros) rather than backed device data.
@@ -248,6 +257,12 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 	// the largest supported page size of aarch64 platforms.
 	if i.sb.BlkSizeBits < 9 || i.sb.BlkSizeBits > 16 {
 		return nil, fmt.Errorf("unsupported block size bits %d: %w", i.sb.BlkSizeBits, ErrInvalidSuperblock)
+	}
+
+	// Before the feature bits: a damaged superblock is corrupt, not a
+	// format this reader lacks.
+	if err = verifySuperblockChecksum(r, &i.sb); err != nil {
+		return nil, err
 	}
 
 	unknownFeat := i.sb.FeatureIncompat &^ disk.FeatureIncompatAll
@@ -408,7 +423,13 @@ func (img *image) Stat(name string) (fs.FileInfo, error) {
 
 	f := &file{img: img, name: basename, nid: nid, ftype: ftype}
 
-	return f.statInfo()
+	fi, err := f.statInfo()
+	if err != nil {
+		// A nil interface, not a typed nil: fs.Lstat's contract.
+		return nil, err
+	}
+
+	return fi, nil
 }
 
 // ReadFile reads the named file and returns its contents.
@@ -522,7 +543,52 @@ func (img *image) Lstat(name string) (fs.FileInfo, error) {
 
 	f := &file{img: img, name: basename, nid: nid, ftype: ftype}
 
-	return f.statInfo()
+	fi, err := f.statInfo()
+	if err != nil {
+		// A nil interface, not a typed nil: fs.Lstat's contract.
+		return nil, err
+	}
+
+	return fi, nil
+}
+
+// verifySuperblockChecksum holds the superblock to its CRC-32C when the
+// image carries one. The kernel's rule (erofs_superblock_csum_verify): the
+// seed is 0x5045B54A, the data runs from the byte after the checksum field
+// to the end of the first block, a block larger than the superblock offset
+// losing that offset first; the magic and the checksum itself are skipped.
+func verifySuperblockChecksum(r io.ReaderAt, sb *disk.SuperBlock) error {
+	if sb.FeatureCompat&disk.FeatureCompatSBChksum == 0 {
+		return nil
+	}
+
+	length := 1 << sb.BlkSizeBits
+	if length > disk.SuperBlockOffset {
+		length -= disk.SuperBlockOffset
+	}
+
+	length -= checksumEnd
+
+	data := make([]byte, length)
+
+	n, err := r.ReadAt(data, disk.SuperBlockOffset+checksumEnd)
+	// A failing reader's error passes through; only a short read is the
+	// image's fault.
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("failed to read the superblock's block: %w", err)
+	}
+
+	if n != length {
+		return fmt.Errorf("superblock block short of its checksummed length: %w", ErrCorrupt)
+	}
+
+	// Go's CRC-32 pre- and post-inverts; the kernel's crc32c does neither.
+	got := ^crc32.Update(^uint32(superblockChecksumSeed), crc32.MakeTable(crc32.Castagnoli), data)
+	if got != sb.Checksum {
+		return fmt.Errorf("superblock checksum %#08x; want %#08x: %w", got, sb.Checksum, ErrCorrupt)
+	}
+
+	return nil
 }
 
 // start physical offset of the separate metadata zone.
@@ -635,29 +701,46 @@ const maxReadFileSize = 128 << 20 // 128 MiB
 
 // mapDev resolves map->m_bdev and map->m_pa mapping for go-erofs.
 // It works similarly to erofs_map_dev in the linux kernel.
-//
-//nolint:gocognit // the device lookup as erofs_map_dev does it: by id, then by mapped range, then the image
 func (img *image) mapDev(deviceID uint16, pa int64) (io.ReaderAt, int64, error) {
-	if deviceID > 0 {
-		if int(deviceID) > len(img.devices) {
-			return nil, 0, fmt.Errorf("invalid device id %d: %w", deviceID, ErrCorrupt)
-		}
-
-		return img.devices[deviceID-1].device, pa, nil
+	dev, off, err := img.locate(deviceID, pa)
+	if err != nil {
+		return nil, 0, err
 	}
 
-	if len(img.devices) > 0 {
-		for _, dev := range img.devices {
-			if dev.mappedBlkAddr == 0 {
-				continue
-			}
+	if dev == 0 {
+		return img.meta, off, nil
+	}
 
-			startOff := int64(dev.mappedBlkAddr) << img.sb.BlkSizeBits
-			length := int64(dev.blocks) << img.sb.BlkSizeBits
+	return img.devices[dev-1].device, off, nil
+}
 
-			if pa >= startOff && pa < startOff+length {
-				return dev.device, pa - startOff, nil
-			}
+// locate turns a chunk's (device id, physical address) into the device the
+// bytes are on and their offset there, as erofs_map_dev does: an explicit
+// id names its device; on the primary device, an address inside an extra
+// device's mapped range (its uniaddr, the slot's mapped_blkaddr, and its
+// block count) is that device's, and the rest is the image's own, bounded.
+// DataRange exposes the result publicly, so both readers and the ranges go
+// through here and agree on where data lives.
+func (img *image) locate(deviceID uint16, pa int64) (uint16, int64, error) {
+	if deviceID > 0 {
+		if int(deviceID) > len(img.devices) {
+			return 0, 0, fmt.Errorf("invalid device id %d: %w", deviceID, ErrCorrupt)
+		}
+
+		return deviceID, pa, nil
+	}
+
+	for i, dev := range img.devices {
+		if dev.mappedBlkAddr == 0 {
+			continue
+		}
+
+		startOff := int64(dev.mappedBlkAddr) << img.sb.BlkSizeBits
+		length := int64(dev.blocks) << img.sb.BlkSizeBits
+
+		if pa >= startOff && pa < startOff+length {
+			// #nosec G115 -- the device count is a uint16 on disk
+			return uint16(i + 1), pa - startOff, nil
 		}
 	}
 
@@ -668,10 +751,10 @@ func (img *image) mapDev(deviceID uint16, pa int64) (io.ReaderAt, int64, error) 
 	// panics — and unlike readInfo, neither loadBlock nor openDirect has a
 	// recover() in between. A device's extent is not knowable here.
 	if pa < 0 || (img.size > 0 && pa >= img.size) {
-		return nil, 0, fmt.Errorf("physical address %d is outside the image: %w", pa, ErrCorrupt)
+		return 0, 0, fmt.Errorf("physical address %d is outside the image: %w", pa, ErrCorrupt)
 	}
 
-	return img.meta, pa, nil
+	return 0, pa, nil
 }
 
 // blockSize returns the filesystem block size.
@@ -712,7 +795,12 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 	switch ino.inodeLayout {
 	case disk.LayoutFlatPlain:
 		// Data is contiguous starting at dataBlkAddr. An address outside the
-		// image is left to the block reader, which reports it.
+		// image is left to the block reader, which reports it; so is the
+		// null address, a hole.
+		if ino.inodeData == disk.NullAddr {
+			return nil
+		}
+
 		dataOffset := int64(ino.inodeData) << img.sb.BlkSizeBits
 		if img.checkImageRange(dataOffset, ino.size) != nil {
 			return nil
@@ -1001,6 +1089,17 @@ func (img *image) loadAt(addr, size int64) (*block, error) {
 	return b, nil
 }
 
+// holeBlock is a block of zeros over [blockOffset, blockEnd), the bounds
+// already checked to lie within one block.
+func (img *image) holeBlock(blockOffset, blockEnd int) *block {
+	b := img.getBlock()
+	clear(b.buf[blockOffset:blockEnd])
+	b.offset = int32(blockOffset) // #nosec G115 -- checked by the caller: in [0, blockSize), at most 1<<16
+	b.end = int32(blockEnd)       // #nosec G115 -- checked by the caller: at most blockSize, at most 1<<16
+
+	return b
+}
+
 // loadBlock loads the block with the given data.
 //
 //nolint:gocognit // the block map on every read, one case per inode layout, as erofs_map_blocks
@@ -1022,13 +1121,29 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 
 	switch fi.inodeLayout {
 	case disk.LayoutFlatPlain:
-		// flat plain has no holes
-		addr = int64(int(fi.inodeData)+bn) << img.sb.BlkSizeBits
 		blockOffset = int(pos % int64(blockSize))
 
 		if bn == nblocks-1 {
 			blockEnd = int(fi.size - int64(bn)*int64(1<<img.sb.BlkSizeBits))
 		}
+		// The null address is the whole file as a hole, as the kernel maps
+		// it; the bounds are the same arithmetic over an untrusted size as
+		// the chunk case's, so the same check stands before them.
+		if fi.inodeData == disk.NullAddr {
+			if blockOffset < 0 || blockEnd > blockSize || blockOffset >= blockEnd {
+				return nil, fmt.Errorf(
+					"invalid block bounds [%d:%d] for nid %d: %w",
+					blockOffset,
+					blockEnd,
+					fi.nid,
+					ErrCorrupt,
+				)
+			}
+
+			return img.holeBlock(blockOffset, blockEnd), nil
+		}
+
+		addr = int64(int(fi.inodeData)+bn) << img.sb.BlkSizeBits
 	case disk.LayoutFlatInline:
 		// If on the last block, validate
 		if bn == nblocks-1 {
@@ -1153,13 +1268,7 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 		}
 
 		if addr == -1 {
-			// Null address: a hole, which reads as zeros.
-			b := img.getBlock()
-			clear(b.buf[blockOffset:blockEnd])
-			b.offset = int32(blockOffset) // #nosec G115 -- checked above: in [0, blockSize), at most 1<<16
-			b.end = int32(blockEnd)       // #nosec G115 -- checked above: at most blockSize, at most 1<<16
-
-			return b, nil
+			return img.holeBlock(blockOffset, blockEnd), nil
 		}
 
 		// Add block offset within chunk
@@ -1281,6 +1390,12 @@ func (img *image) linkTarget(nid uint64, name string) (string, error) {
 	buf := make([]byte, fi.size)
 	if err := readAll(f, buf); err != nil {
 		return "", err
+	}
+	// A target is a C string to the kernel: a NUL inside it is unreachable
+	// bytes, and a target of zeros (a flat-plain link at the null address,
+	// which the kernel reads as a hole) is the empty target refused above.
+	if bytes.IndexByte(buf, 0) >= 0 {
+		return "", fmt.Errorf("symlink target holds a NUL byte: %w", ErrCorrupt)
 	}
 
 	return string(buf), nil
@@ -1720,50 +1835,13 @@ func (b *file) readInfo() (ino *inode, err error) {
 	var xcnt uint16
 
 	format := binary.LittleEndian.Uint16(buf[:2])
+	// i_mode sits at the same offset in both inode sizes.
+	if err = checkInodeFormat(b.nid, format, binary.LittleEndian.Uint16(buf[4:6])); err != nil {
+		return nil, err
+	}
 
-	layout := uint8((format & disk.InodeFormatLayoutMask) >> 1)
-	if format&disk.InodeFormatExtended == 0 {
-		var di disk.InodeCompact
-		di.Unmarshal(buf)
-		b.info = &inode{
-			name:        b.name,
-			nid:         b.nid,
-			icsize:      disk.SizeInodeCompact,
-			inodeLayout: layout,
-			inodeData:   di.InodeData,
-			size:        int64(di.Size),
-			mode:        disk.EroFSModeToGoFileMode(di.Mode),
-			rawMode:     di.Mode,
-			uid:         uint32(di.UID),
-			gid:         uint32(di.GID),
-			nlink:       int(di.Nlink),
-			mtime:       b.img.sb.BuildTime,
-			mtimeNs:     b.img.sb.BuildTimeNs,
-		}
-		xcnt = di.XattrCount
-	} else {
-		if len(buf) < disk.SizeInodeExtended {
-			return nil, fmt.Errorf("extended inode %d truncated: %w", b.nid, ErrCorrupt)
-		}
-
-		var di disk.InodeExtended
-		di.Unmarshal(buf)
-		b.info = &inode{
-			name:        b.name,
-			nid:         b.nid,
-			icsize:      disk.SizeInodeExtended,
-			inodeLayout: layout,
-			inodeData:   di.InodeData,
-			size:        int64(di.Size), // #nosec G115 -- a size past 1<<63 wraps negative, rejected below
-			mode:        disk.EroFSModeToGoFileMode(di.Mode),
-			rawMode:     di.Mode,
-			uid:         di.UID,
-			gid:         di.GID,
-			nlink:       int(di.Nlink),
-			mtime:       di.Mtime,
-			mtimeNs:     di.MtimeNs,
-		}
-		xcnt = di.XattrCount
+	if b.info, xcnt, err = b.decodeInode(buf, format); err != nil {
+		return nil, err
 	}
 
 	// The dirent's file type and the inode's i_mode are two independent
@@ -1792,10 +1870,114 @@ func (b *file) readInfo() (ino *inode, err error) {
 	}
 
 	if xcnt > 0 {
-		b.info.xsize = int(xcnt-1)*disk.SizeXattrEntry + disk.SizeXattrBodyHeader
+		xsize, err := xattrBodySize(b.nid, xcnt)
+		if err != nil {
+			return nil, err
+		}
+
+		b.info.xsize = xsize
 	}
 
 	return b.info, nil
+}
+
+// decodeInode decodes the compact or extended inode in buf, whose i_format
+// is format, and returns it with its i_xattr_icount.
+func (b *file) decodeInode(buf []byte, format uint16) (*inode, uint16, error) {
+	layout := uint8((format & disk.InodeFormatLayoutMask) >> 1)
+	if format&disk.InodeFormatExtended == 0 {
+		var di disk.InodeCompact
+		di.Unmarshal(buf)
+
+		return &inode{
+			name:        b.name,
+			nid:         b.nid,
+			icsize:      disk.SizeInodeCompact,
+			inodeLayout: layout,
+			inodeData:   di.InodeData,
+			size:        int64(di.Size),
+			mode:        disk.EroFSModeToGoFileMode(di.Mode),
+			rawMode:     di.Mode,
+			uid:         uint32(di.UID),
+			gid:         uint32(di.GID),
+			nlink:       int(di.Nlink),
+			mtime:       b.img.sb.BuildTime,
+			mtimeNs:     b.img.sb.BuildTimeNs,
+		}, di.XattrCount, nil
+	}
+
+	if len(buf) < disk.SizeInodeExtended {
+		return nil, 0, fmt.Errorf("extended inode %d truncated: %w", b.nid, ErrCorrupt)
+	}
+
+	var di disk.InodeExtended
+	di.Unmarshal(buf)
+
+	if err := checkHighBlockBits(b.nid, di.Reserved); err != nil {
+		return nil, 0, err
+	}
+
+	return &inode{
+		name:        b.name,
+		nid:         b.nid,
+		icsize:      disk.SizeInodeExtended,
+		inodeLayout: layout,
+		inodeData:   di.InodeData,
+		size:        int64(di.Size), // #nosec G115 -- a size past 1<<63 wraps negative, rejected by the caller
+		mode:        disk.EroFSModeToGoFileMode(di.Mode),
+		rawMode:     di.Mode,
+		uid:         di.UID,
+		gid:         di.GID,
+		nlink:       int(di.Nlink),
+		mtime:       di.Mtime,
+		mtimeNs:     di.MtimeNs,
+	}, di.XattrCount, nil
+}
+
+// checkHighBlockBits refuses a nonzero i_nb on an extended inode: the start
+// block's (or block count's) high 16 bits, which the kernel always reads
+// there, a 48-bit address this reader does not implement and would
+// otherwise read at its low 32 bits.
+func checkHighBlockBits(nid uint64, inb uint16) error {
+	if inb != 0 {
+		return fmt.Errorf("inode %d: i_nb %#x (48-bit layout): %w", nid, inb, ErrNotImplemented)
+	}
+
+	return nil
+}
+
+// xattrBodySize is the on-disk size of an inode's xattr body from its
+// i_xattr_icount. A count of one is a body of only its header, which the
+// kernel refuses as not supported yet (erofs_init_inode_xattrs), as does
+// fsck.erofs.
+func xattrBodySize(nid uint64, xcnt uint16) (int, error) {
+	if xcnt == 1 {
+		return 0, fmt.Errorf("inode %d: xattr body of only its header: %w", nid, ErrNotImplemented)
+	}
+
+	return int(xcnt-1)*disk.SizeXattrEntry + disk.SizeXattrBodyHeader, nil
+}
+
+// checkInodeFormat refuses an i_format this reader cannot follow. A bit
+// the kernel does not define is a format it refuses (EOPNOTSUPP). Bit 4 is
+// judged by the inode: on a directory it omits the "." dirent, which this
+// reader never relies on; on a compact non-directory inode it is nlink-1,
+// the 48-bit layout's start block high bits in the nlink field, not
+// implemented here and misread if taken as clear; on an extended
+// non-directory inode the kernel ignores it, and so does this.
+func checkInodeFormat(nid uint64, format, mode uint16) error {
+	if format&^disk.InodeFormatAll != 0 {
+		return fmt.Errorf("inode %d: i_format %#x: %w", nid, format, ErrNotImplemented)
+	}
+
+	compact := format&disk.InodeFormatExtended == 0
+	directory := mode&disk.StatTypeMask == disk.StatTypeDir
+
+	if compact && !directory && format&disk.InodeFormatNlink1 != 0 {
+		return fmt.Errorf("inode %d: i_format %#x nlink-1 (48-bit layout): %w", nid, format, ErrNotImplemented)
+	}
+
+	return nil
 }
 
 // statInfo reads the inode and builds a fileInfo with full stat data
@@ -1856,6 +2038,23 @@ func (b *file) statInfo() (*fileInfo, error) {
 	return fi, nil
 }
 
+// flatPlainRange is a flat-plain file's one range. The null address is a
+// file of zeros (erofs_map_blocks leaves it unmapped); mkfs.erofs writes it
+// for every file without a whole block, so it is one bit away from every
+// inline file.
+func (b *file) flatPlainRange(ino *inode, dst []DataRange) ([]DataRange, error) {
+	if ino.inodeData == disk.NullAddr {
+		return append(dst, DataRange{Offset: holeOffset, Size: ino.size}), nil
+	}
+
+	dataOffset := int64(ino.inodeData) << b.img.sb.BlkSizeBits
+	if err := b.img.checkImageRange(dataOffset, ino.size); err != nil {
+		return nil, err
+	}
+
+	return append(dst, DataRange{Device: 0, Offset: dataOffset, Size: ino.size}), nil
+}
+
 // buildDataRanges computes the physical data ranges for a regular file.
 // buildDataRanges appends the file's ranges to dst, which lets a flat layout —
 // at most two ranges — be backed by the caller's own storage.
@@ -1867,12 +2066,7 @@ func (b *file) buildDataRanges(ino *inode, dst []DataRange) ([]DataRange, error)
 
 	switch ino.inodeLayout {
 	case disk.LayoutFlatPlain:
-		dataOffset := int64(ino.inodeData) << b.img.sb.BlkSizeBits
-		if err := b.img.checkImageRange(dataOffset, ino.size); err != nil {
-			return nil, err
-		}
-
-		return append(dst, DataRange{Device: 0, Offset: dataOffset, Size: ino.size}), nil
+		return b.flatPlainRange(ino, dst)
 	case disk.LayoutFlatInline:
 		// #nosec G115 -- readInfo bounded the nid through checkNid
 		inodeAddr := b.img.metaStartPos() + int64(ino.nid)*disk.SizeInodeCompact
@@ -1934,9 +2128,6 @@ const maxChunkIndexBytes = 64 << 20 // 64 MiB
 func (b *file) buildChunkDataRanges(ino *inode) []DataRange {
 	// #nosec G115 -- the chunk format is the low 16 bits of i_u, as the kernel's __le16 c.format reads it
 	chunkFmt := uint16(ino.inodeData)
-	if chunkFmt&disk.LayoutChunkFormatIndexes == 0 {
-		return nil
-	}
 	// 48-bit chunk addressing is not yet implemented; the null-chunk sentinel
 	// (blkLo == 0xFFFFFFFF) is only unambiguous in 32-bit address mode.
 	if chunkFmt&disk.LayoutChunkFormat48Bit != 0 {
@@ -1950,12 +2141,24 @@ func (b *file) buildChunkDataRanges(ino *inode) []DataRange {
 	// #nosec G115 -- readInfo bounded the nid through checkNid
 	inodeStart := b.img.metaStartPos() + int64(ino.nid)*disk.SizeInodeCompact
 
+	// The map is a four-byte block address per chunk, or an eight-byte index
+	// (device, block) aligned to eight, as erofs_map_chunks reads it; the
+	// block array names no device, so its chunks are on the primary one. The
+	// kernel aligns the array to four as well; inodes sit at multiples of
+	// 32 and the inode and xattr sizes are multiples of four, so it holds.
 	baseOffset := inodeStart + ino.flatDataOffset()
-	if baseOffset%8 != 0 {
-		baseOffset = (baseOffset + 7) & ^int64(7)
+	unit := 4
+	indexed := chunkFmt&disk.LayoutChunkFormatIndexes != 0
+
+	if indexed {
+		unit = disk.SizeChunkIndex
+
+		if baseOffset%8 != 0 {
+			baseOffset = (baseOffset + 7) & ^int64(7)
+		}
 	}
 
-	needed := int64(nchunks) * int64(disk.SizeChunkIndex)
+	needed := int64(nchunks) * int64(unit)
 	if !b.img.chunkIndexFits(baseOffset, needed) {
 		return nil
 	}
@@ -1974,9 +2177,16 @@ func (b *file) buildChunkDataRanges(ino *inode) []DataRange {
 			size = ino.size - int64(i)*chunkSize
 		}
 
-		off := i * disk.SizeChunkIndex
+		off := i * unit
 
-		blkLo := binary.LittleEndian.Uint32(idxBuf[off+4 : off+8])
+		var deviceID uint16
+
+		blkLo := binary.LittleEndian.Uint32(idxBuf[off : off+4])
+		if indexed {
+			deviceID = binary.LittleEndian.Uint16(idxBuf[off+2:off+4]) & b.img.deviceIDMask
+			blkLo = binary.LittleEndian.Uint32(idxBuf[off+4 : off+8])
+		}
+
 		if ^blkLo == 0 {
 			// Null/hole chunk: coalesce with a preceding hole if possible.
 			if len(ranges) > 0 && ranges[len(ranges)-1].Offset == holeOffset {
@@ -1989,12 +2199,18 @@ func (b *file) buildChunkDataRanges(ino *inode) []DataRange {
 		}
 
 		// 32-bit addressing only; see openDirect.
-		deviceID := binary.LittleEndian.Uint16(idxBuf[off+2:off+4]) & b.img.deviceIDMask
 		phys := uint64(blkLo)
 		// DataRange.Offset is public: a MetadataOnly consumer preads it
 		// against an external device, so an unrepresentable address must not
 		// reach it. Unlike readInfo, nothing here has a recover().
 		byteOffset, err := b.img.chunkAddr(phys)
+		if err != nil {
+			return nil
+		}
+
+		// The same translation the readers apply: an address on the primary
+		// device inside an extra device's mapped range is that device's.
+		deviceID, byteOffset, err = b.img.locate(deviceID, byteOffset)
 		if err != nil {
 			return nil
 		}
