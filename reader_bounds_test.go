@@ -28,8 +28,8 @@ func TestReaderSharedXattrOutsideImage(t *testing.T) {
 		file string
 		at   int
 	}{
-		{"testdata/assembled-shared.erofs", 4271},
-		{"testdata/assembled-shared-512-extended.erofs", 1775},
+		{"internal/corpus/testdata/assembled-shared.erofs", 4271},
+		{"internal/corpus/testdata/assembled-shared-512-extended.erofs", 1775},
 	} {
 		img, err := os.ReadFile(tc.file)
 		if err != nil {

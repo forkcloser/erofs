@@ -440,7 +440,7 @@ func TestReaderFIFOHasNoDevice(t *testing.T) {
 func TestReaderBlockMapChunkRanges(t *testing.T) {
 	t.Parallel()
 
-	img, err := os.ReadFile("testdata/mkfs-small-chunk-512.erofs")
+	img, err := os.ReadFile("internal/corpus/testdata/small-chunk-512.erofs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,12 +539,12 @@ func rangesRead(t *testing.T, st fs.FileInfo, devices [][]byte) []byte {
 func TestReaderBlobDeviceRanges(t *testing.T) {
 	t.Parallel()
 
-	img, err := os.ReadFile("testdata/mkfs-small-blobdev-512.erofs")
+	img, err := os.ReadFile("internal/corpus/testdata/small-blobdev-512.erofs")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	blob, err := os.ReadFile("testdata/mkfs-small-blobdev-512.blob")
+	blob, err := os.ReadFile("internal/corpus/testdata/small-blobdev-512.blob")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -625,12 +625,12 @@ func TestReaderBlobDeviceRanges(t *testing.T) {
 func TestReaderFlatDataOnMappedDevice(t *testing.T) {
 	t.Parallel()
 
-	img, err := os.ReadFile("testdata/mkfs-small-blobdev-512.erofs")
+	img, err := os.ReadFile("internal/corpus/testdata/small-blobdev-512.erofs")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	blob, err := os.ReadFile("testdata/mkfs-small-blobdev-512.blob")
+	blob, err := os.ReadFile("internal/corpus/testdata/small-blobdev-512.blob")
 	if err != nil {
 		t.Fatal(err)
 	}
