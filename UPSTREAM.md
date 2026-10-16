@@ -43,3 +43,6 @@ adapted to the fork; nothing is merged from upstream.
 | Three truncations refused with `ErrInvalid`: an image past 2³² blocks, an `Rdev` wider than 32 bits, an `i_size` at or past 2⁶³ | https://github.com/forkcloser/erofs/pull/95 |
 | `mkfs` refuses a host device number wider than `i_rdev` | https://github.com/forkcloser/erofs/pull/96 |
 | A malformed image matches `ErrCorrupt` | https://github.com/forkcloser/erofs/pull/108 |
+| The reader follows the kernel where an image departs from `mkfs.erofs`: the superblock checksum is verified before the feature bits; a flat-plain file at the null address reads as zeros; reserved `i_format` bits, the nlink-1 bit on a compact file, a nonzero `i_nb` on an extended inode and a header-only xattr body are `ErrNotImplemented`; `Stat.Rdev` of a FIFO or socket is zero; `DataRange` covers block-array chunk maps and names the device a mapped address lands on; `Lstat` and `Stat` return a nil `FileInfo` beside their error | https://github.com/forkcloser/erofs/pull/130 |
+| A structure outside a complete image is `ErrCorrupt`, not the reader's end of file | https://github.com/forkcloser/erofs/pull/131 |
+| A flat file's blocks are placed through the device table, as the kernel places them | https://github.com/forkcloser/erofs/pull/132 |
