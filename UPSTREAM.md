@@ -49,3 +49,5 @@ adapted to the fork; nothing is merged from upstream.
 | A flat file's blocks are placed through the device table, as the kernel places them | https://github.com/forkcloser/erofs/pull/132 |
 | The writer refuses what its reader and the kernel refuse (symlink targets over 4095 bytes or with a NUL, names over 255 bytes, empty or bare-prefix xattr names, from the API and from `CopyFrom` alike), and `Writer.Stat` reads an entry back before `Close` with its `Stat` and accessors | https://github.com/forkcloser/erofs/pull/135 |
 | The writer stamps the superblock checksum (`SB_CHKSUM`), as `mkfs.erofs` does by default, over the span the kernel verifies | https://github.com/forkcloser/erofs/pull/138 |
+| The reader refuses, as the kernel refuses the mount, an ishare xattr prefix id (`EROFS_FEATURE_COMPAT_ISHARE_XATTRS`) at or past the long xattr prefix count | https://github.com/forkcloser/erofs/pull/143 |
+| `cmd/erofs-cli`, upstream's debugging dump of an image's tree, is removed | https://github.com/forkcloser/erofs/pull/145 |
