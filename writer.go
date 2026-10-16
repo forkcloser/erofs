@@ -44,11 +44,14 @@ type erofsWriter struct {
 	buildTimeNs uint32
 	devices     []uint64 // per-device block counts (one slot per entry)
 	blockSize   int
-	chunkBits   uint8                        // log2(chunkSize / blockSize); chunkSize = blockSize << chunkBits
-	copyBuf     []byte                       // reusable buffer for io.CopyBuffer
-	zeroBuf     []byte                       // blockSize-length zero buffer for padding
-	dirBuf      []byte                       // reusable scratch for one dirent block
-	inodeBuf    [disk.SizeInodeExtended]byte // scratch buffer for writeInode
+	// noInlineData keeps every regular file's data in whole blocks: no
+	// tail packed beside the inode.
+	noInlineData bool
+	chunkBits    uint8                        // log2(chunkSize / blockSize); chunkSize = blockSize << chunkBits
+	copyBuf      []byte                       // reusable buffer for io.CopyBuffer
+	zeroBuf      []byte                       // blockSize-length zero buffer for padding
+	dirBuf       []byte                       // reusable scratch for one dirent block
+	inodeBuf     [disk.SizeInodeExtended]byte // scratch buffer for writeInode
 }
 
 // inodeSize returns the on-disk inode header size for e.

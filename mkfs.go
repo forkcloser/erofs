@@ -35,6 +35,7 @@ type Writer struct {
 	out          io.WriteSeeker
 	closed       bool
 	blockSize    int    // 0 = unset, resolved to defaultBlockSize in Close
+	noInlineData bool   // from WithNoInlineData
 	buildTime    uint64 // from WithBuildTime or buildTimer
 	buildTimeNs  uint32
 	hasBuildTime bool
@@ -110,6 +111,7 @@ func Create(out io.WriteSeeker, opts ...CreateOpt) *Writer {
 		byPath:       map[string]*fsEntry{"/": root},
 		dataFile:     o.dataFile,
 		tempDir:      o.tempDir,
+		noInlineData: o.noInlineData,
 	}
 
 	if o.blockSize != 0 {
@@ -173,6 +175,16 @@ func Merge() CopyOpt {
 func WithBlockSize(n int) CreateOpt {
 	return func(o *createOptions) {
 		o.blockSize = n
+	}
+}
+
+// WithNoInlineData stores every regular file's data in whole, block-aligned
+// blocks instead of tail-packing the last partial block beside the inode
+// (mkfs.erofs's -E ^inline_data), which a DAX mount needs. Directories and
+// symlinks keep their inline data.
+func WithNoInlineData() CreateOpt {
+	return func(o *createOptions) {
+		o.noInlineData = true
 	}
 }
 
@@ -927,8 +939,9 @@ func (fsys *Writer) Close() error {
 		// chunk. Contiguous files still get a larger chunk size per entry via
 		// minChunkBits, where a single extent covers the whole file and there
 		// are no interior boundaries to lose.
-		chunkBits: 0,
-		zeroBuf:   make([]byte, fsys.blockSize),
+		chunkBits:    0,
+		noInlineData: fsys.noInlineData,
+		zeroBuf:      make([]byte, fsys.blockSize),
 	}
 
 	ew.planLayout(root)
@@ -1151,6 +1164,7 @@ type createOptions struct {
 	blockSize    int      // 0 = use default
 	dataFile     DataFile // external data file for metadata-only mode
 	tempDir      string   // temp directory for spool file
+	noInlineData bool     // from WithNoInlineData
 }
 
 // blockSizer may be implemented by an fs.FS to declare its block size.
