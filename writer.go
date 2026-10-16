@@ -426,6 +426,7 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 
 	sb := disk.SuperBlock{
 		MagicNumber:     disk.MagicNumber,
+		FeatureCompat:   disk.FeatureCompatSBChksum,
 		BlkSizeBits:     blkBits(w.blockSize),
 		RootNid:         uint16(w.rootNid), // #nosec G115 -- planLayout places the root first, at nid 0
 		Inos:            w.totalInodes,
@@ -456,6 +457,16 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 		off := disk.SuperBlockOffset + disk.SizeSuperBlock + i*disk.SizeDeviceSlot
 		devSlot.Marshal(sbArea[off:])
 	}
+	// Last, over the finished block: the checksum covers the device slots in
+	// that block and the padding after the superblock as well as its own
+	// fields, as mkfs.erofs writes it and the kernel verifies it. The area
+	// is at least the span long: a 512-byte block's span ends exactly at its
+	// 1536 bytes.
+	start := disk.SuperBlockOffset + checksumEnd
+	binary.LittleEndian.PutUint32(
+		sbArea[disk.SuperBlockOffset+4:],
+		superblockChecksum(sbArea[start:start+checksumSpan(sb.BlkSizeBits)]),
+	)
 
 	_, err := buf.Write(sbArea)
 

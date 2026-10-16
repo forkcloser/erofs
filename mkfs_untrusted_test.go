@@ -171,8 +171,11 @@ func TestUntrustedChunkSizeIsBounded(t *testing.T) {
 func TestUntrustedInodeCountIsBounded(t *testing.T) {
 	buf, _ := buildTamperableImage(t)
 
-	// sb.Inos sits at offset 16 within the superblock.
+	// sb.Inos sits at offset 16 within the superblock. The tamper leaves the
+	// superblock checksum stale; it is switched off so the bound under test,
+	// not the checksum, is what Open judges.
 	binary.LittleEndian.PutUint64(buf[disk.SuperBlockOffset+16:], 1<<62)
+	buf[disk.SuperBlockOffset+8] &^= disk.FeatureCompatSBChksum
 
 	img, err := Open(bytes.NewReader(buf))
 	if err != nil {
@@ -205,8 +208,10 @@ func TestUntrustedInodeCountIsBounded(t *testing.T) {
 func TestUntrustedBlockCountIsRejected(t *testing.T) {
 	buf, _ := buildTamperableImage(t)
 
-	// sb.Blocks sits at offset 36 within the superblock.
+	// sb.Blocks sits at offset 36 within the superblock. The checksum is
+	// switched off for the same reason as above.
 	binary.LittleEndian.PutUint32(buf[disk.SuperBlockOffset+36:], 0xFFFFFFFF)
+	buf[disk.SuperBlockOffset+8] &^= disk.FeatureCompatSBChksum
 
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
