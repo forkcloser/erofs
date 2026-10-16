@@ -234,7 +234,7 @@ func TestReaderInodeFormatBits(t *testing.T) {
 	}
 
 	if _, lerr := fs.Lstat(fsys, "a"); !errors.Is(lerr, erofs.ErrNotImplemented) {
-		t.Fatalf("nlink-1 on a compact file: %v; want ErrNotImplemented", err)
+		t.Fatalf("nlink-1 on a compact file: %v; want ErrNotImplemented", lerr)
 	}
 
 	fsys, err = erofs.Open(bytes.NewReader(withBit(img, extendedAt, disk.InodeFormatNlink1)))
@@ -611,5 +611,71 @@ func TestReaderBlobDeviceRanges(t *testing.T) {
 
 	if got, err := fs.ReadFile(fsys, "d/sub/e06"); err != nil || !bytes.Equal(got, blob[:1]) {
 		t.Fatalf("read of that chunk: %q, %v; want the blob's first byte %q", got, err, blob[:1])
+	}
+}
+
+// TestReaderFlatDataOnMappedDevice: a flat file's blocks are numbered on
+// the primary device, and a number inside an extra device's mapped range
+// is that device's, as erofs_map_dev places it and mkfs.erofs --blobdev
+// writes it; one past every device is corrupt, as is a range that runs off
+// the device's end. The image is the blob-device fixture with nid 48 (multi,
+// 3000 bytes) turned from chunk-based into a compact flat-plain inode whose
+// i_u names the block; the blob maps blocks 13 to 59.
+func TestReaderFlatDataOnMappedDevice(t *testing.T) {
+	t.Parallel()
+
+	img, err := os.ReadFile("testdata/mkfs-small-blobdev-512.erofs")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	blob, err := os.ReadFile("testdata/mkfs-small-blobdev-512.blob")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const at = 1536 // nid 48's inode
+
+	flat := func(block uint32) fs.FS {
+		bad := bytes.Clone(img)
+		bad[at] = 0 // compact, flat-plain
+		binary.LittleEndian.PutUint32(bad[at+16:], block)
+
+		fsys, oerr := erofs.Open(bytes.NewReader(bad), erofs.WithExtraDevices(bytes.NewReader(blob)))
+		if oerr != nil {
+			t.Fatal(oerr)
+		}
+
+		return fsys
+	}
+
+	// Block 33 is the blob's block 20: byte 10240 of it.
+	fsys := flat(33)
+
+	got, err := fs.ReadFile(fsys, "multi")
+	if err != nil || !bytes.Equal(got, blob[10240:13240]) {
+		t.Fatalf("a flat file on the mapped device: %d bytes, %v; want the blob's bytes 10240 to 13240", len(got), err)
+	}
+
+	st, err := fs.Lstat(fsys, "multi")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ranges := st.(interface{ DataRange() []erofs.DataRange }).DataRange()
+	if len(ranges) != 1 || ranges[0] != (erofs.DataRange{Device: 1, Offset: 10240, Size: 3000}) {
+		t.Fatalf("its ranges: %+v; want {1 10240 3000}", ranges)
+	}
+
+	for _, block := range []uint32{58, 60, 1000} {
+		fsys = flat(block)
+
+		if _, rerr := fs.ReadFile(fsys, "multi"); !errors.Is(rerr, erofs.ErrCorrupt) {
+			t.Fatalf("a flat file at block %d: %v; want ErrCorrupt", block, rerr)
+		}
+
+		if _, lerr := fs.Lstat(fsys, "multi"); !errors.Is(lerr, erofs.ErrCorrupt) {
+			t.Fatalf("Lstat of a flat file at block %d: %v; want ErrCorrupt", block, lerr)
+		}
 	}
 }
