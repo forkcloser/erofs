@@ -642,7 +642,7 @@ func Mkfs(tb testing.TB, name string, args []string, tarball []byte) Image {
 func Fsck(tb testing.TB, im Image) {
 	tb.Helper()
 
-	if err := runFsck(tb, im); err != nil {
+	if err := FsckVerdict(tb, im); err != nil {
 		tb.Fatalf("%s: fsck.erofs refuses the image: %v", im.Name, err)
 	}
 }
@@ -662,13 +662,14 @@ func FsckRefuses(tb testing.TB, im Image) {
 		return
 	}
 
-	if err := runFsck(tb, im); err == nil {
+	if err := FsckVerdict(tb, im); err == nil {
 		tb.Fatalf("%s: fsck.erofs accepts an image the kernel refuses", im.Name)
 	}
 }
 
-// runFsck is fsck.erofs's verdict on the image, nil without the tool.
-func runFsck(tb testing.TB, im Image) error {
+// FsckVerdict is fsck.erofs's verdict on the image, with the tool's
+// output, or nil without the tool.
+func FsckVerdict(tb testing.TB, im Image) error {
 	tb.Helper()
 
 	tool, err := exec.LookPath("fsck.erofs")
