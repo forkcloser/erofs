@@ -552,6 +552,24 @@ func (img *image) Lstat(name string) (fs.FileInfo, error) {
 	return fi, nil
 }
 
+// checksumSpan is the number of bytes the superblock checksum covers: from
+// the byte after the checksum field to the end of the superblock's block, a
+// block larger than the superblock offset losing that offset first.
+func checksumSpan(blkSizeBits uint8) int {
+	length := 1 << blkSizeBits
+	if length > disk.SuperBlockOffset {
+		length -= disk.SuperBlockOffset
+	}
+
+	return length - checksumEnd
+}
+
+// superblockChecksum is the kernel's CRC-32C of the span: seed 0x5045B54A
+// and no inversion, where Go's CRC-32 pre- and post-inverts.
+func superblockChecksum(span []byte) uint32 {
+	return ^crc32.Update(^uint32(superblockChecksumSeed), crc32.MakeTable(crc32.Castagnoli), span)
+}
+
 // verifySuperblockChecksum holds the superblock to its CRC-32C when the
 // image carries one. The kernel's rule (erofs_superblock_csum_verify): the
 // seed is 0x5045B54A, the data runs from the byte after the checksum field
@@ -562,14 +580,7 @@ func verifySuperblockChecksum(r io.ReaderAt, sb *disk.SuperBlock) error {
 		return nil
 	}
 
-	length := 1 << sb.BlkSizeBits
-	if length > disk.SuperBlockOffset {
-		length -= disk.SuperBlockOffset
-	}
-
-	length -= checksumEnd
-
-	data := make([]byte, length)
+	data := make([]byte, checksumSpan(sb.BlkSizeBits))
 
 	n, err := r.ReadAt(data, disk.SuperBlockOffset+checksumEnd)
 	// A failing reader's error passes through; only a short read is the
@@ -578,13 +589,11 @@ func verifySuperblockChecksum(r io.ReaderAt, sb *disk.SuperBlock) error {
 		return fmt.Errorf("failed to read the superblock's block: %w", err)
 	}
 
-	if n != length {
+	if n != len(data) {
 		return fmt.Errorf("superblock block short of its checksummed length: %w", ErrCorrupt)
 	}
 
-	// Go's CRC-32 pre- and post-inverts; the kernel's crc32c does neither.
-	got := ^crc32.Update(^uint32(superblockChecksumSeed), crc32.MakeTable(crc32.Castagnoli), data)
-	if got != sb.Checksum {
+	if got := superblockChecksum(data); got != sb.Checksum {
 		return fmt.Errorf("superblock checksum %#08x; want %#08x: %w", got, sb.Checksum, ErrCorrupt)
 	}
 

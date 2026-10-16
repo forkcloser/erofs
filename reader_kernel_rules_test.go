@@ -130,6 +130,7 @@ func TestReaderSuperblockChecksum(t *testing.T) {
 
 	// Without the feature bit nothing is checked, whatever the field holds.
 	plain := buildImage(t, func(w *erofs.Writer) { writeFile(t, w, "/a", []byte("a")) })
+	plain[disk.SuperBlockOffset+8] &^= disk.FeatureCompatSBChksum
 	plain[disk.SuperBlockOffset+4] = 0x5A
 
 	if _, err := erofs.Open(bytes.NewReader(plain)); err != nil {
