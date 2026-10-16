@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"math"
 	"math/bits"
 	"os"
@@ -166,8 +167,8 @@ func Merge() CopyOpt {
 // --- CreateOpt functions ---
 
 // WithBlockSize sets the filesystem block size. The value must be a power
-// of two between 512 and 64 KiB. When unset the default is 4096.
-// An invalid size causes subsequent Writer operations to return an error.
+// of two between 512 and 64 KiB, or zero for the default of 4096. Any other
+// size causes subsequent Writer operations to return an error.
 // If CopyFrom is called with a source that declares a different block size,
 // CopyFrom returns an error.
 func WithBlockSize(n int) CreateOpt {
@@ -324,8 +325,8 @@ func (fsys *Writer) Symlink(oldname, newname string) error {
 		return fmt.Errorf("mkfs: cannot create symlink at root: %w", fs.ErrExist)
 	}
 
-	if oldname == "" {
-		return fmt.Errorf("mkfs: %s: empty symlink target: %w", newname, ErrInvalid)
+	if err := checkSymlinkTarget(newname, oldname); err != nil {
+		return err
 	}
 
 	if err := fsys.checkPath(newname); err != nil {
@@ -1252,6 +1253,11 @@ func cleanPath(p string) string {
 	}
 
 	p = path.Clean(p)
+	// "./" and "x/.." clean to ".", which names the root like the others.
+	if p == "." {
+		return "/"
+	}
+
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p
 	}
@@ -1300,7 +1306,67 @@ func (fi *writerFileInfo) ModTime() time.Time {
 }
 
 func (fi *writerFileInfo) IsDir() bool { return fi.entry.mode&disk.StatTypeMask == disk.StatTypeDir }
-func (*writerFileInfo) Sys() any       { return nil }
+
+// Sys is the entry's [Stat], as the reader's FileInfo carries it, so an
+// entry reads back before Close as it will after: ids, link count, device
+// number, times and xattrs. Ino is zero and a directory's Size is zero,
+// since inode numbers and directory blocks exist only once the image is
+// laid out at Close; DataRange is not served before Close either, since
+// the data has no place yet.
+func (fi *writerFileInfo) Sys() any { return fi.stat() }
+
+func (fi *writerFileInfo) UID() uint32   { return fi.entry.uid }
+func (fi *writerFileInfo) GID() uint32   { return fi.entry.gid }
+func (*writerFileInfo) Ino() uint64      { return 0 }
+func (fi *writerFileInfo) Nlink() uint64 { return uint64(fi.entry.linkCount()) }
+func (fi *writerFileInfo) Rdev() uint64  { return uint64(fi.entry.rdev) }
+
+// GetAllXattr is a copy of the entry's attributes.
+func (fi *writerFileInfo) GetAllXattr() map[string]string { return maps.Clone(fi.entry.xattrs) }
+
+// GetXattr is one attribute of the entry.
+func (fi *writerFileInfo) GetXattr(name string) (string, bool) {
+	v, ok := fi.entry.xattrs[name]
+
+	return v, ok
+}
+
+func (fi *writerFileInfo) stat() *Stat {
+	e := fi.entry
+
+	return &Stat{
+		Mode:    disk.EroFSModeToGoFileMode(e.mode),
+		Size:    int64(e.size), // #nosec G115 -- e.size fits int64, as Size says
+		Rdev:    uint64(e.rdev),
+		UID:     e.uid,
+		GID:     e.gid,
+		Mtime:   e.mtime,
+		MtimeNs: e.mtimeNs,
+		Nlink:   uint64(e.linkCount()),
+		Xattrs:  maps.Clone(e.xattrs),
+	}
+}
+
+// linkCount is the link count Close will write: the one SetNlink set, or
+// two plus the subdirectories for a directory, or one per name otherwise.
+func (e *fsEntry) linkCount() uint32 {
+	switch {
+	case e.nlinkSet:
+		return e.nlink
+	case e.mode&disk.StatTypeMask == disk.StatTypeDir:
+		var subdirs uint32
+
+		for _, c := range e.children {
+			if !c.removed && c.mode&disk.StatTypeMask == disk.StatTypeDir {
+				subdirs++
+			}
+		}
+
+		return 2 + subdirs // "." and ".." are the two
+	default:
+		return 1 + e.extraLinks
+	}
+}
 
 // readFile implements fs.File for reading back a finalized file's data.
 type readFile struct {
@@ -1516,6 +1582,11 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 	if err := checkPathLen(p); err != nil {
 		return err
 	}
+	// A source is held to what the API is held to: the kernel's lookup
+	// could not reach a longer name whoever wrote it.
+	if err := checkNameLen(p); err != nil {
+		return err
+	}
 
 	mode := goModeToUnixMode(info.Mode())
 	// A source fs.FS is not trusted to report a sane size: a negative one
@@ -1535,6 +1606,18 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 
 	if be == nil {
 		be = &builder.Entry{}
+	}
+
+	if typ == disk.StatTypeSymlink {
+		if err := checkSymlinkTarget(p, be.LinkTarget); err != nil {
+			return err
+		}
+	}
+
+	for name, value := range be.Xattrs {
+		if err := validateXattr(name, value); err != nil {
+			return fmt.Errorf("mkfs: %s: %w", p, err)
+		}
 	}
 	// Sys() is the only route for ownership, but a modification time has a
 	// portable home in fs.FileInfo itself. A source that carries no
@@ -1689,8 +1772,50 @@ func (fsys *Writer) checkPath(name string) error {
 		return err
 	}
 
+	if err := checkNameLen(name); err != nil {
+		return err
+	}
+
 	if _, ok := fsys.byPath[name]; ok {
 		return fmt.Errorf("mkfs: duplicate path %q: %w", name, fs.ErrExist)
+	}
+
+	return nil
+}
+
+// checkSymlinkTarget rejects a target the kernel's readlink could not
+// deliver whole: empty, holding a NUL (a target is a C string to it), or
+// longer than a page less its terminator; the reader refuses the same.
+func checkSymlinkTarget(name, target string) error {
+	if target == "" {
+		return fmt.Errorf("mkfs: %s: empty symlink target: %w", name, ErrInvalid)
+	}
+
+	if strings.IndexByte(target, 0) >= 0 {
+		return fmt.Errorf("mkfs: %s: symlink target holds a NUL byte: %w", name, ErrInvalid)
+	}
+
+	if len(target) > maxSymlinkTarget {
+		return fmt.Errorf(
+			"mkfs: %s: symlink target is %d bytes, over the %d byte limit: %w",
+			name, len(target), maxSymlinkTarget, ErrInvalid,
+		)
+	}
+
+	return nil
+}
+
+// checkNameLen rejects a path with a component over EROFS_NAME_LEN bytes:
+// the dirent would be written, but the kernel's lookup answers ENAMETOOLONG
+// before reading it, so the entry could never be reached.
+func checkNameLen(name string) error {
+	for component := range strings.SplitSeq(strings.Trim(name, "/"), "/") {
+		if len(component) > maxNameLen {
+			return fmt.Errorf(
+				"mkfs: name %q is %d bytes, over the %d byte limit: %w",
+				component, len(component), maxNameLen, ErrInvalid,
+			)
+		}
 	}
 
 	return nil
@@ -2093,16 +2218,7 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 
 // fsToErofs converts a single fsEntry to an erofsEntry, resolving data readers.
 func (fsys *Writer) fsToErofs(e *fsEntry) erofsEntry {
-	var nlink uint32
-
-	switch {
-	case e.nlinkSet:
-		nlink = e.nlink
-	case e.mode&disk.StatTypeMask == disk.StatTypeDir:
-		nlink = 2 // adjusted by buildErofsTree
-	default:
-		nlink = 1 + e.extraLinks // one per name: the entry's own plus hardlinks
-	}
+	nlink := e.linkCount()
 
 	var data io.Reader
 
@@ -2474,7 +2590,15 @@ const (
 	// maxPathLen matches Linux PATH_MAX. Nothing deeper is usable, and the
 	// bound is what makes a walk over a cyclic source terminate.
 	maxPathLen = 4096
-	nullAddr   = 0xFFFFFFFF // marks a hole/sparse chunk
+	// maxNameLen is EROFS_NAME_LEN: the kernel's lookup refuses a longer
+	// name with ENAMETOOLONG.
+	maxNameLen = 255
+	// maxSymlinkTarget is what the kernel's readlink delivers at most: a
+	// page less its terminator. The reader reads back up to a page, so a
+	// writer held to one less never writes what the reader or the kernel
+	// would cut.
+	maxSymlinkTarget = 4095
+	nullAddr         = 0xFFFFFFFF // marks a hole/sparse chunk
 
 	// Overlay whiteout markers (AUFS convention used by OCI layers).
 	whiteoutPrefix = ".wh."
