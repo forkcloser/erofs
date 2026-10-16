@@ -707,11 +707,55 @@ func (img *image) mapDev(deviceID uint16, pa int64) (io.ReaderAt, int64, error) 
 		return nil, 0, err
 	}
 
-	if dev == 0 {
-		return img.meta, off, nil
+	return img.deviceReader(dev), off, nil
+}
+
+// locateRange places a flat file's data range, addressed on the primary
+// device, where erofs_map_dev does: inside an extra device's mapped range
+// it is that device's, bounded by the device's block count; otherwise the
+// image's own, bounded by its extent. mkfs.erofs --blobdev writes flat files
+// this way, their blocks numbered past the image into the blob's range.
+func (img *image) locateRange(pa, n int64) (uint16, int64, error) {
+	if pa < 0 || n < 0 || pa > math.MaxInt64-n {
+		return 0, 0, fmt.Errorf("data range [%d, +%d) is out of range: %w", pa, n, ErrCorrupt)
 	}
 
-	return img.devices[dev-1].device, off, nil
+	for i, dev := range img.devices {
+		if dev.mappedBlkAddr == 0 {
+			continue
+		}
+
+		startOff := int64(dev.mappedBlkAddr) << img.sb.BlkSizeBits
+		length := int64(dev.blocks) << img.sb.BlkSizeBits
+
+		if pa >= startOff && pa < startOff+length {
+			if pa+n > startOff+length {
+				return 0, 0, fmt.Errorf(
+					"data range [%d, +%d) runs past the end of device %d's %d blocks: %w",
+					pa, n, i+1, dev.blocks, ErrCorrupt,
+				)
+			}
+
+			// #nosec G115 -- the device count is a uint16 on disk
+			return uint16(i + 1), pa - startOff, nil
+		}
+	}
+
+	if err := img.checkImageRange(pa, n); err != nil {
+		return 0, 0, err
+	}
+
+	return 0, pa, nil
+}
+
+// deviceReader is the reader of a device locate or locateRange named: the
+// image itself for zero, an extra device by its one-based index otherwise.
+func (img *image) deviceReader(dev uint16) io.ReaderAt {
+	if dev == 0 {
+		return img.meta
+	}
+
+	return img.devices[dev-1].device
 }
 
 // locate turns a chunk's (device id, physical address) into the device the
@@ -801,12 +845,12 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 			return nil
 		}
 
-		dataOffset := int64(ino.inodeData) << img.sb.BlkSizeBits
-		if img.checkImageRange(dataOffset, ino.size) != nil {
+		dev, off, err := img.locateRange(int64(ino.inodeData)<<img.sb.BlkSizeBits, ino.size)
+		if err != nil {
 			return nil
 		}
 
-		return io.NewSectionReader(img.meta, dataOffset, ino.size)
+		return io.NewSectionReader(img.deviceReader(dev), off, ino.size)
 	case disk.LayoutFlatInline:
 		// Last block is inline after the inode; earlier blocks at dataBlkAddr.
 		// Only use direct read for single-block files (all data inline).
@@ -1114,6 +1158,10 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 	var (
 		addr        int64
 		blockOffset int
+		// dataBlock marks a flat file's data block, addressed on the primary
+		// device but possibly living on an extra one by its mapped range;
+		// inline data sits in the inode's own block, always the image's.
+		dataBlock bool
 	)
 
 	blockSize := int(1 << img.sb.BlkSizeBits)
@@ -1144,6 +1192,7 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 		}
 
 		addr = int64(int(fi.inodeData)+bn) << img.sb.BlkSizeBits
+		dataBlock = true
 	case disk.LayoutFlatInline:
 		// If on the last block, validate
 		if bn == nblocks-1 {
@@ -1172,6 +1221,7 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 		} else {
 			addr = int64(int(fi.inodeData)+bn) << img.sb.BlkSizeBits
 			blockOffset = int(pos % int64(blockSize))
+			dataBlock = true
 		}
 	case disk.LayoutChunkBased:
 		// first 2 le bytes for format, second 2 bytes are reserved
@@ -1307,7 +1357,18 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 		return nil, fmt.Errorf("invalid block bounds [%d:%d] for nid %d: %w", blockOffset, blockEnd, fi.nid, ErrCorrupt)
 	}
 
-	if err := img.checkImageRange(addr+int64(blockOffset), int64(blockEnd-blockOffset)); err != nil {
+	start, length := addr+int64(blockOffset), int64(blockEnd-blockOffset)
+
+	reader := img.meta
+
+	if dataBlock {
+		dev, off, err := img.locateRange(start, length)
+		if err != nil {
+			return nil, fmt.Errorf("nid %d: %w", fi.nid, err)
+		}
+
+		start, reader = off, img.deviceReader(dev)
+	} else if err := img.checkImageRange(start, length); err != nil {
 		return nil, fmt.Errorf("nid %d: %w", fi.nid, err)
 	}
 
@@ -1315,7 +1376,7 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 	b.offset = int32(blockOffset) // #nosec G115 -- checked above: in [0, blockSize), at most 1<<16
 
 	b.end = int32(blockEnd) // #nosec G115 -- checked above: at most blockSize, at most 1<<16
-	if n, err := img.meta.ReadAt(b.bytes(), addr+int64(blockOffset)); err != nil {
+	if n, err := reader.ReadAt(b.bytes(), start); err != nil {
 		img.putBlock(b)
 		return nil, fmt.Errorf("failed to read block for nid %d: %w", fi.nid, err)
 	} else if n != blockEnd-blockOffset {
@@ -2047,12 +2108,12 @@ func (b *file) flatPlainRange(ino *inode, dst []DataRange) ([]DataRange, error) 
 		return append(dst, DataRange{Offset: holeOffset, Size: ino.size}), nil
 	}
 
-	dataOffset := int64(ino.inodeData) << b.img.sb.BlkSizeBits
-	if err := b.img.checkImageRange(dataOffset, ino.size); err != nil {
+	dev, off, err := b.img.locateRange(int64(ino.inodeData)<<b.img.sb.BlkSizeBits, ino.size)
+	if err != nil {
 		return nil, err
 	}
 
-	return append(dst, DataRange{Device: 0, Offset: dataOffset, Size: ino.size}), nil
+	return append(dst, DataRange{Device: dev, Offset: off, Size: ino.size}), nil
 }
 
 // buildDataRanges computes the physical data ranges for a regular file.
@@ -2086,12 +2147,12 @@ func (b *file) buildDataRanges(ino *inode, dst []DataRange) ([]DataRange, error)
 
 		tailSize := ino.size - headSize
 		if headSize > 0 {
-			dataOffset := int64(ino.inodeData) << b.img.sb.BlkSizeBits
-			if err := b.img.checkImageRange(dataOffset, headSize); err != nil {
+			dev, off, err := b.img.locateRange(int64(ino.inodeData)<<b.img.sb.BlkSizeBits, headSize)
+			if err != nil {
 				return nil, err
 			}
 
-			dst = append(dst, DataRange{Device: 0, Offset: dataOffset, Size: headSize})
+			dst = append(dst, DataRange{Device: dev, Offset: off, Size: headSize})
 		}
 
 		if err := b.img.checkImageRange(trailingAddr, tailSize); err != nil {
