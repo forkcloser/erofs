@@ -138,6 +138,49 @@ func TestReaderSuperblockChecksum(t *testing.T) {
 	}
 }
 
+// TestReaderIshareXattrPrefixID: under the ishare-xattrs compatible
+// feature, an ishare prefix id at or past the long prefix count is a
+// corrupt superblock, refused by Open as the kernel refuses the mount. The
+// Writer emits no prefix table, so any id is past it; without the feature
+// the field is not read.
+func TestReaderIshareXattrPrefixID(t *testing.T) {
+	t.Parallel()
+
+	img := buildImage(t, func(w *erofs.Writer) { writeFile(t, w, "/a", []byte("a")) })
+
+	for _, id := range []byte{0, 3} {
+		bad := bytes.Clone(img)
+		bad[disk.SuperBlockOffset+8] |= disk.FeatureCompatIshareXattrs
+		bad[disk.SuperBlockOffset+105] = id
+		stampChecksum(bad)
+
+		if _, err := erofs.Open(bytes.NewReader(bad)); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("ishare prefix id %d of 0: %v; want ErrCorrupt", id, err)
+		}
+	}
+
+	plain := bytes.Clone(img)
+	plain[disk.SuperBlockOffset+105] = 3
+	stampChecksum(plain)
+
+	if _, err := erofs.Open(bytes.NewReader(plain)); err != nil {
+		t.Fatalf("an ishare prefix id without the feature: %v", err)
+	}
+
+	// An mkfs.erofs image with the feature set and the checksum feature
+	// cleared, so that nothing but the id refuses it.
+	mkfs, err := os.ReadFile("internal/corpus/testdata/small-b512.erofs")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mkfs[disk.SuperBlockOffset+8] = 0xA8
+
+	if _, err := erofs.Open(bytes.NewReader(mkfs)); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Fatalf("an mkfs image with the feature and no prefixes: %v; want ErrCorrupt", err)
+	}
+}
+
 // errDisk is a failing reader's own error.
 var errDisk = errors.New("disk")
 

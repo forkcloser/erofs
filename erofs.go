@@ -270,6 +270,13 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 		return nil, fmt.Errorf("unsupported incompatible feature 0x%x: %w", unknownFeat, ErrNotImplemented)
 	}
 
+	// Judged here, against the count, not when the prefix table is first
+	// read: the kernel refuses the image at mount (super.c).
+	if i.sb.FeatureCompat&disk.FeatureCompatIshareXattrs != 0 && i.sb.IshareXattrPrefixID >= i.sb.XattrPrefixCount {
+		return nil, fmt.Errorf("ishare xattr prefix id %d of %d: %w",
+			i.sb.IshareXattrPrefixID, i.sb.XattrPrefixCount, ErrInvalidSuperblock)
+	}
+
 	ondiskExtraDevices := uint32(0)
 	if i.sb.FeatureIncompat&disk.FeatureIncompatDeviceTable != 0 {
 		ondiskExtraDevices = uint32(i.sb.ExtraDevices)

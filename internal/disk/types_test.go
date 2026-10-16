@@ -208,7 +208,7 @@ func TestSuperBlockMarshalMatchesReflection(t *testing.T) {
 		VolumeName:  [16]uint8{16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1},
 		ComprAlgs:   0x6162,
 		DevtSlotOff: 9, DirBlkBits: 12, XattrPrefixCount: 7, XattrPrefixStart: 0x71727374,
-		PackedNid: 0x8182838485868788, XattrFilterRes: 0x91,
+		PackedNid: 0x8182838485868788, XattrFilterRes: 0x91, IshareXattrPrefixID: 0xA1,
 		FeatureIncompat: disk.FeatureIncompatChunkedFile, ExtraDevices: 2,
 	}
 	for i := range sb.Reserved {
