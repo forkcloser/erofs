@@ -38,7 +38,15 @@ const (
 // everything after that entry is misparsed — fsck.erofs reports "xattr entry
 // beyond xattr_isize".
 func validateXattr(name, value string) error {
-	_, suffix := xattrSplit(name)
+	idx, suffix := xattrSplit(name)
+	// Linux refuses an empty name and a bare namespace prefix ("user.",
+	// "trusted.") with EINVAL, and neither can be addressed by getxattr once
+	// stored; the two POSIX ACL names are whole names the format indexes,
+	// and carry no suffix by design.
+	if suffix == "" && (idx == 0 || strings.HasSuffix(xattrIndex(idx).String(), ".")) {
+		return fmt.Errorf("xattr name %q has nothing after its prefix: %w", name, ErrInvalid)
+	}
+
 	if len(suffix) > maxXattrNameLen {
 		return fmt.Errorf("xattr name %q is %d bytes after its prefix, over the %d byte on-disk limit: %w",
 			name, len(suffix), maxXattrNameLen, ErrInvalid)

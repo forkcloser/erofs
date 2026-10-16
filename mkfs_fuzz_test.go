@@ -2,6 +2,7 @@ package erofs_test
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io/fs"
 	"math"
@@ -422,6 +423,21 @@ func FuzzWriterXattr(f *testing.F) {
 			if value[i] == 0 {
 				return
 			}
+		}
+		// A name the writer refuses by its contract (a bare namespace prefix,
+		// one over 255 bytes after it) is not an image to verify; any other
+		// refusal is a failure.
+		probe := erofs.Create(&erofstest.TestBuffer{})
+		if err := probe.Mkdir("/d", 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := probe.Setxattr("/d", key, value); err != nil {
+			if errors.Is(err, erofs.ErrInvalid) {
+				return
+			}
+
+			t.Fatal(err)
 		}
 
 		efs := buildAndVerify(t, func(w *erofs.Writer) {
