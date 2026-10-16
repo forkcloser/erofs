@@ -44,6 +44,23 @@ const (
 	// in bits 1 to 3.
 	InodeFormatExtended   = 0x0001
 	InodeFormatLayoutMask = 0x000E
+	// Bit 4 of i_format has two names in the format. On a directory it is
+	// EROFS_I_DOT_OMITTED_BIT: the "." dirent is left out and the kernel
+	// synthesises it. On a compact non-directory inode it is
+	// EROFS_I_NLINK_1_BIT: nlink is one and the nlink field holds the start
+	// block's high bits, part of the 48-bit layout not implemented here. On
+	// an extended non-directory inode the kernel ignores it.
+	InodeFormatDotOmitted = 0x0010
+	InodeFormatNlink1     = 0x0010
+	// InodeFormatAll is every i_format bit the kernel defines (EROFS_I_ALL);
+	// a bit above it is a format this reader does not know.
+	InodeFormatAll = 0x001F
+	// FeatureCompatSBChksum says the superblock carries a CRC-32C of its
+	// block in Checksum (EROFS_FEATURE_COMPAT_SB_CHKSUM).
+	FeatureCompatSBChksum = 0x00000001
+	// NullAddr is the start block of a flat-plain inode with no data: the
+	// kernel maps such a file as a hole (EROFS_NULL_ADDR, 32-bit mode).
+	NullAddr = 0xFFFFFFFF
 
 	// An xattr entry's NameIndex: with the high bit set, the low seven bits
 	// index the long-prefix table instead of naming a built-in prefix.

@@ -93,10 +93,11 @@ func EroFSModeToGoFileMode(mode uint16) fs.FileMode {
 // in its i_u field, or 0 when the type carries none.
 func RdevFromMode(mode uint16, inodeData uint32) uint32 {
 	switch mode & StatTypeMask {
-	case StatTypeChrdev, StatTypeBlkdev, StatTypeFifo, StatTypeSock:
-		// inodeData field is device number for some file types
+	case StatTypeChrdev, StatTypeBlkdev:
 		return inodeData
 	default:
-		return 0 // Not a device type
+		// A FIFO or a socket shares the i_u slot but has no device number;
+		// the kernel reports zero whatever the slot holds.
+		return 0
 	}
 }
