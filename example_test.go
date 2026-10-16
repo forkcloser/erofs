@@ -6,14 +6,15 @@ import (
 	"io/fs"
 	"log" //nolint:depguard // examples end on log.Fatal, as the standard library's do
 	"os"
-	"path/filepath"
 
 	erofs "github.com/forkcloser/erofs"
 )
 
 func ExampleOpen() {
 	// Any io.ReaderAt holding an image will do; an *os.File is the usual one.
-	f, err := os.Open(buildExampleImage())
+	path := buildExampleImage()
+
+	f, err := os.Open(path)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -35,6 +36,7 @@ func ExampleOpen() {
 		return nil
 	})
 	_ = f.Close()
+	_ = os.Remove(path)
 
 	if err != nil {
 		log.Fatal(err)
@@ -51,12 +53,12 @@ func ExampleOpen() {
 //
 //revive:disable:deep-exit an example helper fails as an example does, with log.Fatal
 func buildExampleImage() string {
-	path := filepath.Join(os.TempDir(), fmt.Sprintf("erofs-example-%d.img", os.Getpid()))
-
-	out, err := os.Create(path)
+	out, err := os.CreateTemp("", "erofs-example-*.img")
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	path := out.Name()
 
 	w := erofs.Create(out)
 	if err = w.Mkdir("/usr", 0o755); err != nil {

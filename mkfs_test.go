@@ -283,8 +283,8 @@ func TestCreateFSMknod(t *testing.T) {
 	erofstest.CheckDevice(t, efs, "sda", fs.ModeDevice, 8<<8)
 }
 
-// TestCreateFSLargeFile tests a file that spans many blocks and exercises
-// the Chunk.Count uint16 split for files > 65535 blocks.
+// TestCreateFSLargeFile tests a file that spans many blocks: 128 KiB, 32
+// blocks at the default size, below the chunk count's 16-bit limit.
 func TestCreateFSLargeFile(t *testing.T) {
 	t.Parallel()
 
