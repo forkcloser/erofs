@@ -2450,9 +2450,13 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 		}
 
 		buf := b.bytes()
+		// A block shorter than one dirent holds no first name offset to
+		// read: the kernel's readdir ends in "bogus dirent" on it whatever
+		// the bytes beyond i_size say, and the lookup refuses it already.
 		if len(buf) < disk.SizeDirent {
 			d.img.putBlock(b)
-			break
+
+			return ents, fmt.Errorf("directory block of %d bytes for nid %d: %w", len(buf), fi.nid, ErrCorrupt)
 		}
 
 		var dirents [2]disk.Dirent
