@@ -523,16 +523,23 @@ type Image struct {
 	Img  []byte
 	Blob []byte
 	Tree []Node
+
+	// Devices are the extra devices of a copy, in slot order, when they
+	// are more than a blob: the source images and their own devices.
+	Devices [][]byte
 }
 
 // Extra is the image's extra devices as Parse and WithExtraDevices take
-// them: the blob alone, or none.
+// them: the devices of a copy, the blob alone, or none.
 func (im Image) Extra() [][]byte {
-	if im.Blob == nil {
+	switch {
+	case im.Devices != nil:
+		return im.Devices
+	case im.Blob == nil:
 		return nil
+	default:
+		return [][]byte{im.Blob}
 	}
-
-	return [][]byte{im.Blob}
 }
 
 //go:embed testdata
@@ -690,9 +697,9 @@ func FsckVerdict(tb testing.TB, im Image) error {
 		tb.Fatal(err)
 	}
 
-	if im.Blob != nil {
-		blob := filepath.Join(dir, "blob.bin")
-		if err := os.WriteFile(blob, im.Blob, 0o600); err != nil {
+	for i, dev := range im.Extra() {
+		blob := filepath.Join(dir, "dev"+strconv.Itoa(i)+".bin")
+		if err := os.WriteFile(blob, dev, 0o600); err != nil {
 			tb.Fatal(err)
 		}
 
