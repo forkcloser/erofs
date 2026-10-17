@@ -6,6 +6,7 @@ package erofs_test
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"io/fs"
 	"strconv"
@@ -256,6 +257,36 @@ func TestWriterMetadataOnlyMergeOfImages(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		} else if !bytes.Equal(got, want) {
 			t.Errorf("%s: %d bytes, want %d; %s", name, len(got), len(want), sameBytes(want, got))
+		}
+	}
+}
+
+// TestWriterMetadataOnlyRefusesWhatStatRefuses: the fast path reads the
+// source's inodes itself, and refuses what the reader's Stat refuses, in
+// its class: here an i_format with reserved bits set, ErrNotImplemented,
+// which the reader's Lstat gives for the same entry.
+func TestWriterMetadataOnlyRefusesWhatStatRefuses(t *testing.T) {
+	t.Parallel()
+
+	for _, src := range corpus.Committed(t) {
+		if src.Name != "small-chunk-512" {
+			continue
+		}
+
+		edited := bytes.Clone(src.Img)
+		edited[1568] = 0xff
+
+		source := openWithDevices(t, edited)
+
+		if _, err := fs.Lstat(source, "d/f"); !errors.Is(err, erofs.ErrNotImplemented) {
+			t.Fatalf("test premise broken: Lstat of the edited inode: %v", err)
+		}
+
+		var buf testBuffer
+
+		w := erofs.Create(&buf)
+		if err := w.CopyFrom(source, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrNotImplemented) {
+			t.Fatalf("CopyFrom(MetadataOnly) of an image with an inode Stat refuses: %v; want ErrNotImplemented", err)
 		}
 	}
 }

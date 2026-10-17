@@ -314,6 +314,22 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			mtimeNs = ino.MtimeNs
 			xcnt = ino.XattrCount
 			icSize = disk.SizeInodeExtended
+
+			if err := checkHighBlockBits(cur.nid, ino.Reserved); err != nil {
+				return err
+			}
+		}
+
+		// What the reader refuses, the copy refuses, in the reader's class:
+		// a copy of an inode Stat would not serve is no copy of the image.
+		if err := checkInodeFormat(cur.nid, format, mode); err != nil {
+			return err
+		}
+
+		if xcnt > 0 {
+			if _, err := xattrBodySize(cur.nid, xcnt); err != nil {
+				return err
+			}
 		}
 
 		// i_size is unsigned on disk and an int64 everywhere the Writer
