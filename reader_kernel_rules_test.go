@@ -15,13 +15,14 @@ import (
 	"testing"
 
 	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/erofs/internal/corpus"
 	"github.com/forkcloser/erofs/internal/disk"
 )
 
 // The reader follows the kernel's rules where an image departs from what
 // mkfs.erofs writes: the superblock checksum is verified before the feature
 // bits are read, an i_format bit the kernel does not define is a format this
-// reader lacks, a flat-plain file at the null address reads as zeros, and a
+// reader lacks, a compact flat-plain file at the null address reads as zeros, and a
 // FIFO or a socket has no device number whatever its i_u slot holds.
 
 // buildImage writes a small tree and returns the image's bytes.
@@ -391,12 +392,12 @@ func TestReaderFlatPlainNullAddress(t *testing.T) {
 		}
 	})
 
-	// The file is inline; make it flat-plain at the null address, the
-	// shape one bit away from what mkfs.erofs writes for every such file.
+	// The file is inline; make it a compact flat-plain inode at the null
+	// address, the kernel's hole (an extended inode's start block is 48
+	// bits wide, and the same word there is an address past the device:
+	// TestReaderExtendedNullAddress).
 	at := inodeOffset(t, img, "a")
-	format := binary.LittleEndian.Uint16(img[at:])
-	binary.LittleEndian.PutUint16(img[at:], format&^disk.InodeFormatLayoutMask|disk.LayoutFlatPlain<<1)
-	binary.LittleEndian.PutUint32(img[at+16:], disk.NullAddr)
+	compactHole(img, at, uint32(len(content)))
 
 	fsys, err := erofs.Open(bytes.NewReader(img))
 	if err != nil {
@@ -418,10 +419,11 @@ func TestReaderFlatPlainNullAddress(t *testing.T) {
 		t.Fatalf("a null-address file's ranges: %+v; want one hole of %d", ranges, len(content))
 	}
 
-	// The same shape on a symlink is a target of zeros, which the kernel
-	// reads as the empty string: refused, as an empty target is.
+	// A flat-plain symlink at the null address is refused: on this
+	// extended inode the address lies past the device, and on a compact
+	// one the target would be zeros, the empty string to the kernel.
 	at = inodeOffset(t, img, "l")
-	format = binary.LittleEndian.Uint16(img[at:])
+	format := binary.LittleEndian.Uint16(img[at:])
 	binary.LittleEndian.PutUint16(img[at:], format&^disk.InodeFormatLayoutMask|disk.LayoutFlatPlain<<1)
 	binary.LittleEndian.PutUint32(img[at+16:], disk.NullAddr)
 
@@ -724,17 +726,22 @@ func TestReaderFlatDataOnMappedDevice(t *testing.T) {
 	}
 }
 
-// TestReaderUndefinedDatalayout: an i_format naming a data layout the kernel
-// does not define (5 to 7) is ErrNotImplemented when the inode is read, as
-// the kernel refuses the inode (inode.c, "unsupported datalayout"), not a
-// file served until its data is asked for.
-func TestReaderUndefinedDatalayout(t *testing.T) {
+// TestReaderUnsupportedDatalayout: an i_format naming a data layout the
+// kernel does not define (5 to 7) or one this reader does not implement
+// (the compressed ones, 1 and 3) is ErrNotImplemented when the inode is
+// read, as the kernel refuses the undefined ones (inode.c, "unsupported
+// datalayout") and as the package's doc promises for compressed inodes,
+// not a file served until its data is asked for: an empty compressed file
+// has no data to ask for.
+func TestReaderUnsupportedDatalayout(t *testing.T) {
 	t.Parallel()
 
 	img := buildImage(t, func(w *erofs.Writer) { writeFile(t, w, "/a", []byte("a")) })
 	at := inodeOffset(t, img, "a")
 
-	for layout := uint16(disk.LayoutMax); layout <= 7; layout++ {
+	for _, layout := range []uint16{
+		disk.LayoutCompressedFull, disk.LayoutCompressedCompact, disk.LayoutMax, disk.LayoutMax + 1, disk.LayoutMax + 2,
+	} {
 		bad := bytes.Clone(img)
 		format := binary.LittleEndian.Uint16(bad[at:])
 		binary.LittleEndian.PutUint16(bad[at:], format&^disk.InodeFormatLayoutMask|layout<<1)
@@ -752,5 +759,96 @@ func TestReaderUndefinedDatalayout(t *testing.T) {
 		if _, err := fs.ReadFile(fsys, "a"); !errors.Is(err, erofs.ErrNotImplemented) {
 			t.Fatalf("layout %d: ReadFile: %v; want ErrNotImplemented", layout, err)
 		}
+	}
+
+	// The fuzzer's find: b512 with one inode's i_format set to 0x17, an
+	// empty compressed-compact inode, served by Stat before.
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "b512" {
+			continue
+		}
+
+		edited := bytes.Clone(im.Img)
+		edited[4544] = 0x17
+
+		fsys, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		refused := 0
+
+		err = fs.WalkDir(fsys, ".", func(name string, _ fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+
+			switch _, err := fs.Lstat(fsys, name); {
+			case errors.Is(err, erofs.ErrNotImplemented):
+				refused++
+			case err != nil:
+				return err
+			}
+
+			return nil
+		})
+		if err != nil || refused != 1 {
+			t.Fatalf(
+				"b512 with a compressed inode: walk %v, %d refused; want one ErrNotImplemented and nothing else",
+				err,
+				refused,
+			)
+		}
+	}
+}
+
+// TestReaderExtendedNullAddress: the null address names a hole on a compact
+// inode only; on an extended inode the start block is 48 bits wide
+// (startblk_lo under i_nb, inode.c's addrmask), so 0xffffffff there is
+// block 0xffffffff, past the device, refused at Stat as every address past
+// the device is. The first input is the fuzzer's: small-b512's d/sub/e16,
+// an all-inline file whose i_u holds the null address, with its layout
+// turned to flat-plain.
+func TestReaderExtendedNullAddress(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "small-b512" {
+			continue
+		}
+
+		edited := bytes.Clone(im.Img)
+		edited[6720] = 0x01
+
+		fsys, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := fs.Stat(fsys, "d/sub/e16"); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("small-b512 d/sub/e16 as flat-plain at the null address: Stat %v; want ErrCorrupt", err)
+		}
+	}
+
+	img := buildImage(t, func(w *erofs.Writer) { writeFile(t, w, "/a", []byte("a")) })
+	at := inodeOffset(t, img, "a")
+
+	edited := bytes.Clone(img)
+	format := binary.LittleEndian.Uint16(edited[at:])
+	binary.LittleEndian.PutUint16(edited[at:], format&^disk.InodeFormatLayoutMask|disk.LayoutFlatPlain<<1)
+	binary.LittleEndian.PutUint32(edited[at+16:], disk.NullAddr)
+	stampChecksum(edited)
+
+	fsys, err := erofs.Open(bytes.NewReader(edited))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fs.Stat(fsys, "a"); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Fatalf("an extended flat-plain inode at the null address: Stat %v; want ErrCorrupt", err)
+	}
+
+	if _, err := fs.ReadFile(fsys, "a"); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Fatalf("an extended flat-plain inode at the null address: ReadFile %v; want ErrCorrupt", err)
 	}
 }
