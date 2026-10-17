@@ -303,6 +303,29 @@ func goMode(mode int64) fs.FileMode {
 	return m
 }
 
+// direntTypeOf is the dirent file type an inode's mode calls for
+// (erofs_fs.h, EROFS_FT_*).
+func direntTypeOf(in *erofsspec.Inode) uint8 {
+	switch in.Mode & erofsspec.ModeTypeMask {
+	case erofsspec.ModeRegular:
+		return erofsspec.TypeRegular
+	case erofsspec.ModeDir:
+		return erofsspec.TypeDir
+	case erofsspec.ModeChar:
+		return erofsspec.TypeChar
+	case erofsspec.ModeBlock:
+		return erofsspec.TypeBlock
+	case erofsspec.ModeFifo:
+		return erofsspec.TypeFifo
+	case erofsspec.ModeSocket:
+		return erofsspec.TypeSocket
+	case erofsspec.ModeSymlink:
+		return erofsspec.TypeSymlink
+	default:
+		return erofsspec.TypeUnknown
+	}
+}
+
 // modeOf is the fs.FileMode an inode's i_mode stands for.
 func modeOf(in *erofsspec.Inode) fs.FileMode {
 	m := goMode(int64(in.Mode &^ erofsspec.ModeTypeMask))
@@ -1125,7 +1148,7 @@ func judge(ref, got verdict) string {
 			return ""
 		case got.class == "invalid" && ref.longSymlink:
 			return ""
-		case got.class == "corrupt" && (ref.dupXattr || ref.undefinedXattr || ref.badTarget || ref.extentsOut || !ref.complete):
+		case got.class == "corrupt" && (ref.dupXattr || ref.undefinedXattr || ref.badTarget || ref.extentsOut || ref.direntType || !ref.complete):
 			return ""
 		default:
 			return "the reader refuses a sound image"
@@ -1181,6 +1204,7 @@ type verdict struct {
 	undefinedXattr bool // an xattr index with no prefix (7 and up, or a long prefix past the table), refused likewise
 	badTarget      bool // a symlink whose stored target is empty or holds a NUL, which the package refuses
 	unsortedDir    bool // a directory block out of name order: what a lookup finds there is the search's, not the format's
+	direntType     bool // a dirent whose type disagrees with its inode's mode: the kernel serves both, the reader refuses
 	extentsOut     bool // a file whose map runs past its device, which the package refuses at Stat and the kernel at the read
 	complete       bool // the image holds every block its superblock declares: a structure past its end points outside it
 }
@@ -1226,6 +1250,13 @@ func referenceVerdict(img, blob []byte) verdict {
 
 		if in.IsSymlink() && in.Size > 4096 {
 			v.longSymlink = true
+		}
+
+		// The kernel hands readdir the dirent's type and stat the inode's,
+		// and never compares them; the package refuses the disagreement
+		// as corrupt, since fs.FS hands a consumer both.
+		if e.Dir.Type != direntTypeOf(in) {
+			v.direntType = true
 		}
 
 		// The kernel's readlink makes a C string of the target, so an empty
