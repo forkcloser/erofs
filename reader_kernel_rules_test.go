@@ -1115,3 +1115,52 @@ func TestReaderShortDirectoryBlock(t *testing.T) {
 		t.Fatalf("ReadDir of a six-byte directory: %v; want ErrCorrupt", err)
 	}
 }
+
+// TestReaderSuperblockExtSlots: the kernel reads the superblock from one
+// page and refuses extension slots running past it (super.c: "invalid
+// sb_extslots"), so Open refuses them as a corrupt superblock. The room is
+// the larger of the block and a 4 KiB page, less the superblock offset: 184
+// slots fit a 512-byte or 4 KiB block and 185 do not, while a 64 KiB block
+// holds every count the byte can name. The fuzzer's input, small-blobdev-512
+// with 204 slots, is committed beside the harness.
+func TestReaderSuperblockExtSlots(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		blockSize int
+		fits      byte
+		refused   byte
+	}{
+		{blockSize: 512, fits: 184, refused: 185},
+		{blockSize: 4096, fits: 184, refused: 185},
+		{blockSize: 65536, fits: 255},
+	} {
+		var buf testBuffer
+
+		w := erofs.Create(&buf, erofs.WithBlockSize(tc.blockSize))
+		writeFile(t, w, "/a", []byte("a"))
+
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		img := buf.Bytes()
+		img[disk.SuperBlockOffset+13] = tc.fits
+		stampChecksum(img)
+
+		if _, err := erofs.Open(bytes.NewReader(img)); err != nil {
+			t.Fatalf("block %d with %d extension slots: %v", tc.blockSize, tc.fits, err)
+		}
+
+		if tc.refused == 0 {
+			continue
+		}
+
+		img[disk.SuperBlockOffset+13] = tc.refused
+		stampChecksum(img)
+
+		if _, err := erofs.Open(bytes.NewReader(img)); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("block %d with %d extension slots: %v; want ErrCorrupt", tc.blockSize, tc.refused, err)
+		}
+	}
+}
