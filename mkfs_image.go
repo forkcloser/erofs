@@ -455,11 +455,21 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			}
 
 		case disk.StatTypeSymlink:
+			// The reader refuses the inode (erofs_fill_symlink's rule, an
+			// empty fast symlink included); so does the copy, in the same class.
+			if layout == disk.LayoutFlatInline && size == 0 {
+				return fmt.Errorf("nid %d: invalid fast symlink size 0: %w", cur.nid, ErrCorrupt)
+			}
+
 			if size > 0 {
 				// #nosec G115 -- checked against totalBytes, an int64, above
 				linkData, err := inlineData(int64(size))
 				if err != nil {
 					return fmt.Errorf("read symlink data for nid %d: %w", cur.nid, err)
+				}
+
+				if bytes.IndexByte(linkData, 0) >= 0 {
+					return fmt.Errorf("nid %d: invalid fast symlink target: %w", cur.nid, ErrCorrupt)
 				}
 
 				fe.linkTarget = string(linkData)
