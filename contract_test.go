@@ -1148,7 +1148,7 @@ func judge(ref, got verdict) string {
 			return ""
 		case got.class == "invalid" && ref.longSymlink:
 			return ""
-		case got.class == "corrupt" && (ref.dupXattr || ref.undefinedXattr || ref.badTarget || ref.extentsOut || ref.direntType || !ref.complete):
+		case got.class == "corrupt" && (ref.dupXattr || ref.undefinedXattr || ref.badTarget || ref.extentsOut || ref.direntType || ref.nidHigh || !ref.complete):
 			return ""
 		default:
 			return "the reader refuses a sound image"
@@ -1205,6 +1205,7 @@ type verdict struct {
 	badTarget      bool // a symlink whose stored target is empty or holds a NUL, which the package refuses
 	unsortedDir    bool // a directory block out of name order: what a lookup finds there is the search's, not the format's
 	direntType     bool // a dirent whose type disagrees with its inode's mode: the kernel serves both, the reader refuses
+	nidHigh        bool // a dirent nid with bits 59-63 set: erofs_iloc's shift drops them, the reader refuses a nid that names no inode
 	extentsOut     bool // a file whose map runs past its device, which the package refuses at Stat and the kernel at the read
 	complete       bool // the image holds every block its superblock declares: a structure past its end points outside it
 }
@@ -1257,6 +1258,14 @@ func referenceVerdict(img, blob []byte) verdict {
 		// as corrupt, since fs.FS hands a consumer both.
 		if e.Dir.Type != direntTypeOf(in) {
 			v.direntType = true
+		}
+
+		// erofs_iloc computes nid << islotbits in 64 bits, so a nid with
+		// bits 59-63 set lands the kernel on the inode of the low bits;
+		// mkfs.erofs never writes one, and the package refuses a nid that
+		// cannot lie in the image rather than serve the inode it wraps onto.
+		if e.Dir.Nid>>59 != 0 {
+			v.nidHigh = true
 		}
 
 		// The kernel's readlink makes a C string of the target, so an empty

@@ -1,0 +1,7 @@
+go test fuzz v1
+uint8(3)
+uint32(2131)
+byte(0x50)
+uint32(60)
+byte(0)
+uint32(30720)
