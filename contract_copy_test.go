@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/erofs/internal/builder"
 	"github.com/forkcloser/erofs/internal/corpus"
 	"github.com/forkcloser/erofs/internal/erofsspec"
 )
@@ -38,7 +39,10 @@ import (
 // Hard-link identity is the source's link count: two names share one
 // inode in the copy when the source reports more than one link for it;
 // under a count of one, each name is copied as its own inode, content
-// intact, whatever inode the names shared in the source.
+// intact, whatever inode the names shared in the source. The identity is
+// the source's device and inode number together, and it is scoped to one
+// CopyFrom call: a later source whose numbers coincide links nothing to
+// the earlier one's files.
 //
 // The oracle is the reference reader over the copy, held to the source's
 // tree through corpus.Check, or, for an edited source, to the reference's
@@ -398,6 +402,163 @@ func TestContractMergeIsOverlay(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestContractMergeOverwriteOfHardlinkedName: an upper layer's file over
+// one name of a hard-linked pair replaces that name alone; the other keeps
+// the inode and the content, with one link, as a rename over a linked
+// name does. Either name: the copy meets d/alias first in its walk, so it
+// holds the inode and orig is the link to it; replacing each exercises
+// one side of the group.
+func TestContractMergeOverwriteOfHardlinkedName(t *testing.T) {
+	t.Parallel()
+
+	nodes := []corpus.Node{
+		{Path: "orig", Type: tar.TypeReg, Mode: 0o644, Data: []byte("linked"), Sec: corpus.BuildTime},
+		{Path: "d", Type: tar.TypeDir, Mode: 0o755, Sec: corpus.BuildTime},
+		{Path: "d/alias", Type: tar.TypeLink, Link: "orig", Sec: corpus.BuildTime},
+	}
+
+	src := corpus.Image{Name: "linked", Img: writeImage(t, nodes), Tree: nodes}
+
+	for _, replaced := range []string{"orig", "d/alias"} {
+		t.Run(replaced, func(t *testing.T) {
+			t.Parallel()
+
+			out := &testBuffer{}
+			w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+			if err := errors.Join(
+				w.CopyFrom(openImage(t, src)),
+				w.CopyFrom(layer{}.file(replaced, "replaced").fsys(), erofs.Merge()),
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := w.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			want := []corpus.Node{
+				{Path: "orig", Type: tar.TypeReg, Mode: 0o644, Data: []byte("linked"), Sec: corpus.BuildTime},
+				{Path: "d", Type: tar.TypeDir, Mode: 0o755, Sec: corpus.BuildTime},
+				{Path: "d/alias", Type: tar.TypeReg, Mode: 0o644, Data: []byte("linked"), Sec: corpus.BuildTime},
+			}
+
+			// The upper layer carries the replaced name's parents too, so a
+			// directory over a directory: "the upper's bits win".
+			for i := range want {
+				switch want[i].Path {
+				case replaced:
+					want[i].Data, want[i].Sec = []byte("replaced"), at().Unix()
+				case path.Dir(replaced):
+					want[i].Sec = at().Unix()
+				}
+			}
+
+			im := corpus.Image{Name: "overwrite-of-link", Img: out.Bytes(), Tree: want}
+			corpus.Check(t, im, parseImage(t, im), want, true)
+		})
+	}
+}
+
+// TestContractCopyHardLinkIdentity: a generic source's names share an inode
+// in the copy when their Sys() reports the same device and inode number
+// with a link count above one; the same inode number on another device,
+// no inode number at all, or a count of one makes each name its own
+// inode; a count higher than the names the source holds is not copied.
+func TestContractCopyHardLinkIdentity(t *testing.T) {
+	t.Parallel()
+
+	entry := func(nlink uint32, dev, ino uint64) *builder.Entry {
+		return &builder.Entry{Nlink: nlink, Dev: dev, Ino: ino}
+	}
+	file := func(content string, sys *builder.Entry) *fstest.MapFile {
+		return &fstest.MapFile{Data: []byte(content), Mode: 0o644, ModTime: at(), Sys: sys}
+	}
+
+	src := fstest.MapFS{
+		".":       &fstest.MapFile{Mode: fs.ModeDir | corpus.RootMode, ModTime: time.Unix(corpus.BuildTime, 0)},
+		"a":       file("dev1", entry(2, 1, 100)),
+		"a2":      file("ignored: the same inode as a", entry(2, 1, 100)),
+		"b":       file("dev2", entry(2, 2, 100)),
+		"noino":   file("n1", entry(3, 0, 0)),
+		"noino2":  file("n2", entry(3, 0, 0)),
+		"single":  file("s1", entry(1, 1, 200)),
+		"single2": file("s2", entry(1, 1, 200)),
+		"partial": file("p", entry(5, 1, 300)),
+	}
+
+	out := &testBuffer{}
+	w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if err := errors.Join(w.CopyFrom(src), w.Close()); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := func(name, content string) corpus.Node {
+		return corpus.Node{Path: name, Type: tar.TypeReg, Mode: 0o644, Data: []byte(content), Sec: at().Unix()}
+	}
+
+	want := []corpus.Node{
+		reg("a", "dev1"),
+		{Path: "a2", Type: tar.TypeLink, Link: "a", Sec: at().Unix()},
+		reg("b", "dev2"),
+		reg("noino", "n1"),
+		reg("noino2", "n2"),
+		reg("single", "s1"),
+		reg("single2", "s2"),
+		reg("partial", "p"),
+	}
+
+	im := corpus.Image{Name: "hard-link-identity", Img: out.Bytes(), Tree: want}
+	corpus.Check(t, im, parseImage(t, im), want, true)
+}
+
+// TestContractCopyHardLinkScopeIsOneCall: two image sources of the same
+// shape, whose inode numbers coincide, each with a linked pair, copied by
+// two CopyFrom calls into one writer: each pair shares its own inode, and
+// nothing of the second source links to the first's files.
+func TestContractCopyHardLinkScopeIsOneCall(t *testing.T) {
+	t.Parallel()
+
+	shape := func(prefix, content string) []corpus.Node {
+		return []corpus.Node{
+			{Path: prefix + "-orig", Type: tar.TypeReg, Mode: 0o644, Data: []byte(content), Sec: corpus.BuildTime},
+			{Path: prefix + "-link", Type: tar.TypeLink, Link: prefix + "-orig", Sec: corpus.BuildTime},
+			{
+				Path: prefix + "-other",
+				Type: tar.TypeReg,
+				Mode: 0o644,
+				Data: []byte(prefix + " other"),
+				Sec:  corpus.BuildTime,
+			},
+		}
+	}
+
+	nodesA, nodesB := shape("a", "a shared"), shape("b", "b shared")
+	srcA := corpus.Image{Name: "a", Img: writeImage(t, nodesA), Tree: nodesA}
+	srcB := corpus.Image{Name: "b", Img: writeImage(t, nodesB), Tree: nodesB}
+
+	// The case holds only when the two sources' inode numbers coincide.
+	refA, refB := parseImage(t, srcA), parseImage(t, srcB)
+	inA, errA := refA.Resolve("a-orig", 0)
+	inB, errB := refB.Resolve("b-orig", 0)
+
+	if errA != nil || errB != nil || inA.Nid != inB.Nid {
+		t.Fatalf("the two sources do not share their inode numbers (%v %v): the case exercises nothing", errA, errB)
+	}
+
+	out := &testBuffer{}
+	w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if err := errors.Join(w.CopyFrom(openImage(t, srcA)), w.CopyFrom(openImage(t, srcB)), w.Close()); err != nil {
+		t.Fatal(err)
+	}
+
+	want := slices.Concat(nodesA, nodesB)
+	im := corpus.Image{Name: "hard-link-scope", Img: out.Bytes(), Tree: want}
+	corpus.Check(t, im, parseImage(t, im), want, true)
 }
 
 // TestContractMergeWhiteoutOfHardlinkedName: a whiteout on one name of a
