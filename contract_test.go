@@ -1155,6 +1155,8 @@ func judge(ref, got verdict) string {
 			return ""
 		case got.class == "corrupt" && (ref.dupXattr || ref.undefinedXattr || ref.badTarget || ref.extentsOut || ref.direntType || ref.nidHigh || !ref.complete):
 			return ""
+		case (got.class == "corrupt" || got.class == "invalid") && ref.sharedOut:
+			return ""
 		default:
 			return "the reader refuses a sound image"
 		}
@@ -1205,6 +1207,7 @@ type verdict struct {
 	tree           string
 	notImplemented bool // the image uses a feature the package documents as ErrNotImplemented
 	longSymlink    bool // a symlink target over the package's 4096-byte bound: the kernel reads it, the reader refuses
+	sharedOut      bool // the superblock's shared-xattr start past the image: the kernel fails on use, the reader at Open
 	dupXattr       bool // an inode names one xattr twice, which the README says is refused
 	undefinedXattr bool // an xattr index with no prefix (7 and up, or a long prefix past the table), refused likewise
 	badTarget      bool // a symlink whose stored target is empty or holds a NUL, which the package refuses
@@ -1240,8 +1243,22 @@ func referenceVerdict(img, blob []byte) verdict {
 		erofsspec.FeatureIncompatLZ40Padding | erofsspec.FeatureIncompatComprCfgs | erofsspec.FeatureIncompatZTailpacking,
 	)
 
+	// xattr_blkaddr is read at mount without a bound and fails only on a
+	// shared xattr's use; the package bounds it at Open by the image the
+	// superblock declares, a field naming nothing inside the image being a
+	// superblock it does not trust, and keeps that as a documented
+	// divergence where no inode uses a shared xattr.
+	sharedOut := uint64(
+		ref.Super.XattrBlkAddr,
+	)*uint64(
+		ref.Super.BlockSize,
+	) >= ref.Super.Blocks*uint64(
+		ref.Super.BlockSize,
+	)
+
 	v := verdict{
-		complete: complete,
+		complete:  complete,
+		sharedOut: sharedOut,
 		notImplemented: ref.Super.ExtSlots > 0 ||
 			ref.Super.FeatureIncompat&erofsspec.FeatureIncompat48Bit != 0 ||
 			ref.Super.FeatureIncompat&compression != 0 ||
