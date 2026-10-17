@@ -63,6 +63,14 @@ corrupt or truncated one is refused as `ErrCorrupt`, an unsupported one as
 the test. The defects the differential found in the reader are listed in the
 commit that added `contract_test.go`.
 
+The reader is stricter than the kernel in three places, each a documented
+divergence of the differential: a dirent whose type disagrees with its
+inode's mode is `ErrCorrupt`, where the kernel serves each as it is; a dirent
+nid with bits 59 to 63 set is `ErrCorrupt`, where the kernel's shift drops
+them and reads another inode; an extended attribute with name index 5 is
+listed under `lustre.`, the format's prefix, where the kernel's handler table
+has no entry and hides it.
+
 ## Features
 
 - **Read** EROFS images through Go's `fs.FS` interface
@@ -175,9 +183,10 @@ entry. The reader is stricter and follows the `fs.FS` convention exactly.
 `CopyFrom` takes ownership, times and link identity from `Sys()` when it is a
 `*syscall.Stat_t` (linux, darwin and freebsd), a `*builder.Entry` or this
 package's `*Stat`, as an image opened here hands out; a source with none of
-them still contributes mode, size and `ModTime`. Two names that share a source inode become one inode with two
-names in the image, and a file's link count is computed from the names the
-image holds.
+them still contributes mode, size and `ModTime`. Two names that share a source
+inode become one inode with two names in the image when the source reports
+more than one link for it; a file's link count is computed from the names the
+image holds, a directory's from its subdirectories.
 
 ## Limits
 

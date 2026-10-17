@@ -1050,3 +1050,68 @@ func TestReaderDirentNameOffset(t *testing.T) {
 		}
 	}
 }
+
+// TestReaderShortDirectoryBlock: a directory whose size leaves a last block
+// shorter than one dirent is refused by ReadDir as ErrCorrupt, as the
+// kernel's readdir refuses it ("bogus dirent" or "invalid de[0].nameoff",
+// whatever lies past i_size in the block), where the reader served the
+// directory without that block's entries. The first input is the fuzzer's:
+// small-b512 with the size of inode 151 set to 6.
+func TestReaderShortDirectoryBlock(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "small-b512" {
+			continue
+		}
+
+		edited := bytes.Clone(im.Img)
+		edited[4840], edited[4841] = 0x06, 0x00
+
+		fsys, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		refused := 0
+
+		err = fs.WalkDir(fsys, ".", func(_ string, _ fs.DirEntry, err error) error {
+			if errors.Is(err, erofs.ErrCorrupt) {
+				refused++
+
+				return fs.SkipDir
+			}
+
+			return err
+		})
+		if err != nil || refused != 1 {
+			t.Fatalf(
+				"small-b512 with a six-byte directory: walk %v, %d refused; want one ErrCorrupt and nothing else",
+				err,
+				refused,
+			)
+		}
+	}
+
+	img := buildImage(t, func(w *erofs.Writer) {
+		if err := w.Mkdir("/d", 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		writeFile(t, w, "/d/x", []byte("x"))
+	})
+
+	// i_size is the eight bytes at offset 8 of the extended inode: a
+	// directory of six bytes has one block of six.
+	at := inodeOffset(t, img, "d")
+	binary.LittleEndian.PutUint64(img[at+8:], 6)
+
+	fsys, err := erofs.Open(bytes.NewReader(img))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fs.ReadDir(fsys, "d"); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Fatalf("ReadDir of a six-byte directory: %v; want ErrCorrupt", err)
+	}
+}

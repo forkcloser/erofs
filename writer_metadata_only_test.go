@@ -6,6 +6,7 @@ package erofs_test
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"io/fs"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/forkcloser/erofs"
 	"github.com/forkcloser/erofs/internal/corpus"
+	"github.com/forkcloser/erofs/internal/disk"
 )
 
 // A metadata-only copy of an image registers the image as a device of the
@@ -333,5 +335,89 @@ func TestWriterMetadataOnlyFlatDataOnMappedDevice(t *testing.T) {
 		if err != nil || !bytes.Equal(got, want) {
 			t.Fatalf("the copy reads multi as %d bytes, %v; %s", len(got), err, sameBytes(want, got))
 		}
+	}
+}
+
+// TestWriterMetadataOnlyRefusesBogusMode: the fast path refuses, as Stat
+// does and in its class, an inode whose i_mode names no type (the kernel's
+// "bogus i_mode" at iget) and a dirent whose type disagrees with its
+// inode's. The first input is the fuzzer's: small-chunk-512 with the low
+// byte of d/sub/e32's nid zeroed, naming nid 0, a slot of zeros.
+func TestWriterMetadataOnlyRefusesBogusMode(t *testing.T) {
+	t.Parallel()
+
+	for _, src := range corpus.Committed(t) {
+		if src.Name != "small-chunk-512" {
+			continue
+		}
+
+		edited := bytes.Clone(src.Img)
+		edited[2112] = 0x00
+
+		source := openWithDevices(t, edited)
+
+		if _, err := fs.Lstat(source, "d/sub/e32"); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("test premise broken: Lstat of the entry naming nid 0: %v", err)
+		}
+
+		var buf testBuffer
+
+		w := erofs.Create(&buf)
+		if err := w.CopyFrom(source, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("CopyFrom(MetadataOnly) of an image with a bogus i_mode: %v; want ErrCorrupt", err)
+		}
+	}
+
+	// A dirent calling a regular file a directory: the Writer packs the
+	// root's dirents beside its inode, ".", ".." then "a", twelve bytes
+	// each, the file type at byte ten.
+	var built testBuffer
+
+	w := erofs.Create(&built)
+	writeFile(t, w, "/a", []byte("a"))
+
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	img := built.Bytes()
+	at := inodeOffset(t, img, ".") + disk.SizeInodeExtended + 2*disk.SizeDirent + 10
+
+	if img[at] != disk.FileTypeReg {
+		t.Fatalf("test premise broken: a's dirent file type is %d, want %d", img[at], disk.FileTypeReg)
+	}
+
+	img[at] = disk.FileTypeDir
+
+	source := openWithDevices(t, img)
+
+	if _, err := fs.Lstat(source, "a"); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Fatalf("test premise broken: Lstat of a file whose dirent says directory: %v", err)
+	}
+
+	var buf testBuffer
+
+	w = erofs.Create(&buf)
+	if err := w.CopyFrom(source, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Fatalf("CopyFrom(MetadataOnly) of an image whose dirent disagrees with its inode: %v; want ErrCorrupt", err)
+	}
+
+	// The case only the mode check guards: a dirent of type zero beside an
+	// inode whose type bits are zero, the two in agreement about nothing.
+	// i_mode is the two bytes at offset 4 of the inode.
+	bogus := built.Bytes()
+	bogus[at] = 0
+	inode := inodeOffset(t, bogus, "a")
+	binary.LittleEndian.PutUint16(bogus[inode+4:], binary.LittleEndian.Uint16(bogus[inode+4:])&^disk.StatTypeMask)
+
+	source = openWithDevices(t, bogus)
+
+	if _, err := fs.Lstat(source, "a"); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Fatalf("test premise broken: Lstat of an inode with no type: %v", err)
+	}
+
+	w = erofs.Create(&buf)
+	if err := w.CopyFrom(source, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Fatalf("CopyFrom(MetadataOnly) of an image with an inode of no type: %v; want ErrCorrupt", err)
 	}
 }

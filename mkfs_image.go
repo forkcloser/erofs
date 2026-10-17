@@ -111,6 +111,8 @@ func newMetaReader(ra io.ReaderAt, metaStart, totalBytes int64, blockSize int) f
 type imgQEntry struct {
 	nid  uint64
 	path string
+	// ftype is the dirent's file type; the root has none.
+	ftype uint8
 }
 
 // copyFromImage is a fast path for CopyFrom when the source is an *image.
@@ -330,6 +332,18 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			if _, err := xattrBodySize(cur.nid, xcnt); err != nil {
 				return err
 			}
+		}
+
+		// The kernel refuses an i_mode whose type bits name no type at iget
+		// ("bogus i_mode"), and the reader refuses a dirent whose type
+		// disagrees with its inode's; so does the copy, in Stat's class.
+		if modeToFileType(mode) == 0 {
+			return fmt.Errorf("nid %d: bogus i_mode %#o: %w", cur.nid, mode, ErrCorrupt)
+		}
+
+		if cur.path != "/" && cur.ftype != modeToFileType(mode) {
+			return fmt.Errorf("inode %d has type %#o but its dirent says file type %d: %w",
+				cur.nid, mode&disk.StatTypeMask, cur.ftype, ErrCorrupt)
 		}
 
 		// i_size is unsigned on disk and an int64 everywhere the Writer
@@ -689,7 +703,7 @@ func (*Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPath str
 				return err
 			}
 
-			*queue = append(*queue, imgQEntry{nid: nid, path: childPath})
+			*queue = append(*queue, imgQEntry{nid: nid, path: childPath, ftype: blk[off+10]})
 		}
 
 		pos = blockEnd
