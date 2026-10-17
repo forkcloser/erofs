@@ -855,7 +855,6 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 			}
 		}
 
-		// For directories, ensure nlink >= 2.
 		if info.Mode().IsDir() {
 			if be == nil {
 				if be, err = entryFromSys(info); err != nil {
@@ -863,12 +862,8 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 				}
 
 				if be == nil {
-					be = &builder.Entry{Nlink: 2}
+					be = &builder.Entry{}
 				}
-			}
-
-			if be.Nlink < 2 {
-				be.Nlink = 2
 			}
 
 			return fsys.add(p, &entryFileInfo{info: info, sys: be})
@@ -1652,11 +1647,6 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 		root.mtime = be.Mtime
 
 		root.mtimeNs = be.MtimeNs
-		if be.Nlink > 0 {
-			root.nlink = be.Nlink
-			root.nlinkSet = true
-		}
-
 		root.xattrs = be.Xattrs
 
 		return nil
@@ -1695,16 +1685,9 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 		chunks:     be.Chunks,
 		contiguous: be.Contiguous,
 	}
-	// A directory's count is the source's word (it may describe children
-	// this copy never sees). A file's count is not carried over: it is
-	// computed from the names the image actually holds, so a file whose
-	// other names were not copied does not claim links that do not exist.
-	// SetNlink remains the override.
-	if typ == disk.StatTypeDir && be.Nlink > 0 {
-		fe.nlink = be.Nlink
-		fe.nlinkSet = true
-	}
-
+	// No count is carried over: a file's is the names the image holds, a
+	// directory's two plus its subdirectories at Close, however the source
+	// counted (APFS counts every entry). SetNlink remains the override.
 	fe = fsys.placeEntry(fe)
 	if typ != disk.StatTypeDir && be.Ino != 0 && be.Nlink > 1 && fsys.copyLinks != nil {
 		fsys.copyLinks[hardlinkKey{be.Dev, be.Ino}] = fe

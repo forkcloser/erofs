@@ -13,6 +13,7 @@ import (
 	"testing/fstest"
 
 	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/erofs/internal/builder"
 )
 
 // The writer refuses what its reader and the kernel refuse, and what it
@@ -275,6 +276,61 @@ func TestWriterCopyFromRefusesWhatTheAPIRefuses(t *testing.T) {
 		w := erofs.Create(&buf)
 		if err := w.CopyFrom(src); !errors.Is(err, erofs.ErrInvalid) {
 			t.Fatalf("CopyFrom with a bad %s: %v; want ErrInvalid", what, err)
+		}
+	}
+}
+
+// TestWriterDirectoryLinkCount: a directory's link count is two plus its
+// subdirectories in the image at Close, whatever a source claimed: an
+// overlay that replaces a file with a directory raises its parent's count,
+// and a source whose directory count follows another convention (APFS
+// counts every entry) does not reach the image. SetNlink stays the one
+// override.
+func TestWriterDirectoryLinkCount(t *testing.T) {
+	t.Parallel()
+
+	var buf testBuffer
+
+	w := erofs.Create(&buf)
+
+	lower := fstest.MapFS{
+		"d":   &fstest.MapFile{Mode: fs.ModeDir | 0o755},
+		"d/b": &fstest.MapFile{Data: []byte("B"), Mode: 0o644},
+	}
+	if err := w.CopyFrom(lower); err != nil {
+		t.Fatal(err)
+	}
+
+	upper := fstest.MapFS{
+		"d":   &fstest.MapFile{Mode: fs.ModeDir | 0o755, Sys: &builder.Entry{Nlink: 12}},
+		"d/b": &fstest.MapFile{Mode: fs.ModeDir | 0o755, Sys: &builder.Entry{Nlink: 7}},
+		"e":   &fstest.MapFile{Mode: fs.ModeDir | 0o755, Sys: &builder.Entry{Nlink: 9}},
+	}
+	if err := w.CopyFrom(upper, erofs.Merge()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.SetNlink("/e", 5); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	fsys, err := erofs.Open(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, want := range map[string]uint64{".": 4, "d": 3, "d/b": 2, "e": 5} {
+		st, err := fs.Stat(fsys, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if got := st.Sys().(*erofs.Stat).Nlink; got != want {
+			t.Errorf("%s: nlink %d, want %d", name, got, want)
 		}
 	}
 }

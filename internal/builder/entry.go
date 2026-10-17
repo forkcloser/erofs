@@ -9,10 +9,10 @@ type Entry struct {
 	UID, GID uint32
 	Mtime    uint64
 	MtimeNs  uint32
-	// Nlink is the source's link count. For a directory it is carried into
-	// the image as-is; for anything else it is only a hint that the source
-	// may name the inode more than once, and the image's count is computed
-	// from the names it actually holds.
+	// Nlink is the source's link count, a hint that the source may name the
+	// inode more than once; the image's count is computed from what it
+	// holds, a file's from its names and a directory's from its
+	// subdirectories, whatever the source counted.
 	Nlink uint32
 	Rdev  uint32
 	// Dev and Ino identify the source inode (syscall.Stat_t.Dev/Ino, or an
