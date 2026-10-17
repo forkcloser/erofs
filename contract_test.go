@@ -1279,16 +1279,27 @@ func referenceVerdict(img, blob []byte) verdict {
 		}
 
 		xattrs := map[string]string{}
-		for _, x := range in.Xattrs {
-			if _, dup := xattrs[x.Name()]; dup {
-				v.dupXattr = true
-			}
 
-			if x.Unresolved && x.Index != 0 {
+		for _, x := range in.Xattrs {
+			name := x.Name()
+
+			switch {
+			case x.Unresolved && x.Index&0x7f == 5:
+				// Index 5 is the format's "lustre." (erofs_fs.h), which the
+				// kernel has no handler for: its listxattr hides the
+				// attribute. The package lists it under the format's
+				// spelling, as erofs-utils does; the dump takes that
+				// spelling, the divergence being the kernel's silence.
+				name = "lustre." + x.Suffix
+			case x.Unresolved && x.Index != 0:
 				v.undefinedXattr = true
 			}
 
-			xattrs[x.Name()] = string(x.Value)
+			if _, dup := xattrs[name]; dup {
+				v.dupXattr = true
+			}
+
+			xattrs[name] = string(x.Value)
 		}
 
 		// Mtime as the stored 64-bit field: the kernel takes it signed, the
