@@ -22,8 +22,16 @@ import (
 func Check(tb testing.TB, im Image, ref *erofsspec.Image, nodes []Node, nsec bool) {
 	tb.Helper()
 
-	checkSuper(tb, im, ref)
 	checkRoot(tb, ref)
+	CheckTree(tb, im, ref, nodes, nsec)
+}
+
+// CheckTree is Check without the root's bits: for an image whose root is
+// a host directory's, with that directory's owner.
+func CheckTree(tb testing.TB, im Image, ref *erofsspec.Image, nodes []Node, nsec bool) {
+	tb.Helper()
+
+	checkSuper(tb, im, ref)
 
 	want := ByPath(nodes)
 	seen := map[string]bool{}

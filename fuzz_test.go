@@ -88,6 +88,47 @@ func FuzzReaderEdits(f *testing.F) {
 	})
 }
 
+// FuzzCopyFromEdits: a committed image with up to two byte edits and a
+// truncation, opened by the package and copied with its data. A copy the
+// package refuses is refused as the reader's
+// classes or ErrNotExist (a directory out of order, met by the copy's own
+// Open); a copy it makes is the source as the reference reads it, every
+// entry with the link count the writer computes; a panic never agrees.
+func FuzzCopyFromEdits(f *testing.F) {
+	images := editImages(f)
+
+	for i, im := range images {
+		f.Add(uint8(i), uint32(0), byte(0), uint32(0), byte(0), uint32(0))
+		f.Add(uint8(i), uint32(1152), byte(0x7f), uint32(1152+4), byte(0x01), uint32(0))
+		f.Add(uint8(i), uint32(0), byte(0), uint32(0), byte(0), uint32(min(len(im.Img), 2048)))
+
+		names, cuts := direntEdges(f, im)
+		for _, off := range names[:min(len(names), 4)] {
+			f.Add(uint8(i), off, byte(0), uint32(0), byte(0), uint32(0))
+		}
+
+		for _, cut := range cuts {
+			f.Add(uint8(i), uint32(0), byte(0), uint32(0), byte(0), cut)
+		}
+	}
+
+	f.Fuzz(func(t *testing.T, which uint8, off1 uint32, b1 byte, off2 uint32, b2 byte, truncate uint32) {
+		im := images[int(which)%len(images)]
+		img := bytes.Clone(im.Img)
+
+		img[int(off1)%len(img)] = b1
+		if off2 != off1 {
+			img[int(off2)%len(img)] = b2
+		}
+
+		if truncate != 0 {
+			img = img[:int(truncate)%(len(img)+1)]
+		}
+
+		checkEditedCopy(t, im, img, fmt.Sprintf("%d=%#x, %d=%#x, cut to %d", off1, b1, off2, b2, len(img)))
+	})
+}
+
 // editImages are the committed images of the small tree, the sweep's, and
 // the tree at 512 for its many-block directory.
 func editImages(tb testing.TB) []corpus.Image {
