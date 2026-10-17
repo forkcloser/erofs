@@ -303,6 +303,29 @@ func goMode(mode int64) fs.FileMode {
 	return m
 }
 
+// direntTypeOf is the dirent file type an inode's mode calls for
+// (erofs_fs.h, EROFS_FT_*).
+func direntTypeOf(in *erofsspec.Inode) uint8 {
+	switch in.Mode & erofsspec.ModeTypeMask {
+	case erofsspec.ModeRegular:
+		return erofsspec.TypeRegular
+	case erofsspec.ModeDir:
+		return erofsspec.TypeDir
+	case erofsspec.ModeChar:
+		return erofsspec.TypeChar
+	case erofsspec.ModeBlock:
+		return erofsspec.TypeBlock
+	case erofsspec.ModeFifo:
+		return erofsspec.TypeFifo
+	case erofsspec.ModeSocket:
+		return erofsspec.TypeSocket
+	case erofsspec.ModeSymlink:
+		return erofsspec.TypeSymlink
+	default:
+		return erofsspec.TypeUnknown
+	}
+}
+
 // modeOf is the fs.FileMode an inode's i_mode stands for.
 func modeOf(in *erofsspec.Inode) fs.FileMode {
 	m := goMode(int64(in.Mode &^ erofsspec.ModeTypeMask))
@@ -612,8 +635,10 @@ func checkFileReads(t *testing.T, fsys fs.FS, name string, want []byte, bs int) 
 
 	var buf bytes.Buffer
 
-	if _, cerr := io.Copy(&buf, f); cerr != nil || !bytes.Equal(buf.Bytes(), want) {
-		t.Errorf("%s: io.Copy %d bytes, %v, want %d", name, buf.Len(), cerr, len(want))
+	// io.Copy takes the file's WriteTo; the count it returns is the bytes
+	// written, which the inherited tests never read.
+	if n, cerr := io.Copy(&buf, f); cerr != nil || n != int64(len(want)) || !bytes.Equal(buf.Bytes(), want) {
+		t.Errorf("%s: io.Copy %d bytes (%d returned), %v, want %d", name, buf.Len(), n, cerr, len(want))
 	}
 
 	if cerr := f.Close(); cerr != nil {
@@ -639,8 +664,9 @@ func checkFileReads(t *testing.T, fsys fs.FS, name string, want []byte, bs int) 
 
 	buf.Reset()
 
-	if _, cerr := io.Copy(&buf, f); cerr != nil || !bytes.Equal(slices.Concat(head, buf.Bytes()), want) {
-		t.Errorf("%s: io.Copy after %d bytes: %d bytes, %v", name, k, buf.Len(), cerr)
+	n, cerr := io.Copy(&buf, f)
+	if cerr != nil || n != int64(len(want)-k) || !bytes.Equal(slices.Concat(head, buf.Bytes()), want) {
+		t.Errorf("%s: io.Copy after %d bytes: %d bytes (%d returned), %v", name, k, buf.Len(), n, cerr)
 	}
 
 	_ = f.Close()
@@ -1122,7 +1148,7 @@ func judge(ref, got verdict) string {
 			return ""
 		case got.class == "invalid" && ref.longSymlink:
 			return ""
-		case got.class == "corrupt" && (ref.dupXattr || ref.undefinedXattr || ref.badTarget || ref.extentsOut || !ref.complete):
+		case got.class == "corrupt" && (ref.dupXattr || ref.undefinedXattr || ref.badTarget || ref.extentsOut || ref.direntType || ref.nidHigh || !ref.complete):
 			return ""
 		default:
 			return "the reader refuses a sound image"
@@ -1178,6 +1204,8 @@ type verdict struct {
 	undefinedXattr bool // an xattr index with no prefix (7 and up, or a long prefix past the table), refused likewise
 	badTarget      bool // a symlink whose stored target is empty or holds a NUL, which the package refuses
 	unsortedDir    bool // a directory block out of name order: what a lookup finds there is the search's, not the format's
+	direntType     bool // a dirent whose type disagrees with its inode's mode: the kernel serves both, the reader refuses
+	nidHigh        bool // a dirent nid with bits 59-63 set: erofs_iloc's shift drops them, the reader refuses a nid that names no inode
 	extentsOut     bool // a file whose map runs past its device, which the package refuses at Stat and the kernel at the read
 	complete       bool // the image holds every block its superblock declares: a structure past its end points outside it
 }
@@ -1223,6 +1251,21 @@ func referenceVerdict(img, blob []byte) verdict {
 
 		if in.IsSymlink() && in.Size > 4096 {
 			v.longSymlink = true
+		}
+
+		// The kernel hands readdir the dirent's type and stat the inode's,
+		// and never compares them; the package refuses the disagreement
+		// as corrupt, since fs.FS hands a consumer both.
+		if e.Dir.Type != direntTypeOf(in) {
+			v.direntType = true
+		}
+
+		// erofs_iloc computes nid << islotbits in 64 bits, so a nid with
+		// bits 59-63 set lands the kernel on the inode of the low bits;
+		// mkfs.erofs never writes one, and the package refuses a nid that
+		// cannot lie in the image rather than serve the inode it wraps onto.
+		if e.Dir.Nid>>59 != 0 {
+			v.nidHigh = true
 		}
 
 		// The kernel's readlink makes a C string of the target, so an empty
