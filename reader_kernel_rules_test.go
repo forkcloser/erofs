@@ -12,6 +12,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/forkcloser/erofs"
@@ -893,5 +894,224 @@ func TestReaderChunkPastDevice(t *testing.T) {
 		if _, err := fs.ReadFile(fsys, "d/sub/e08"); !errors.Is(err, erofs.ErrCorrupt) {
 			t.Fatalf("ReadFile of a chunk past its device: %v; want ErrCorrupt", err)
 		}
+	}
+}
+
+// TestReaderFastSymlinkTarget: a fast symlink whose inline target holds a
+// NUL, or is empty, is refused with its inode, as the kernel's
+// erofs_fill_symlink refuses it ("invalid fast symlink size"), so Lstat is
+// ErrCorrupt and a metadata-only copy of the image refuses too, not
+// ReadLink alone. The
+// first input is the fuzzer's: small-chunk-512 with the one byte of d/s's
+// target set to zero.
+func TestReaderFastSymlinkTarget(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "small-chunk-512" {
+			continue
+		}
+
+		edited := bytes.Clone(im.Img)
+		edited[1824] = 0x00
+
+		fsys, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := fs.Lstat(fsys, "d/s"); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("Lstat of a fast symlink with a NUL in its target: %v; want ErrCorrupt", err)
+		}
+
+		var buf testBuffer
+
+		w := erofs.Create(&buf)
+		if err := w.CopyFrom(fsys, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("CopyFrom(MetadataOnly) of an image with such a symlink: %v; want ErrCorrupt", err)
+		}
+	}
+
+	img := buildImage(t, func(w *erofs.Writer) {
+		if err := w.Symlink("ab", "/l"); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// The Writer packs the target beside its extended inode, which carries
+	// no xattrs here.
+	at := inodeOffset(t, img, "l") + disk.SizeInodeExtended
+	if string(img[at:at+2]) != "ab" {
+		t.Fatalf("test premise broken: the target beside the inode reads %q", img[at:at+2])
+	}
+
+	img[at+1] = 0
+
+	fsys, err := erofs.Open(bytes.NewReader(img))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, lerr := fs.Lstat(fsys, "l"); !errors.Is(lerr, erofs.ErrCorrupt) {
+		t.Fatalf("Lstat of a Writer symlink given a NUL: %v; want ErrCorrupt", lerr)
+	}
+
+	// The other half of the kernel's rule: a fast symlink of size zero.
+	// i_size is the eight bytes at offset 8 of the extended inode.
+	empty := buildImage(t, func(w *erofs.Writer) {
+		if serr := w.Symlink("ab", "/l"); serr != nil {
+			t.Fatal(serr)
+		}
+	})
+	at = inodeOffset(t, empty, "l")
+	binary.LittleEndian.PutUint64(empty[at+8:], 0)
+
+	fsys, err = erofs.Open(bytes.NewReader(empty))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, lerr := fs.Lstat(fsys, "l"); !errors.Is(lerr, erofs.ErrCorrupt) {
+		t.Fatalf("Lstat of a fast symlink of size zero: %v; want ErrCorrupt", lerr)
+	}
+}
+
+// TestReaderDirentNameOffset: a directory block whose first name offset is
+// not a whole number of dirents is refused by ReadDir as the kernel's readdir
+// refuses it ("invalid de[0].nameoff"), before any entry is served; the
+// reader took the quotient as the entry count and served a listing cut
+// short. The first input is the fuzzer's: b512 with the first name offset
+// of a block of "many" set to 123, which read as ten entries of three
+// hundred.
+func TestReaderDirentNameOffset(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "b512" {
+			continue
+		}
+
+		edited := bytes.Clone(im.Img)
+		edited[27144] = 0x7b
+
+		fsys, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		ents, err := fs.ReadDir(fsys, "many")
+		if !errors.Is(err, erofs.ErrCorrupt) || !strings.Contains(err.Error(), "invalid de[0].nameoff") ||
+			len(ents) != 0 {
+			t.Fatalf(
+				"b512 many with de[0].nameoff 123: %d entries, %v; want none and the kernel's refusal",
+				len(ents),
+				err,
+			)
+		}
+	}
+
+	img := buildImage(t, func(w *erofs.Writer) {
+		if err := w.Mkdir("/d", 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		writeFile(t, w, "/d/x", []byte("x"))
+		writeFile(t, w, "/d/y", []byte("y"))
+	})
+
+	// The Writer packs a small directory's dirents beside its extended
+	// inode, which carries no xattrs here: the first dirent's name offset
+	// is the first two bytes after its nid, nid and type.
+	at := inodeOffset(t, img, "d") + disk.SizeInodeExtended + 8
+
+	nameOff := binary.LittleEndian.Uint16(img[at:])
+	if nameOff != 4*disk.SizeDirent {
+		t.Fatalf("test premise broken: de[0].nameoff is %d, want %d for four entries", nameOff, 4*disk.SizeDirent)
+	}
+
+	// An odd offset is refused as the kernel's rule, not by what the names
+	// at the odd offset happen to hold.
+	for _, bad := range []uint16{nameOff + 1, nameOff - 5} {
+		edited := bytes.Clone(img)
+		binary.LittleEndian.PutUint16(edited[at:], bad)
+		stampChecksum(edited)
+
+		fsys, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatalf("nameoff %d: Open: %v", bad, err)
+		}
+
+		if _, err := fs.ReadDir(
+			fsys,
+			"d",
+		); !errors.Is(err, erofs.ErrCorrupt) ||
+			!strings.Contains(err.Error(), "invalid de[0].nameoff") {
+			t.Fatalf("nameoff %d: ReadDir: %v; want the kernel's refusal", bad, err)
+		}
+	}
+}
+
+// TestReaderShortDirectoryBlock: a directory whose size leaves a last block
+// shorter than one dirent is refused by ReadDir as ErrCorrupt, as the
+// kernel's readdir refuses it ("bogus dirent" or "invalid de[0].nameoff",
+// whatever lies past i_size in the block), where the reader served the
+// directory without that block's entries. The first input is the fuzzer's:
+// small-b512 with the size of inode 151 set to 6.
+func TestReaderShortDirectoryBlock(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "small-b512" {
+			continue
+		}
+
+		edited := bytes.Clone(im.Img)
+		edited[4840], edited[4841] = 0x06, 0x00
+
+		fsys, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		refused := 0
+
+		err = fs.WalkDir(fsys, ".", func(_ string, _ fs.DirEntry, err error) error {
+			if errors.Is(err, erofs.ErrCorrupt) {
+				refused++
+
+				return fs.SkipDir
+			}
+
+			return err
+		})
+		if err != nil || refused != 1 {
+			t.Fatalf(
+				"small-b512 with a six-byte directory: walk %v, %d refused; want one ErrCorrupt and nothing else",
+				err,
+				refused,
+			)
+		}
+	}
+
+	img := buildImage(t, func(w *erofs.Writer) {
+		if err := w.Mkdir("/d", 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		writeFile(t, w, "/d/x", []byte("x"))
+	})
+
+	// i_size is the eight bytes at offset 8 of the extended inode: a
+	// directory of six bytes has one block of six.
+	at := inodeOffset(t, img, "d")
+	binary.LittleEndian.PutUint64(img[at+8:], 6)
+
+	fsys, err := erofs.Open(bytes.NewReader(img))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fs.ReadDir(fsys, "d"); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Fatalf("ReadDir of a six-byte directory: %v; want ErrCorrupt", err)
 	}
 }

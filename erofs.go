@@ -1986,16 +1986,46 @@ func (b *file) readInfo() (ino *inode, err error) {
 			b.nid, inoType, b.ftype, ErrCorrupt)
 	}
 
-	if xcnt > 0 {
-		xsize, err := xattrBodySize(b.nid, xcnt)
-		if err != nil {
-			return nil, err
-		}
+	if err := b.finishInfo(buf, xcnt); err != nil {
+		b.info = nil
 
-		b.info.xsize = xsize
+		return nil, err
 	}
 
 	return b.info, nil
+}
+
+// finishInfo sizes the inode's xattr body and judges a fast symlink's
+// inline target with its inode, as the kernel's erofs_fill_symlink does
+// (!i_size || strlen(link) != i_size), so no Stat, ReadDir or Open serves
+// an inode whose target is empty or holds a NUL. buf is the inode's block
+// from the inode on; a target running past it is refused where it is read.
+func (b *file) finishInfo(buf []byte, xcnt uint16) error {
+	ino := b.info
+
+	if xcnt > 0 {
+		xsize, err := xattrBodySize(b.nid, xcnt)
+		if err != nil {
+			return err
+		}
+
+		ino.xsize = xsize
+	}
+
+	if ino.mode&fs.ModeSymlink == 0 || ino.inodeLayout != disk.LayoutFlatInline || ino.size < 0 {
+		return nil
+	}
+
+	if ino.size == 0 {
+		return fmt.Errorf("inode %d: invalid fast symlink size 0: %w", b.nid, ErrCorrupt)
+	}
+
+	start := int64(ino.icsize) + int64(ino.xsize)
+	if end := start + ino.size; end <= int64(len(buf)) && bytes.IndexByte(buf[start:end], 0) >= 0 {
+		return fmt.Errorf("inode %d: invalid fast symlink target: %w", b.nid, ErrCorrupt)
+	}
+
+	return nil
 }
 
 // decodeInode decodes the compact or extended inode in buf, whose i_format
@@ -2420,9 +2450,13 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 		}
 
 		buf := b.bytes()
+		// A block shorter than one dirent holds no first name offset to
+		// read: the kernel's readdir ends in "bogus dirent" on it whatever
+		// the bytes beyond i_size say, and the lookup refuses it already.
 		if len(buf) < disk.SizeDirent {
 			d.img.putBlock(b)
-			break
+
+			return ents, fmt.Errorf("directory block of %d bytes for nid %d: %w", len(buf), fi.nid, ErrCorrupt)
 		}
 
 		var dirents [2]disk.Dirent
@@ -2432,12 +2466,14 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 		entryN := dirents[0].NameOff / disk.SizeDirent
 		bufLen := len(buf)
 
-		// Validate that NameOff is within bounds and dirent entries fit.
-		if int(dirents[0].NameOff) > bufLen || entryN == 0 {
+		// The first name offset counts the block's entries, so it is a
+		// whole number of dirents inside the block, as readdir checks it
+		// (dir.c, "invalid de[0].nameoff") and as lookupBlock already did.
+		if int(dirents[0].NameOff) >= bufLen || entryN == 0 || dirents[0].NameOff%disk.SizeDirent != 0 {
 			d.img.putBlock(b)
 
 			return ents, fmt.Errorf(
-				"invalid dirent name offset %d (buf size %d): %w",
+				"invalid de[0].nameoff %d (buf size %d): %w",
 				dirents[0].NameOff,
 				bufLen,
 				ErrCorrupt,
