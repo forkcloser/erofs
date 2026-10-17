@@ -373,12 +373,6 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			size:    size,
 			xattrs:  xattrs,
 		}
-		// Directories keep the source's count; a file's count is computed
-		// from its names in the output (see add).
-		if nlink > 0 && typ == disk.StatTypeDir {
-			fe.nlink = nlink
-			fe.nlinkSet = true
-		}
 
 		fe.fileClosed = true
 		if fsys.copyMetadataOnly {
@@ -518,8 +512,6 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			fsys.root.gid = fe.gid
 			fsys.root.mtime = fe.mtime
 			fsys.root.mtimeNs = fe.mtimeNs
-			fsys.root.nlink = fe.nlink
-			fsys.root.nlinkSet = fe.nlinkSet
 			fsys.root.xattrs = fe.xattrs
 		} else {
 			fe = fsys.placeEntry(fe)
