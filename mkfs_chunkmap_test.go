@@ -2,6 +2,7 @@ package erofs_test
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -236,13 +237,15 @@ func TestChunkMapSurvivesReindex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	img2, err := erofs.Open(bytes.NewReader(out2.Bytes()), erofs.WithExtraDevices(bytes.NewReader(blob)))
+	// The first image is the re-index's first device, its blob the second.
+	img2, err := erofs.Open(bytes.NewReader(out2.Bytes()),
+		erofs.WithExtraDevices(bytes.NewReader(out.Bytes()), bytes.NewReader(blob)))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	checkSparseContent(t, img2, bs, "re-indexed image")
-	fsckWithDevice(t, out2.Bytes(), blob)
+	fsckWithDevice(t, out2.Bytes(), out.Bytes(), blob)
 }
 
 // TestDirectReadSparseFile covers Read and WriteTo on a chunk-based file with
@@ -304,7 +307,7 @@ func blockSizeName(bs int) string {
 }
 
 // fsckWithDevice validates an image against the reference implementation.
-func fsckWithDevice(t *testing.T, image, blob []byte) {
+func fsckWithDevice(t *testing.T, image []byte, devices ...[]byte) {
 	t.Helper()
 
 	if _, err := exec.LookPath("fsck.erofs"); err != nil {
@@ -313,17 +316,25 @@ func fsckWithDevice(t *testing.T, image, blob []byte) {
 
 	dir := t.TempDir()
 	imgPath := dir + "/img.erofs"
-	blobPath := dir + "/blob.bin"
 
 	if err := os.WriteFile(imgPath, image, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := os.WriteFile(blobPath, blob, 0o600); err != nil {
-		t.Fatal(err)
+	args := make([]string, 0, len(devices)+1)
+
+	for i, dev := range devices {
+		devPath := fmt.Sprintf("%s/dev%d.bin", dir, i)
+		if err := os.WriteFile(devPath, dev, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		args = append(args, "--device="+devPath)
 	}
 
-	out, err := exec.CommandContext(t.Context(), "fsck.erofs", "--device="+blobPath, imgPath).CombinedOutput()
+	args = append(args, imgPath)
+
+	out, err := exec.CommandContext(t.Context(), "fsck.erofs", args...).CombinedOutput()
 	if err != nil {
 		t.Errorf("fsck.erofs rejected the image: %v\n%s", err, out)
 	}

@@ -202,7 +202,9 @@ func TestCopyFromHostHardlinks(t *testing.T) {
 func TestCopyFromImageHardlinks(t *testing.T) {
 	t.Parallel()
 
-	srcFS, err := erofs.Open(bytes.NewReader(buildHardlinkSourceImage(t)))
+	srcImg := buildHardlinkSourceImage(t)
+
+	srcFS, err := erofs.Open(bytes.NewReader(srcImg))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +255,8 @@ func TestCopyFromImageHardlinks(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		efs, err := erofs.Open(bytes.NewReader(buf.Bytes()), erofs.WithExtraDevices(dataFile))
+		// The data file is the copy's first device, the source image its second.
+		efs, err := erofs.Open(bytes.NewReader(buf.Bytes()), erofs.WithExtraDevices(dataFile, bytes.NewReader(srcImg)))
 		if err != nil {
 			t.Fatal(err)
 		}

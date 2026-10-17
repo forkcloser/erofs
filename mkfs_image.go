@@ -383,20 +383,50 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		// function materializes, the declared size must fit inside the image
 		// before it is used as an allocation length — or converted to int,
 		// where a value past 2^63 overflows to a negative length.
-		switch typ {
-		case disk.StatTypeDir, disk.StatTypeSymlink:
-			if size > uint64(totalBytes) {
-				return fmt.Errorf("nid %d declares %d bytes, larger than the %d byte image: %w",
-					cur.nid, size, totalBytes, ErrCorrupt)
+		// A flat-inline inode keeps its whole blocks at i_u and its last
+		// block, a whole one when the size is a multiple, beside the inode
+		// (the kernel's lastblk is one short of the block count); that tail
+		// lives in the inode's own block and cannot run past it. The
+		// reader's loadBlock refuses that outright, and without the same
+		// rule here the copy would take whatever follows the block as the
+		// directory's entries or the link's target.
+		tail := int64(0)
+		if layout == disk.LayoutFlatInline && size > 0 {
+			// #nosec G115 -- size is at most math.MaxInt64, checked above
+			tail = int64(size) - (int64(size)-1)/int64(blockSize)*int64(blockSize)
+		}
+
+		if typ != disk.StatTypeReg && size > uint64(totalBytes) {
+			return fmt.Errorf("nid %d declares %d bytes, larger than the %d byte image: %w",
+				cur.nid, size, totalBytes, ErrCorrupt)
+		}
+
+		if trailingAddr%int64(blockSize)+tail > int64(blockSize) {
+			return fmt.Errorf("inline data crosses block boundary for nid %d: %w", cur.nid, ErrCorrupt)
+		}
+
+		// inlineData reads an inode's flat data: the whole blocks at i_u,
+		// then the tail beside the inode.
+		inlineData := func(size int64) ([]byte, error) {
+			if layout == disk.LayoutFlatPlain {
+				return span(int64(idata)<<blkBits, size)
 			}
-			// Inline data lives in the inode's own block and cannot run past
-			// it — the reader's loadBlock refuses that outright, and without
-			// the same rule here the copy would take whatever follows the
-			// block as the directory's entries or the link's target.
-			// #nosec G115 -- size was checked against totalBytes, an int64, just above
-			if layout == disk.LayoutFlatInline && trailingAddr%int64(blockSize)+int64(size) > int64(blockSize) {
-				return fmt.Errorf("inline data crosses block boundary for nid %d: %w", cur.nid, ErrCorrupt)
+
+			if size == tail {
+				return span(trailingAddr, tail)
 			}
+
+			blocks, err := span(int64(idata)<<blkBits, size-tail)
+			if err != nil {
+				return nil, err
+			}
+
+			end, err := span(trailingAddr, tail)
+			if err != nil {
+				return nil, err
+			}
+
+			return slices.Concat(blocks, end), nil
 		}
 
 		switch typ {
@@ -414,12 +444,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 
 			dirSize := int(size) // #nosec G115 -- checked against totalBytes, an int64, above
 			if dirSize > 0 {
-				dataAddr := trailingAddr
-				if layout == disk.LayoutFlatPlain {
-					dataAddr = int64(idata) << blkBits
-				}
-
-				dirData, err := span(dataAddr, int64(dirSize))
+				dirData, err := inlineData(int64(dirSize))
 				if err != nil {
 					return fmt.Errorf("read dir data for nid %d: %w", cur.nid, err)
 				}
@@ -431,13 +456,8 @@ func (fsys *Writer) copyFromImage(img *image) error {
 
 		case disk.StatTypeSymlink:
 			if size > 0 {
-				dataAddr := trailingAddr
-				if layout == disk.LayoutFlatPlain {
-					dataAddr = int64(idata) << blkBits
-				}
-
 				// #nosec G115 -- checked against totalBytes, an int64, above
-				linkData, err := span(dataAddr, int64(size))
+				linkData, err := inlineData(int64(size))
 				if err != nil {
 					return fmt.Errorf("read symlink data for nid %d: %w", cur.nid, err)
 				}
@@ -446,6 +466,38 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			}
 
 		case disk.StatTypeReg:
+			// Flat data stays in the source image, now a device of the
+			// copy: whole blocks become chunks on it; a flat-inline tail is
+			// copied, since no chunk can name part of a block. A flat-plain
+			// file at the null address has no data and reads as zeros, as
+			// chunks without mappings do.
+			if layout != disk.LayoutChunkBased && size > 0 {
+				// The blocks at i_u: all of a flat-plain file's, the last one
+				// partial; a flat-inline file's whole ones, its last block
+				// being the tail.
+				// #nosec G115 -- size is at most math.MaxInt64, checked above
+				whole := uint64((int64(size) - tail + int64(blockSize) - 1) >> blkBits)
+				switch {
+				case whole == 0:
+				case idata == disk.NullAddr:
+					// The kernel maps the null address as a hole; a tail after
+					// it keeps its place only if the hole is spelled out.
+					fe.chunks = deviceChunks(builder.NullPhysicalBlock, whole, 0)
+				default:
+					fe.chunks = deviceChunks(uint64(idata), whole, fsys.copyDeviceID)
+					fe.contiguous = tail == 0
+				}
+
+				if tail > 0 {
+					end, err := span(trailingAddr, tail)
+					if err != nil {
+						return fmt.Errorf("read inline data for nid %d: %w", cur.nid, err)
+					}
+
+					fe.tail = bytes.Clone(end)
+				}
+			}
+
 			if layout == disk.LayoutChunkBased && size > 0 {
 				// #nosec G115 -- the chunk format is the low 16 bits of i_u, as the kernel's __le16 c.format reads it
 				chunkFmt := uint16(idata)
@@ -478,26 +530,32 @@ func (fsys *Writer) copyFromImage(img *image) error {
 						cur.nid, avail, need, size, ErrCorrupt)
 				}
 
+				// Parsed once per inode: a later name for this nid becomes
+				// an alias above and never reaches here. A block map names
+				// blocks of the image itself, device 0 before the remap.
+				var chunks []builder.Chunk
+
 				if indexed {
-					// Parsed once per inode: a later name for this nid
-					// becomes an alias above and never reaches here.
-					chunks, err := fsys.parseChunks(at(chunkAddr), chunkFmt, size, blkBits, img.deviceIDMask)
-					if err != nil {
-						return fmt.Errorf("chunk index for nid %d: %w", cur.nid, err)
-					}
-
-					if err := fsys.remapChunkDevices(cur.path, chunks); err != nil {
-						return err
-					}
-
-					fe.chunks = chunks
-					// Only a single non-hole extent is contiguous. Claiming
-					// it for a fragmented or sparse file makes planLayout
-					// pick a chunk size spanning the whole file, collapsing
-					// every extent into one mapping.
-					fe.contiguous = len(chunks) == 1 &&
-						chunks[0].PhysicalBlock != builder.NullPhysicalBlock
+					chunks, err = fsys.parseChunks(at(chunkAddr), chunkFmt, size, blkBits, img.deviceIDMask)
+				} else {
+					chunks, err = parseBlockMap(at(chunkAddr), chunkFmt, size, blkBits)
 				}
+
+				if err != nil {
+					return fmt.Errorf("chunk index for nid %d: %w", cur.nid, err)
+				}
+
+				if err := fsys.remapChunkDevices(cur.path, chunks); err != nil {
+					return err
+				}
+
+				fe.chunks = chunks
+				// Only a single non-hole extent is contiguous. Claiming
+				// it for a fragmented or sparse file makes planLayout
+				// pick a chunk size spanning the whole file, collapsing
+				// every extent into one mapping.
+				fe.contiguous = len(chunks) == 1 &&
+					chunks[0].PhysicalBlock != builder.NullPhysicalBlock
 			}
 
 		case disk.StatTypeChrdev, disk.StatTypeBlkdev:
@@ -898,4 +956,60 @@ func xattrName(xe disk.XattrEntry, rawName []byte, longPrefix func(uint8) (strin
 	}
 
 	return prefix + string(rawName), nil
+}
+
+// deviceChunks names a run of blocks from start on device as chunk runs, each
+// within a chunk's 16-bit count; from the null block, the runs are holes.
+func deviceChunks(start, blocks uint64, device uint16) []builder.Chunk {
+	var chunks []builder.Chunk
+
+	for blocks > 0 {
+		count := min(blocks, math.MaxUint16)
+		chunks = append(chunks, builder.Chunk{
+			PhysicalBlock: start,
+			Count:         uint16(count), // #nosec G115 -- bounded by math.MaxUint16 just above
+			DeviceID:      device,
+		})
+
+		if start != builder.NullPhysicalBlock {
+			start += count
+		}
+
+		blocks -= count
+	}
+
+	return chunks
+}
+
+// parseBlockMap reads a chunk-based inode's block map, the unindexed chunk
+// format: one 32-bit block address per chunk, the null address a hole, every
+// block on the image's own device.
+func parseBlockMap(data []byte, chunkFmt uint16, fileSize uint64, blkBits uint8) ([]builder.Chunk, error) {
+	if chunkFmt&^disk.LayoutChunkFormatBits != 0 {
+		return nil, fmt.Errorf("unsupported chunk format %#x: %w", chunkFmt, ErrNotImplemented)
+	}
+
+	chunkBits := blkBits + uint8(chunkFmt&disk.LayoutChunkFormatBits)
+	// #nosec G115 -- chunkBits is at least 9, the smallest block, so the count is below 1<<55
+	nchunks := int((fileSize-1)>>chunkBits) + 1
+	blocksPerChunk := uint64(1) << (chunkBits - blkBits)
+
+	if len(data) < nchunks*4 {
+		return nil, fmt.Errorf("block map of %d entries truncated at %d bytes: %w", nchunks, len(data), ErrCorrupt)
+	}
+
+	var chunks []builder.Chunk
+
+	for i := range nchunks {
+		addr := binary.LittleEndian.Uint32(data[i*4:])
+
+		start := uint64(addr)
+		if addr == disk.NullAddr {
+			start = builder.NullPhysicalBlock
+		}
+
+		chunks = append(chunks, deviceChunks(start, blocksPerChunk, 0)...)
+	}
+
+	return chunks, nil
 }

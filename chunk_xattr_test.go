@@ -2,7 +2,6 @@ package erofs_test
 
 import (
 	"bytes"
-	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -174,14 +173,11 @@ func (fsys chunkSourceFS) Open(name string) (fs.File, error) {
 	return nil, fs.ErrNotExist
 }
 
-// TestMetadataOnlyChunkDeviceZero checks that a metadata-only copy rejects a
-// source chunk naming DeviceID 0.
-//
-// DeviceID 0 is the source image's own primary device. CopyFrom registers only
-// the source's extra devices in the destination, so there is nothing for that
-// chunk to point at. The remap used to add copyDeviceID-1 to it like any other
-// id, aliasing it onto the destination's own data file: the copied file then
-// read back an unrelated file's bytes with no error anywhere along the way.
+// TestMetadataOnlyChunkDeviceZero: a source chunk naming DeviceID 0, the
+// source image's own blocks, names that image in the copy, which CopyFrom
+// registers as a device after the destination's own; the copied file reads
+// the source image's bytes, not the destination data file's block at the
+// same address, which the remap once aliased it onto.
 func TestMetadataOnlyChunkDeviceZero(t *testing.T) {
 	t.Parallel()
 
@@ -253,18 +249,37 @@ func TestMetadataOnlyChunkDeviceZero(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = dw.CopyFrom(srcImg, erofs.MetadataOnly())
-	if err == nil {
-		err = dw.Close()
+	if err = dw.CopyFrom(srcImg, erofs.MetadataOnly()); err != nil {
+		t.Fatal(err)
 	}
 
-	if err == nil {
-		t.Fatal("metadata-only copy accepted a chunk naming the source's own device")
+	if err = dw.Close(); err != nil {
+		t.Fatal(err)
 	}
 
-	if !errors.Is(err, erofs.ErrInvalid) {
-		t.Fatalf("got %v, want ErrInvalid", err)
+	// Devices in the copy: the destination's data file, the source image,
+	// the source's data file.
+	efs, err := erofs.Open(bytes.NewReader(dstBuf.Bytes()),
+		erofs.WithExtraDevices(dstDF, bytes.NewReader(srcBuf.Bytes()), srcDFR))
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	t.Logf("rejected: %v", err)
+	got, err := fs.ReadFile(efs, "target")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if want := srcBuf.Bytes()[:4096]; !bytes.Equal(got, want) {
+		t.Fatalf("target reads %x…, want the source image's first block %x…", got[:16], want[:16])
+	}
+
+	otherData, err := fs.ReadFile(efs, "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(otherData, bytes.Repeat([]byte{0xEE}, 4096)) {
+		t.Fatalf("other reads %x…, want its own 0xEE block", otherData[:min(len(otherData), 8)])
+	}
 }

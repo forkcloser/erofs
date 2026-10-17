@@ -820,6 +820,9 @@ func (img *image) locate(deviceID uint16, pa int64) (uint16, int64, error) {
 // blockSize returns the filesystem block size.
 func (img *image) blockSize() uint32 { return 1 << img.sb.BlkSizeBits }
 
+// blocks is the image's own block count, what a device slot naming it holds.
+func (img *image) blocks() uint32 { return img.sb.Blocks }
+
 // buildTime returns the build timestamp from the superblock.
 func (img *image) buildTime() uint64 { return img.sb.BuildTime }
 
