@@ -2057,7 +2057,11 @@ func checkInodeFormat(nid uint64, format, mode uint16) error {
 		return fmt.Errorf("inode %d: i_format %#x: %w", nid, format, ErrNotImplemented)
 	}
 
-	if layout := (format & disk.InodeFormatLayoutMask) >> 1; layout >= disk.LayoutMax {
+	// The compressed layouts are refused here, not when data is read: an
+	// empty compressed file never reaches the data path, and the doc
+	// promises ErrNotImplemented for the inode.
+	layout := (format & disk.InodeFormatLayoutMask) >> 1
+	if layout >= disk.LayoutMax || layout == disk.LayoutCompressedFull || layout == disk.LayoutCompressedCompact {
 		return fmt.Errorf("inode %d: datalayout %d: %w", nid, layout, ErrNotImplemented)
 	}
 

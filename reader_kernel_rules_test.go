@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/erofs/internal/corpus"
 	"github.com/forkcloser/erofs/internal/disk"
 )
 
@@ -724,17 +725,22 @@ func TestReaderFlatDataOnMappedDevice(t *testing.T) {
 	}
 }
 
-// TestReaderUndefinedDatalayout: an i_format naming a data layout the kernel
-// does not define (5 to 7) is ErrNotImplemented when the inode is read, as
-// the kernel refuses the inode (inode.c, "unsupported datalayout"), not a
-// file served until its data is asked for.
-func TestReaderUndefinedDatalayout(t *testing.T) {
+// TestReaderUnsupportedDatalayout: an i_format naming a data layout the
+// kernel does not define (5 to 7) or one this reader does not implement
+// (the compressed ones, 1 and 3) is ErrNotImplemented when the inode is
+// read, as the kernel refuses the undefined ones (inode.c, "unsupported
+// datalayout") and as the package's doc promises for compressed inodes,
+// not a file served until its data is asked for: an empty compressed file
+// has no data to ask for.
+func TestReaderUnsupportedDatalayout(t *testing.T) {
 	t.Parallel()
 
 	img := buildImage(t, func(w *erofs.Writer) { writeFile(t, w, "/a", []byte("a")) })
 	at := inodeOffset(t, img, "a")
 
-	for layout := uint16(disk.LayoutMax); layout <= 7; layout++ {
+	for _, layout := range []uint16{
+		disk.LayoutCompressedFull, disk.LayoutCompressedCompact, disk.LayoutMax, disk.LayoutMax + 1, disk.LayoutMax + 2,
+	} {
 		bad := bytes.Clone(img)
 		format := binary.LittleEndian.Uint16(bad[at:])
 		binary.LittleEndian.PutUint16(bad[at:], format&^disk.InodeFormatLayoutMask|layout<<1)
@@ -751,6 +757,46 @@ func TestReaderUndefinedDatalayout(t *testing.T) {
 
 		if _, err := fs.ReadFile(fsys, "a"); !errors.Is(err, erofs.ErrNotImplemented) {
 			t.Fatalf("layout %d: ReadFile: %v; want ErrNotImplemented", layout, err)
+		}
+	}
+
+	// The fuzzer's find: b512 with one inode's i_format set to 0x17, an
+	// empty compressed-compact inode, served by Stat before.
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "b512" {
+			continue
+		}
+
+		edited := bytes.Clone(im.Img)
+		edited[4544] = 0x17
+
+		fsys, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		refused := 0
+
+		err = fs.WalkDir(fsys, ".", func(name string, _ fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+
+			switch _, err := fs.Lstat(fsys, name); {
+			case errors.Is(err, erofs.ErrNotImplemented):
+				refused++
+			case err != nil:
+				return err
+			}
+
+			return nil
+		})
+		if err != nil || refused != 1 {
+			t.Fatalf(
+				"b512 with a compressed inode: walk %v, %d refused; want one ErrNotImplemented and nothing else",
+				err,
+				refused,
+			)
 		}
 	}
 }
