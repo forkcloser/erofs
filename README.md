@@ -166,9 +166,9 @@ Paths given to the writer are cleaned: `x`, `/x` and `./x` name the same
 entry. The reader is stricter and follows the `fs.FS` convention exactly.
 
 `CopyFrom` takes ownership, times and link identity from `Sys()` when it is a
-`*syscall.Stat_t` (linux, darwin and freebsd) or a
-`*builder.Entry`; a source with neither still contributes mode, size and
-`ModTime`. Two names that share a source inode become one inode with two
+`*syscall.Stat_t` (linux, darwin and freebsd), a `*builder.Entry` or this
+package's `*Stat`, as an image opened here hands out; a source with none of
+them still contributes mode, size and `ModTime`. Two names that share a source inode become one inode with two
 names in the image, and a file's link count is computed from the names the
 image holds.
 
