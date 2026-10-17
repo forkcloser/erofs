@@ -503,6 +503,21 @@ func checkEditedCopy(t *testing.T, im corpus.Image, img []byte, label string) in
 		return 1
 	}
 
+	// A directory block out of name order, a name stored twice included:
+	// ReadDir lists every name and the lookups find some of them, the
+	// differential's own rule for the reader; what a copy holds of such a
+	// directory is the search's, and the copy is not compared.
+	var extra [][]byte
+	if im.Blob != nil {
+		extra = [][]byte{im.Blob}
+	}
+
+	if ref, perr := erofsspec.Parse(img, extra); perr == nil {
+		if unsorted, _ := referenceWalk(ref, func(erofsspec.Entry) error { return nil }); unsorted {
+			return 1
+		}
+	}
+
 	if d := copyAgrees(img, im.Blob, got.Img, got.Blob); d != "" {
 		t.Fatalf("%s %s: the copy is not the source: %s", im.Name, label, d)
 	}
