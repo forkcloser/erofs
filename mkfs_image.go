@@ -425,14 +425,14 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		// then the tail beside the inode.
 		inlineData := func(size int64) ([]byte, error) {
 			if layout == disk.LayoutFlatPlain {
-				return span(int64(idata)<<blkBits, size)
+				return img.readFlat(int64(idata)<<blkBits, size)
 			}
 
 			if size == tail {
 				return span(trailingAddr, tail)
 			}
 
-			blocks, err := span(int64(idata)<<blkBits, size-tail)
+			blocks, err := img.readFlat(int64(idata)<<blkBits, size-tail)
 			if err != nil {
 				return nil, err
 			}
@@ -510,8 +510,12 @@ func (fsys *Writer) copyFromImage(img *image) error {
 					// it keeps its place only if the hole is spelled out.
 					fe.chunks = deviceChunks(builder.NullPhysicalBlock, whole, 0)
 				default:
-					fe.chunks = deviceChunks(uint64(idata), whole, fsys.copyDeviceID)
-					fe.contiguous = tail == 0
+					fe.chunks = img.flatChunks(uint64(idata), whole)
+					fe.contiguous = tail == 0 && len(fe.chunks) == 1
+
+					if err := fsys.remapChunkDevices(cur.path, fe.chunks); err != nil {
+						return err
+					}
 				}
 
 				if tail > 0 {
@@ -1038,4 +1042,66 @@ func parseBlockMap(data []byte, chunkFmt uint16, fileSize uint64, blkBits uint8)
 	}
 
 	return chunks, nil
+}
+
+// flatChunks names the blocks from start on the devices the kernel's
+// erofs_map_dev lands them on: a device-0 address inside an extra device's
+// mapped range is that device's, the rest the image's. The ids are the
+// source's own, 0 the image, for remapChunkDevices.
+func (img *image) flatChunks(start, blocks uint64) []builder.Chunk {
+	var chunks []builder.Chunk
+
+	for blocks > 0 {
+		run, dev, phys := img.flatRun(start, blocks)
+		chunks = append(chunks, deviceChunks(phys, run, dev)...)
+		start += run
+		blocks -= run
+	}
+
+	return chunks
+}
+
+// flatRun is the longest run from start, at most blocks long, that lies on
+// one device: its length, the device, and its first block on that device.
+func (img *image) flatRun(start, blocks uint64) (uint64, uint16, uint64) {
+	next := blocks // the run on the image ends where a mapped range begins
+
+	for i, dev := range img.devices {
+		if dev.mappedBlkAddr == 0 {
+			continue
+		}
+
+		lo, hi := uint64(dev.mappedBlkAddr), uint64(dev.mappedBlkAddr)+uint64(dev.blocks)
+		if start >= lo && start < hi {
+			return min(
+					blocks,
+					hi-start,
+				), uint16(
+					i + 1,
+				), start - lo // #nosec G115 -- the device count is a uint16 on disk
+		}
+
+		if lo > start {
+			next = min(next, lo-start)
+		}
+	}
+
+	return next, 0, start
+}
+
+// readFlat reads n bytes of flat data at device-0 address pa from the
+// device the kernel's erofs_map_dev lands it on, bounded as the reader's
+// own reads are.
+func (img *image) readFlat(pa, n int64) ([]byte, error) {
+	dev, off, err := img.locateRange(pa, n)
+	if err != nil {
+		return nil, err
+	}
+
+	buf := make([]byte, n)
+	if _, err := img.deviceReader(dev).ReadAt(buf, off); err != nil {
+		return nil, err
+	}
+
+	return buf, nil
 }

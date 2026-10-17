@@ -290,3 +290,48 @@ func TestWriterMetadataOnlyRefusesWhatStatRefuses(t *testing.T) {
 		}
 	}
 }
+
+// TestWriterMetadataOnlyFlatDataOnMappedDevice: a flat file whose address
+// lies in an extra device's mapped range is that device's, as the kernel's
+// erofs_map_dev places it (and as the reader reads it); the copy's chunks
+// name the copy's slot for that device, not a block past the image's end.
+// The input is the fuzzer's: small-blobdev-512 with "multi" turned from
+// chunk-based to flat-plain at block 33 of a 13-block image, which the
+// blob's slot maps from block 13.
+func TestWriterMetadataOnlyFlatDataOnMappedDevice(t *testing.T) {
+	t.Parallel()
+
+	for _, src := range corpus.Committed(t) {
+		if src.Name != "small-blobdev-512" {
+			continue
+		}
+
+		edited := bytes.Clone(src.Img)
+		edited[1536] = 0x00
+
+		source := openWithDevices(t, edited, src.Blob)
+
+		want, err := fs.ReadFile(source, "multi")
+		if err != nil || len(want) != 3000 {
+			t.Fatalf("test premise broken: the source reads multi as %d bytes, %v", len(want), err)
+		}
+
+		var buf testBuffer
+
+		w := erofs.Create(&buf)
+		if err = w.CopyFrom(source, erofs.MetadataOnly()); err != nil {
+			t.Fatalf("CopyFrom: %v", err)
+		}
+
+		if err = w.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		copied := openWithDevices(t, buf.Bytes(), edited, src.Blob)
+
+		got, err := fs.ReadFile(copied, "multi")
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("the copy reads multi as %d bytes, %v; %s", len(got), err, sameBytes(want, got))
+		}
+	}
+}
