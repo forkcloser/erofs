@@ -895,3 +895,82 @@ func TestReaderChunkPastDevice(t *testing.T) {
 		}
 	}
 }
+
+// TestReaderFastSymlinkTarget: a fast symlink whose inline target holds a
+// NUL, or is empty, is refused with its inode, as the kernel's
+// erofs_fill_symlink refuses it ("invalid fast symlink size"), so Lstat is
+// ErrCorrupt and a metadata-only copy of the image refuses too, not
+// ReadLink alone. The
+// first input is the fuzzer's: small-chunk-512 with the one byte of d/s's
+// target set to zero.
+func TestReaderFastSymlinkTarget(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "small-chunk-512" {
+			continue
+		}
+
+		edited := bytes.Clone(im.Img)
+		edited[1824] = 0x00
+
+		fsys, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := fs.Lstat(fsys, "d/s"); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("Lstat of a fast symlink with a NUL in its target: %v; want ErrCorrupt", err)
+		}
+
+		var buf testBuffer
+
+		w := erofs.Create(&buf)
+		if err := w.CopyFrom(fsys, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("CopyFrom(MetadataOnly) of an image with such a symlink: %v; want ErrCorrupt", err)
+		}
+	}
+
+	img := buildImage(t, func(w *erofs.Writer) {
+		if err := w.Symlink("ab", "/l"); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// The Writer packs the target beside its extended inode, which carries
+	// no xattrs here.
+	at := inodeOffset(t, img, "l") + disk.SizeInodeExtended
+	if string(img[at:at+2]) != "ab" {
+		t.Fatalf("test premise broken: the target beside the inode reads %q", img[at:at+2])
+	}
+
+	img[at+1] = 0
+
+	fsys, err := erofs.Open(bytes.NewReader(img))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, lerr := fs.Lstat(fsys, "l"); !errors.Is(lerr, erofs.ErrCorrupt) {
+		t.Fatalf("Lstat of a Writer symlink given a NUL: %v; want ErrCorrupt", lerr)
+	}
+
+	// The other half of the kernel's rule: a fast symlink of size zero.
+	// i_size is the eight bytes at offset 8 of the extended inode.
+	empty := buildImage(t, func(w *erofs.Writer) {
+		if serr := w.Symlink("ab", "/l"); serr != nil {
+			t.Fatal(serr)
+		}
+	})
+	at = inodeOffset(t, empty, "l")
+	binary.LittleEndian.PutUint64(empty[at+8:], 0)
+
+	fsys, err = erofs.Open(bytes.NewReader(empty))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, lerr := fs.Lstat(fsys, "l"); !errors.Is(lerr, erofs.ErrCorrupt) {
+		t.Fatalf("Lstat of a fast symlink of size zero: %v; want ErrCorrupt", lerr)
+	}
+}

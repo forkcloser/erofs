@@ -1986,16 +1986,46 @@ func (b *file) readInfo() (ino *inode, err error) {
 			b.nid, inoType, b.ftype, ErrCorrupt)
 	}
 
-	if xcnt > 0 {
-		xsize, err := xattrBodySize(b.nid, xcnt)
-		if err != nil {
-			return nil, err
-		}
+	if err := b.finishInfo(buf, xcnt); err != nil {
+		b.info = nil
 
-		b.info.xsize = xsize
+		return nil, err
 	}
 
 	return b.info, nil
+}
+
+// finishInfo sizes the inode's xattr body and judges a fast symlink's
+// inline target with its inode, as the kernel's erofs_fill_symlink does
+// (!i_size || strlen(link) != i_size), so no Stat, ReadDir or Open serves
+// an inode whose target is empty or holds a NUL. buf is the inode's block
+// from the inode on; a target running past it is refused where it is read.
+func (b *file) finishInfo(buf []byte, xcnt uint16) error {
+	ino := b.info
+
+	if xcnt > 0 {
+		xsize, err := xattrBodySize(b.nid, xcnt)
+		if err != nil {
+			return err
+		}
+
+		ino.xsize = xsize
+	}
+
+	if ino.mode&fs.ModeSymlink == 0 || ino.inodeLayout != disk.LayoutFlatInline || ino.size < 0 {
+		return nil
+	}
+
+	if ino.size == 0 {
+		return fmt.Errorf("inode %d: invalid fast symlink size 0: %w", b.nid, ErrCorrupt)
+	}
+
+	start := int64(ino.icsize) + int64(ino.xsize)
+	if end := start + ino.size; end <= int64(len(buf)) && bytes.IndexByte(buf[start:end], 0) >= 0 {
+		return fmt.Errorf("inode %d: invalid fast symlink target: %w", b.nid, ErrCorrupt)
+	}
+
+	return nil
 }
 
 // decodeInode decodes the compact or extended inode in buf, whose i_format
