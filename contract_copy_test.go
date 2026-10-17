@@ -34,6 +34,11 @@ import (
 // semantics": whiteouts delete from prior layers, opaque markers delete a
 // directory's prior children, the markers themselves never land.
 //
+// Hard-link identity is the source's link count: two names share one
+// inode in the copy when the source reports more than one link for it;
+// under a count of one, each name is copied as its own inode, content
+// intact, whatever inode the names shared in the source.
+//
 // The oracle is the reference reader over the copy, held to the source's
 // tree through corpus.Check, or, for an edited source, to the reference's
 // own reading of that source.
@@ -541,9 +546,10 @@ func copyOpened(fsys fs.FS, metadataOnly bool, src []byte) (im corpus.Image, err
 
 // copyView is what a copy must reproduce of an image, by path: the
 // entry's type and bits, ids, times, device, xattrs, content, target, and
-// the link count the writer computes, "from the names the image holds"
-// for a file (the README) and two plus its subdirectories for a directory,
-// whatever the source's field says.
+// the link count the writer computes: two plus its subdirectories for a
+// directory, and for a file the names sharing its inode when the source
+// reports more than one link (the copy keeps the inode shared), else one
+// (each name is copied as its own inode), whatever the field says.
 type copyView struct {
 	line  string
 	nlink int
@@ -564,6 +570,7 @@ func viewOf(img, blob []byte) (map[string]copyView, error) {
 
 	out := map[string]copyView{}
 	names := map[uint64]int{}
+	linked := map[uint64]bool{}
 	subdirs := map[string]int{}
 	nids := map[string]uint64{}
 
@@ -571,6 +578,7 @@ func viewOf(img, blob []byte) (map[string]copyView, error) {
 		in := e.Inode
 		names[in.Nid]++
 		nids[e.Path] = in.Nid
+		linked[in.Nid] = in.Nlink > 1
 
 		if in.IsDir() && e.Path != "." {
 			subdirs[path.Dir(e.Path)]++
@@ -620,10 +628,13 @@ func viewOf(img, blob []byte) (map[string]copyView, error) {
 
 	// The computed counts, now that every name is seen.
 	for p, v := range out {
-		if strings.HasPrefix(v.line, "d") {
+		switch {
+		case strings.HasPrefix(v.line, "d"):
 			v.nlink = 2 + subdirs[p]
-		} else {
+		case linked[nids[p]]:
 			v.nlink = names[nids[p]]
+		default:
+			v.nlink = 1
 		}
 
 		out[p] = v
@@ -656,7 +667,7 @@ func copyAgrees(src, srcBlob, dst, dstBlob []byte) string {
 		case g.line != w.line:
 			return fmt.Sprintf("%s differs\nsource: %s\ncopy:   %s", p, w.line, g.line)
 		case g.nlink != w.nlink:
-			return fmt.Sprintf("%s: link count %d in the copy, %d names in the source", p, g.nlink, w.nlink)
+			return fmt.Sprintf("%s: link count %d in the copy, %d by the source's names and count", p, g.nlink, w.nlink)
 		}
 	}
 
