@@ -82,6 +82,14 @@ func direntsOfBlock(block []byte, bs int64) ([]Dirent, error) {
 		return nil, fmt.Errorf("%w: first name offset %d", ErrCorrupt, nameoff0)
 	}
 
+	// The first name starts past the block's used part: the kernel reads
+	// the dirents from the rest of the block on disk and then refuses the
+	// first name as a "bogus dirent" (nameoff + namelen > maxsize), so the
+	// verdict is corrupt before any header past the used part is read.
+	if nameoff0 > maxsize {
+		return nil, fmt.Errorf("%w: first name offset %d past the %d used bytes", ErrCorrupt, nameoff0, maxsize)
+	}
+
 	count := nameoff0 / DirentSize
 	out := make([]Dirent, 0, count)
 

@@ -852,3 +852,46 @@ func TestReaderExtendedNullAddress(t *testing.T) {
 		t.Fatalf("an extended flat-plain inode at the null address: ReadFile %v; want ErrCorrupt", err)
 	}
 }
+
+// TestReaderChunkPastDevice: a chunk index whose range runs past its
+// device's declared blocks is ErrCorrupt at Stat, the counterpart of the
+// bound a flat range meets, and a read of the file is ErrCorrupt rather
+// than a clean end at offset zero, which a consumer would take for an empty
+// file. The input is the fuzzer's: small-blobdev-512 with d/sub/e08's one
+// chunk index moved to a block far past the blob's 47.
+func TestReaderChunkPastDevice(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "small-blobdev-512" {
+			continue
+		}
+
+		edited := bytes.Clone(im.Img)
+		edited[3110] = 0x5a
+
+		fsys, err := erofs.Open(bytes.NewReader(edited), erofs.WithExtraDevices(bytes.NewReader(im.Blob)))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := fs.Stat(fsys, "d/sub/e08"); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("Stat of a chunk past its device: %v; want ErrCorrupt", err)
+		}
+
+		link, oerr := fsys.Open("d/sub/e08")
+		if oerr != nil {
+			t.Fatalf("Open: %v", oerr)
+		}
+
+		var buf [1]byte
+
+		if n, err := link.Read(buf[:]); !errors.Is(err, erofs.ErrCorrupt) || n != 0 {
+			t.Fatalf("Read of a chunk past its device: %d, %v; want 0 and ErrCorrupt", n, err)
+		}
+
+		if _, err := fs.ReadFile(fsys, "d/sub/e08"); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("ReadFile of a chunk past its device: %v; want ErrCorrupt", err)
+		}
+	}
+}

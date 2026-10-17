@@ -1146,9 +1146,16 @@ func judge(ref, got verdict) string {
 			return "the reader serves a different tree from a sound image"
 		case got.class == "unsupported" && ref.notImplemented:
 			return ""
-		case got.class == "invalid" && ref.longSymlink:
+		case (got.class == "invalid" || got.class == "corrupt") && ref.longSymlink:
+			// The kernel has no bound on a symlink's size at fill time
+			// (page_get_link reads what fits); the package refuses a
+			// target over PATH_MAX as corrupt where the size is the
+			// inode's and as invalid where it is a path's, a bound it
+			// states, kept as a documented divergence.
 			return ""
 		case got.class == "corrupt" && (ref.dupXattr || ref.undefinedXattr || ref.badTarget || ref.extentsOut || ref.direntType || ref.nidHigh || !ref.complete):
+			return ""
+		case (got.class == "corrupt" || got.class == "invalid") && ref.sharedOut:
 			return ""
 		default:
 			return "the reader refuses a sound image"
@@ -1199,7 +1206,8 @@ type verdict struct {
 	err            error
 	tree           string
 	notImplemented bool // the image uses a feature the package documents as ErrNotImplemented
-	longSymlink    bool // a symlink target over the package's 4096-byte bound
+	longSymlink    bool // a symlink target over the package's 4096-byte bound: the kernel reads it, the reader refuses
+	sharedOut      bool // the superblock's shared-xattr start past the image: the kernel fails on use, the reader at Open
 	dupXattr       bool // an inode names one xattr twice, which the README says is refused
 	undefinedXattr bool // an xattr index with no prefix (7 and up, or a long prefix past the table), refused likewise
 	badTarget      bool // a symlink whose stored target is empty or holds a NUL, which the package refuses
@@ -1225,9 +1233,36 @@ func referenceVerdict(img, blob []byte) verdict {
 
 	complete := uint64(len(img)) >= ref.Super.Blocks*uint64(ref.Super.BlockSize)
 
+	// What the package documents as ErrNotImplemented, read off the
+	// superblock: extended inode slots, the 48-bit layout, and compression,
+	// which the image announces by its feature bits (LZ4 zero padding,
+	// compression configs, ztailpacking) or by available_compr_algs, even
+	// when no inode of the image is compressed; the kernel mounts such an
+	// image and reads its flat files.
+	compression := uint32(
+		erofsspec.FeatureIncompatLZ40Padding | erofsspec.FeatureIncompatComprCfgs | erofsspec.FeatureIncompatZTailpacking,
+	)
+
+	// xattr_blkaddr is read at mount without a bound and fails only on a
+	// shared xattr's use; the package bounds it at Open by the image the
+	// superblock declares, a field naming nothing inside the image being a
+	// superblock it does not trust, and keeps that as a documented
+	// divergence where no inode uses a shared xattr.
+	sharedOut := uint64(
+		ref.Super.XattrBlkAddr,
+	)*uint64(
+		ref.Super.BlockSize,
+	) >= ref.Super.Blocks*uint64(
+		ref.Super.BlockSize,
+	)
+
 	v := verdict{
-		complete:       complete,
-		notImplemented: ref.Super.ExtSlots > 0 || ref.Super.FeatureIncompat&erofsspec.FeatureIncompat48Bit != 0,
+		complete:  complete,
+		sharedOut: sharedOut,
+		notImplemented: ref.Super.ExtSlots > 0 ||
+			ref.Super.FeatureIncompat&erofsspec.FeatureIncompat48Bit != 0 ||
+			ref.Super.FeatureIncompat&compression != 0 ||
+			ref.Super.ComprAlgs != 0,
 	}
 	h := &strings.Builder{}
 
@@ -1279,16 +1314,27 @@ func referenceVerdict(img, blob []byte) verdict {
 		}
 
 		xattrs := map[string]string{}
-		for _, x := range in.Xattrs {
-			if _, dup := xattrs[x.Name()]; dup {
-				v.dupXattr = true
-			}
 
-			if x.Unresolved && x.Index != 0 {
+		for _, x := range in.Xattrs {
+			name := x.Name()
+
+			switch {
+			case x.Unresolved && x.Index == 5:
+				// Index 5 is the format's "lustre." (erofs_fs.h), which the
+				// kernel has no handler for: its listxattr hides the
+				// attribute. The package lists it under the format's
+				// spelling, as erofs-utils does; the dump takes that
+				// spelling, the divergence being the kernel's silence.
+				name = "lustre." + x.Suffix
+			case x.Unresolved && x.Index != 0:
 				v.undefinedXattr = true
 			}
 
-			xattrs[x.Name()] = string(x.Value)
+			if _, dup := xattrs[name]; dup {
+				v.dupXattr = true
+			}
+
+			xattrs[name] = string(x.Value)
 		}
 
 		// Mtime as the stored 64-bit field: the kernel takes it signed, the
