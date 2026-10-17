@@ -19,7 +19,13 @@ const (
 		FeatureIncompatChunkedFile | FeatureIncompatDeviceTable |
 		FeatureIncompatFragments | FeatureIncompatXattrPrefixes
 
-	SizeSuperBlock      = 128
+	SizeSuperBlock = 128
+	// SizeSuperExtSlot is one superblock extension slot; sb_extslots of
+	// them follow the 128 bytes (EROFS_SB_EXTSLOT_SIZE).
+	SizeSuperExtSlot = 16
+	// MinPageSize is the smallest page a kernel mounts EROFS with; the
+	// superblock is read from a page and must fit in it.
+	MinPageSize         = 4096
 	SizeInodeCompact    = 32
 	SizeInodeExtended   = 64
 	SizeDirent          = 12

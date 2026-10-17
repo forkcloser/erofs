@@ -270,6 +270,15 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 		return nil, fmt.Errorf("unsupported incompatible feature 0x%x: %w", unknownFeat, ErrNotImplemented)
 	}
 
+	// The kernel reads the superblock from one page and refuses extension
+	// slots running past it (super.c: "invalid sb_extslots"); the smallest
+	// page is 4 KiB, so a block below that still leaves the page's room.
+	sbSize := disk.SizeSuperBlock + int(i.sb.ExtSlots)*disk.SizeSuperExtSlot
+	if sbSize > max(1<<i.sb.BlkSizeBits, disk.MinPageSize)-disk.SuperBlockOffset {
+		return nil, fmt.Errorf("sb_extslots %d puts the superblock past its page: %w",
+			i.sb.ExtSlots, ErrInvalidSuperblock)
+	}
+
 	// Judged here, against the count, not when the prefix table is first
 	// read: the kernel refuses the image at mount (super.c).
 	if i.sb.FeatureCompat&disk.FeatureCompatIshareXattrs != 0 && i.sb.IshareXattrPrefixID >= i.sb.XattrPrefixCount {
