@@ -35,6 +35,9 @@ const (
 	LayoutFlatInline        = 2
 	LayoutCompressedCompact = 3
 	LayoutChunkBased        = 4
+	// LayoutMax is the first data layout the kernel does not define
+	// (EROFS_INODE_DATALAYOUT_MAX); an inode naming one is refused.
+	LayoutMax = 5
 
 	LayoutChunkFormatBits    = 0x001F
 	LayoutChunkFormatIndexes = 0x0020

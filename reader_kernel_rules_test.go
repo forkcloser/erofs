@@ -723,3 +723,34 @@ func TestReaderFlatDataOnMappedDevice(t *testing.T) {
 		}
 	}
 }
+
+// TestReaderUndefinedDatalayout: an i_format naming a data layout the kernel
+// does not define (5 to 7) is ErrNotImplemented when the inode is read, as
+// the kernel refuses the inode (inode.c, "unsupported datalayout"), not a
+// file served until its data is asked for.
+func TestReaderUndefinedDatalayout(t *testing.T) {
+	t.Parallel()
+
+	img := buildImage(t, func(w *erofs.Writer) { writeFile(t, w, "/a", []byte("a")) })
+	at := inodeOffset(t, img, "a")
+
+	for layout := uint16(disk.LayoutMax); layout <= 7; layout++ {
+		bad := bytes.Clone(img)
+		format := binary.LittleEndian.Uint16(bad[at:])
+		binary.LittleEndian.PutUint16(bad[at:], format&^disk.InodeFormatLayoutMask|layout<<1)
+		stampChecksum(bad)
+
+		fsys, err := erofs.Open(bytes.NewReader(bad))
+		if err != nil {
+			t.Fatalf("layout %d: Open: %v", layout, err)
+		}
+
+		if _, err := fs.Stat(fsys, "a"); !errors.Is(err, erofs.ErrNotImplemented) {
+			t.Fatalf("layout %d: Stat: %v; want ErrNotImplemented", layout, err)
+		}
+
+		if _, err := fs.ReadFile(fsys, "a"); !errors.Is(err, erofs.ErrNotImplemented) {
+			t.Fatalf("layout %d: ReadFile: %v; want ErrNotImplemented", layout, err)
+		}
+	}
+}

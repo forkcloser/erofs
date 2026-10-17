@@ -2054,6 +2054,10 @@ func checkInodeFormat(nid uint64, format, mode uint16) error {
 		return fmt.Errorf("inode %d: i_format %#x: %w", nid, format, ErrNotImplemented)
 	}
 
+	if layout := (format & disk.InodeFormatLayoutMask) >> 1; layout >= disk.LayoutMax {
+		return fmt.Errorf("inode %d: datalayout %d: %w", nid, layout, ErrNotImplemented)
+	}
+
 	compact := format&disk.InodeFormatExtended == 0
 	directory := mode&disk.StatTypeMask == disk.StatTypeDir
 
