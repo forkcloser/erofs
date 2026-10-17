@@ -2462,12 +2462,14 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 		entryN := dirents[0].NameOff / disk.SizeDirent
 		bufLen := len(buf)
 
-		// Validate that NameOff is within bounds and dirent entries fit.
-		if int(dirents[0].NameOff) > bufLen || entryN == 0 {
+		// The first name offset counts the block's entries, so it is a
+		// whole number of dirents inside the block, as readdir checks it
+		// (dir.c, "invalid de[0].nameoff") and as lookupBlock already did.
+		if int(dirents[0].NameOff) >= bufLen || entryN == 0 || dirents[0].NameOff%disk.SizeDirent != 0 {
 			d.img.putBlock(b)
 
 			return ents, fmt.Errorf(
-				"invalid dirent name offset %d (buf size %d): %w",
+				"invalid de[0].nameoff %d (buf size %d): %w",
 				dirents[0].NameOff,
 				bufLen,
 				ErrCorrupt,
