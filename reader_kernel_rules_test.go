@@ -12,6 +12,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/forkcloser/erofs"
@@ -972,5 +973,80 @@ func TestReaderFastSymlinkTarget(t *testing.T) {
 
 	if _, lerr := fs.Lstat(fsys, "l"); !errors.Is(lerr, erofs.ErrCorrupt) {
 		t.Fatalf("Lstat of a fast symlink of size zero: %v; want ErrCorrupt", lerr)
+	}
+}
+
+// TestReaderDirentNameOffset: a directory block whose first name offset is
+// not a whole number of dirents is refused by ReadDir as the kernel's readdir
+// refuses it ("invalid de[0].nameoff"), before any entry is served; the
+// reader took the quotient as the entry count and served a listing cut
+// short. The first input is the fuzzer's: b512 with the first name offset
+// of a block of "many" set to 123, which read as ten entries of three
+// hundred.
+func TestReaderDirentNameOffset(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "b512" {
+			continue
+		}
+
+		edited := bytes.Clone(im.Img)
+		edited[27144] = 0x7b
+
+		fsys, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		ents, err := fs.ReadDir(fsys, "many")
+		if !errors.Is(err, erofs.ErrCorrupt) || !strings.Contains(err.Error(), "invalid de[0].nameoff") ||
+			len(ents) != 0 {
+			t.Fatalf(
+				"b512 many with de[0].nameoff 123: %d entries, %v; want none and the kernel's refusal",
+				len(ents),
+				err,
+			)
+		}
+	}
+
+	img := buildImage(t, func(w *erofs.Writer) {
+		if err := w.Mkdir("/d", 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		writeFile(t, w, "/d/x", []byte("x"))
+		writeFile(t, w, "/d/y", []byte("y"))
+	})
+
+	// The Writer packs a small directory's dirents beside its extended
+	// inode, which carries no xattrs here: the first dirent's name offset
+	// is the first two bytes after its nid, nid and type.
+	at := inodeOffset(t, img, "d") + disk.SizeInodeExtended + 8
+
+	nameOff := binary.LittleEndian.Uint16(img[at:])
+	if nameOff != 4*disk.SizeDirent {
+		t.Fatalf("test premise broken: de[0].nameoff is %d, want %d for four entries", nameOff, 4*disk.SizeDirent)
+	}
+
+	// An odd offset is refused as the kernel's rule, not by what the names
+	// at the odd offset happen to hold.
+	for _, bad := range []uint16{nameOff + 1, nameOff - 5} {
+		edited := bytes.Clone(img)
+		binary.LittleEndian.PutUint16(edited[at:], bad)
+		stampChecksum(edited)
+
+		fsys, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatalf("nameoff %d: Open: %v", bad, err)
+		}
+
+		if _, err := fs.ReadDir(
+			fsys,
+			"d",
+		); !errors.Is(err, erofs.ErrCorrupt) ||
+			!strings.Contains(err.Error(), "invalid de[0].nameoff") {
+			t.Fatalf("nameoff %d: ReadDir: %v; want the kernel's refusal", bad, err)
+		}
 	}
 }
