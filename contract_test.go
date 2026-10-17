@@ -1146,7 +1146,12 @@ func judge(ref, got verdict) string {
 			return "the reader serves a different tree from a sound image"
 		case got.class == "unsupported" && ref.notImplemented:
 			return ""
-		case got.class == "invalid" && ref.longSymlink:
+		case (got.class == "invalid" || got.class == "corrupt") && ref.longSymlink:
+			// The kernel has no bound on a symlink's size at fill time
+			// (page_get_link reads what fits); the package refuses a
+			// target over PATH_MAX as corrupt where the size is the
+			// inode's and as invalid where it is a path's, a bound it
+			// states, kept as a documented divergence.
 			return ""
 		case got.class == "corrupt" && (ref.dupXattr || ref.undefinedXattr || ref.badTarget || ref.extentsOut || ref.direntType || ref.nidHigh || !ref.complete):
 			return ""
@@ -1199,7 +1204,7 @@ type verdict struct {
 	err            error
 	tree           string
 	notImplemented bool // the image uses a feature the package documents as ErrNotImplemented
-	longSymlink    bool // a symlink target over the package's 4096-byte bound
+	longSymlink    bool // a symlink target over the package's 4096-byte bound: the kernel reads it, the reader refuses
 	dupXattr       bool // an inode names one xattr twice, which the README says is refused
 	undefinedXattr bool // an xattr index with no prefix (7 and up, or a long prefix past the table), refused likewise
 	badTarget      bool // a symlink whose stored target is empty or holds a NUL, which the package refuses
