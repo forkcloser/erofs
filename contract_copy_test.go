@@ -620,11 +620,18 @@ func viewOf(img, blob []byte) (map[string]copyView, error) {
 
 		xattrs := xattrsOf(in)
 
+		// A directory's size is the writer's layout of its names, not the
+		// source's field: the names themselves are held by the path set.
+		size := in.Size
+		if in.IsDir() {
+			size = 0
+		}
+
 		out[e.Path] = copyView{
 			line: fmt.Sprintf(
 				"%v|%d|%d|%d|%d|%d|%d|%v|%s",
 				modeOf(in),
-				in.Size,
+				size,
 				in.UID,
 				in.GID,
 				in.Mtime,
