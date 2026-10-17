@@ -51,3 +51,6 @@ adapted to the fork; nothing is merged from upstream.
 | The writer stamps the superblock checksum (`SB_CHKSUM`), as `mkfs.erofs` does by default, over the span the kernel verifies | https://github.com/forkcloser/erofs/pull/138 |
 | The reader refuses, as the kernel refuses the mount, an ishare xattr prefix id (`EROFS_FEATURE_COMPAT_ISHARE_XATTRS`) at or past the long xattr prefix count | https://github.com/forkcloser/erofs/pull/143 |
 | `cmd/erofs-cli`, upstream's debugging dump of an image's tree, is removed | https://github.com/forkcloser/erofs/pull/145 |
+| The reader refuses at `Stat` an inode whose data layout the kernel does not define (5 to 7), as the kernel refuses the inode | https://github.com/forkcloser/erofs/pull/151 |
+| A directory's link count is computed from the image at `Close`, two plus its subdirectories, whatever a source reported | https://github.com/forkcloser/erofs/pull/152 |
+| A metadata-only copy of an image registers the image as a device of the copy: flat, block-mapped and chunked data point at it, inline tails are copied as one block, and the result opens over the source images in copy order | https://github.com/forkcloser/erofs/pull/154 |
