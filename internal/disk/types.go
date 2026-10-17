@@ -65,7 +65,7 @@ const (
 	// prefix; the kernel refuses the superblock when the id is not below
 	// XattrPrefixCount (EROFS_FEATURE_COMPAT_ISHARE_XATTRS).
 	FeatureCompatIshareXattrs = 0x00000020
-	// NullAddr is the start block of a flat-plain inode with no data: the
+	// NullAddr is the start block of a compact flat-plain inode with no data: the
 	// kernel maps such a file as a hole (EROFS_NULL_ADDR, 32-bit mode).
 	NullAddr = 0xFFFFFFFF
 

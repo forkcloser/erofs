@@ -860,7 +860,7 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 		// Data is contiguous starting at dataBlkAddr. An address outside the
 		// image is left to the block reader, which reports it; so is the
 		// null address, a hole.
-		if ino.inodeData == disk.NullAddr {
+		if ino.nullAddress() {
 			return nil
 		}
 
@@ -1203,7 +1203,7 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 		// The null address is the whole file as a hole, as the kernel maps
 		// it; the bounds are the same arithmetic over an untrusted size as
 		// the chunk case's, so the same check stands before them.
-		if fi.inodeData == disk.NullAddr {
+		if fi.nullAddress() {
 			if blockOffset < 0 || blockEnd > blockSize || blockOffset >= blockEnd {
 				return nil, fmt.Errorf(
 					"invalid block bounds [%d:%d] for nid %d: %w",
@@ -2138,7 +2138,7 @@ func (b *file) statInfo() (*fileInfo, error) {
 // for every file without a whole block, so it is one bit away from every
 // inline file.
 func (b *file) flatPlainRange(ino *inode, dst []DataRange) ([]DataRange, error) {
-	if ino.inodeData == disk.NullAddr {
+	if ino.nullAddress() {
 		return append(dst, DataRange{Offset: holeOffset, Size: ino.size}), nil
 	}
 
@@ -2761,6 +2761,15 @@ type inode struct {
 func (ino *inode) flatDataOffset() int64 {
 	// inode core size + xattr size
 	return int64(ino.icsize) + int64(ino.xsize)
+}
+
+// nullAddress is a flat-plain inode with no data: i_u the null address on a
+// compact inode, where the kernel's start block is 32 bits wide. An extended
+// inode's is 48 bits (startblk_lo with i_nb above it, inode.c), so the same
+// low word there is block 0xffffffff, past any device this reader opens,
+// and is refused where every address past the device is.
+func (ino *inode) nullAddress() bool {
+	return ino.icsize == disk.SizeInodeCompact && ino.inodeData == disk.NullAddr
 }
 
 // fileInfo implements [fs.FileInfo] and provides extended metadata
