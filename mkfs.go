@@ -50,6 +50,10 @@ type Writer struct {
 	copyMetadataOnly bool   // metadata-only for current CopyFrom
 	copyMerge        bool   // merge mode: apply whiteouts
 	copyDeviceID     uint16 // device ID assigned to current MetadataOnly CopyFrom
+	// copySourceIsImage: the current metadata-only CopyFrom reads an EROFS
+	// image, registered as device copyDeviceID; the source's own device
+	// numbering (0 itself, 1.. its extra devices) shifts up by that id.
+	copySourceIsImage bool
 	// copyLinks maps a source inode identity to the entry that first
 	// carried it, so later names for the same source inode become hardlinks
 	// of that entry. It is created fresh per CopyFrom: a source's inode
@@ -704,6 +708,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 	fsys.copyMetadataOnly = false
 	fsys.copyMerge = false
 	fsys.copyDeviceID = 0
+	fsys.copySourceIsImage = false
 
 	fsys.copyLinks = make(map[hardlinkKey]*fsEntry)
 	for _, opt := range opts {
@@ -729,13 +734,17 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 			// A device id is 16 bits on disk, so a table that would not fit
 			// has to be refused rather than wrapped into an id naming some
 			// other device — or, at 65536, the primary image itself.
-			if err := fsys.checkDeviceCount(len(devBlocks)); err != nil {
+			if err := fsys.checkDeviceCount(1 + len(devBlocks)); err != nil {
 				return err
 			}
-
-			fsys.devices = append(fsys.devices, devBlocks...)
+			// The source image is a device of the copy, ahead of its own
+			// extra devices: its flat and chunked data stay where they are
+			// and the copy's chunks point there.
+			fsys.devices = append(fsys.devices, uint64(srcImg.blocks()))
 			// #nosec G115 -- checkDeviceCount capped the table at 65535 just above
-			fsys.copyDeviceID = uint16(len(fsys.devices) - len(devBlocks) + 1)
+			fsys.copyDeviceID = uint16(len(fsys.devices))
+			fsys.copySourceIsImage = true
+			fsys.devices = append(fsys.devices, devBlocks...)
 
 			return fsys.copyFromImage(srcImg)
 		}
@@ -1119,6 +1128,10 @@ type fsEntry struct {
 	linkTarget string
 	chunks     []builder.Chunk
 	contiguous bool // data blocks are contiguous; flat-plain is sufficient
+	// tail is the inline end of a metadata-only file copied from an image,
+	// shorter than a block: a chunk can only name whole blocks of a device,
+	// so Close writes it as one block of this image after the chunks.
+	tail []byte
 
 	// Hardlinks. linkTo makes this entry a pure additional NAME for another
 	// entry's inode (always the final target: Link resolves chains at call
@@ -1226,6 +1239,10 @@ type erofsEntry struct {
 	contiguous   bool  // data blocks are contiguous; use large chunk size
 	chunkBits    uint8 // per-entry chunk bits (0 = use global)
 	metadataOnly bool  // chunk-based layout even without chunks
+	// tail is an inline end copied from a source image, written as one data
+	// block of this image at tailBlkAddr and named by the last chunk.
+	tail        []byte
+	tailBlkAddr uint32
 
 	// For regular files — full-image mode
 	data io.Reader
@@ -2244,6 +2261,7 @@ func (fsys *Writer) fsToErofs(e *fsEntry) erofsEntry {
 		chunks:        e.chunks,
 		contiguous:    e.contiguous,
 		metadataOnly:  e.metadataOnly,
+		tail:          e.tail,
 		data:          data,
 		xattrs:        e.xattrs,
 		erofsFileType: modeToFileType(e.mode),
@@ -2316,17 +2334,17 @@ func (fsys *Writer) checkDeviceCount(adding int) error {
 }
 
 // remapChunkDevices rewrites a metadata-only entry's chunk DeviceIDs from
-// source-relative to destination-absolute. For single-device sources every
-// chunk uses DeviceID 1 and maps to copyDeviceID; for multi-device sources
-// (e.g. EROFS images) DeviceIDs 1..N are offset by copyDeviceID-1.
+// source-relative to destination-absolute. A generic source's chunks name
+// DeviceID 1, the one device CopyFrom registered for it, which becomes
+// copyDeviceID; an EROFS image's chunks keep the image's numbering, 0 for
+// the image itself and 1..N for its extra devices, and CopyFrom registered
+// the image as copyDeviceID with its extra devices right after it, so every
+// id shifts up by copyDeviceID.
 //
-// DeviceID 0 names the source's *own* primary device — the source image file
-// itself. CopyFrom registers only the source's extra devices in the
-// destination, so that device has no representable target here. Offsetting it
-// like the rest silently aliases it onto copyDeviceID-1: the destination image
-// or whichever device precedes the source's, so the file reads back another
-// layer's bytes. chunksFromRanges rejects exactly this confusion for
-// non-EROFS sources; the image fast path must too.
+// A generic source's DeviceID 0 would be the destination's own primary
+// device, where nothing of the source is; chunksFromRanges never emits it,
+// and it is refused here rather than aliased onto copyDeviceID-1, the
+// device before the source's, which would read another layer's bytes.
 //
 // Hole chunks carry no device (they serialize to a null index entry), so they
 // are left alone.
@@ -2336,13 +2354,16 @@ func (fsys *Writer) remapChunkDevices(p string, chunks []builder.Chunk) error {
 	}
 
 	offset := uint64(fsys.copyDeviceID - 1)
+	if fsys.copySourceIsImage {
+		offset = uint64(fsys.copyDeviceID)
+	}
 
 	for i := range chunks {
 		if chunks[i].PhysicalBlock == builder.NullPhysicalBlock {
 			continue
 		}
 
-		if chunks[i].DeviceID == 0 {
+		if chunks[i].DeviceID == 0 && !fsys.copySourceIsImage {
 			return fmt.Errorf(
 				"mkfs: %s: chunk references the source's own device (DeviceID 0), which is not registered in the destination: %w",
 				p,

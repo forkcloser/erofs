@@ -1,0 +1,261 @@
+// Copyright 2026 Forkcloser. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package erofs_test
+
+import (
+	"bytes"
+	"io"
+	"io/fs"
+	"strconv"
+	"testing"
+
+	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/erofs/internal/corpus"
+)
+
+// A metadata-only copy of an image registers the image as a device of the
+// copy, after the copy's earlier devices and before the image's own extra
+// devices; opened over the source images in copy order, each followed by
+// its devices, the copy reads as the sources did: every entry, every byte.
+
+// openWithDevices opens img over its extra devices.
+func openWithDevices(t *testing.T, img []byte, devices ...[]byte) fs.FS {
+	t.Helper()
+
+	var opts []erofs.OpenOpt
+
+	if len(devices) > 0 {
+		readers := make([]io.ReaderAt, len(devices))
+		for i, d := range devices {
+			readers[i] = bytes.NewReader(d)
+		}
+
+		opts = append(opts, erofs.WithExtraDevices(readers...))
+	}
+
+	fsys, err := erofs.Open(bytes.NewReader(img), opts...)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	return fsys
+}
+
+// sameTree holds got to want: the same paths, each with the same type,
+// bits, size, time and ownership, the same bytes for a file and the same
+// target for a symlink.
+func sameTree(t *testing.T, want, got fs.FS) {
+	t.Helper()
+
+	seen := 0
+
+	err := fs.WalkDir(want, ".", func(name string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		seen++
+
+		w, err := fs.Lstat(want, name)
+		if err != nil {
+			return err
+		}
+
+		g, err := fs.Lstat(got, name)
+		if err != nil {
+			t.Errorf("%s: %v in the copy", name, err)
+
+			return nil
+		}
+
+		ws, gs := w.Sys().(*erofs.Stat), g.Sys().(*erofs.Stat)
+		if w.Mode() != g.Mode() || w.Size() != g.Size() || !w.ModTime().Equal(g.ModTime()) ||
+			ws.UID != gs.UID || ws.GID != gs.GID || ws.Rdev != gs.Rdev {
+			t.Errorf("%s: copy %v %d %v %d:%d, source %v %d %v %d:%d",
+				name, g.Mode(), g.Size(), g.ModTime(), gs.UID, gs.GID,
+				w.Mode(), w.Size(), w.ModTime(), ws.UID, ws.GID)
+		}
+
+		switch {
+		case w.Mode().IsRegular():
+			wb, err := fs.ReadFile(want, name)
+			if err != nil {
+				return err
+			}
+
+			gb, err := fs.ReadFile(got, name)
+			if err != nil {
+				t.Errorf("%s: copy: %v", name, err)
+			} else if !bytes.Equal(wb, gb) {
+				t.Errorf(
+					"%s: copy reads %d bytes %q, source %d %q; bytes %s",
+					name,
+					len(gb),
+					gb[:min(8, len(gb))],
+					len(wb),
+					wb[:min(8, len(wb))],
+					sameBytes(wb, gb),
+				)
+			}
+		case w.Mode()&fs.ModeSymlink != 0:
+			wl, err := fs.ReadLink(want, name)
+			if err != nil {
+				return err
+			}
+
+			if gl, err := fs.ReadLink(got, name); err != nil || gl != wl {
+				t.Errorf("%s: copy links to %q (%v), source %q", name, gl, err, wl)
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the source: %v", err)
+	}
+
+	count := 0
+
+	if err := fs.WalkDir(got, ".", func(string, fs.DirEntry, error) error { count++; return nil }); err != nil {
+		t.Fatalf("walking the copy: %v", err)
+	}
+
+	if count != seen {
+		t.Errorf("the copy holds %d entries, the source %d", count, seen)
+	}
+}
+
+func sameBytes(a, b []byte) string {
+	if bytes.Equal(a, b) {
+		return "equal"
+	}
+
+	for i := range min(len(a), len(b)) {
+		if a[i] != b[i] {
+			return "differ from offset " + strconv.Itoa(i)
+		}
+	}
+
+	return "differ in length"
+}
+
+// TestWriterMetadataOnlyImageIsADevice: every committed image copied
+// metadata-only reads back as itself over the source and its devices.
+func TestWriterMetadataOnlyImageIsADevice(t *testing.T) {
+	t.Parallel()
+
+	for _, src := range corpus.Committed(t) {
+		t.Run(src.Name, func(t *testing.T) {
+			t.Parallel()
+
+			var srcDevices [][]byte
+			if src.Blob != nil {
+				srcDevices = append(srcDevices, src.Blob)
+			}
+
+			var srcOpts []erofs.OpenOpt
+			if src.Blob != nil {
+				srcOpts = append(srcOpts, erofs.WithExtraDevices(bytes.NewReader(src.Blob)))
+			}
+
+			source, err := erofs.Open(bytes.NewReader(src.Img), srcOpts...)
+			if err != nil {
+				t.Skipf("the package does not open %s: %v", src.Name, err)
+			}
+
+			// An image whose entries the package refuses (a header-only
+			// xattr body) has no tree to compare; the reader's rules are
+			// tested where they are stated.
+			if err := fs.WalkDir(source, ".", func(name string, _ fs.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+
+				_, err = fs.Lstat(source, name)
+
+				return err
+			}); err != nil {
+				t.Skipf("the package does not read %s: %v", src.Name, err)
+			}
+
+			var buf testBuffer
+
+			w := erofs.Create(&buf)
+			if err := w.CopyFrom(source, erofs.MetadataOnly()); err != nil {
+				t.Fatalf("CopyFrom: %v", err)
+			}
+
+			if err := w.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+
+			devices := append([][]byte{src.Img}, srcDevices...)
+			sameTree(t, source, openWithDevices(t, buf.Bytes(), devices...))
+			// fsck.erofs, where CI has it, is the verdict on the tail blocks
+			// and the chunks naming the copy's own device.
+			fsckWithDevice(t, buf.Bytes(), devices...)
+		})
+	}
+}
+
+// TestWriterMetadataOnlyMergeOfImages: two images merged metadata-only, the
+// upper's files replacing the lower's, read over the two images in order.
+func TestWriterMetadataOnlyMergeOfImages(t *testing.T) {
+	t.Parallel()
+
+	var lowerBuf, upperBuf, buf testBuffer
+
+	lower := erofs.Create(&lowerBuf)
+	writeFile(t, lower, "/keep", bytes.Repeat([]byte("k"), 5000))
+	writeFile(t, lower, "/replaced", []byte("lower"))
+
+	if err := lower.Mkdir("/d", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeFile(t, lower, "/d/inner", bytes.Repeat([]byte("i"), 4097))
+
+	if err := lower.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	upper := erofs.Create(&upperBuf)
+	writeFile(t, upper, "/replaced", bytes.Repeat([]byte("U"), 9000))
+	writeFile(t, upper, "/added", []byte("tail only"))
+
+	if err := upper.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	w := erofs.Create(&buf)
+	if err := w.CopyFrom(openWithDevices(t, lowerBuf.Bytes()), erofs.MetadataOnly()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.CopyFrom(openWithDevices(t, upperBuf.Bytes()), erofs.MetadataOnly(), erofs.Merge()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	merged := openWithDevices(t, buf.Bytes(), lowerBuf.Bytes(), upperBuf.Bytes())
+	fsckWithDevice(t, buf.Bytes(), lowerBuf.Bytes(), upperBuf.Bytes())
+
+	for name, want := range map[string][]byte{
+		"keep":     bytes.Repeat([]byte("k"), 5000),
+		"replaced": bytes.Repeat([]byte("U"), 9000),
+		"added":    []byte("tail only"),
+		"d/inner":  bytes.Repeat([]byte("i"), 4097),
+	} {
+		got, err := fs.ReadFile(merged, name)
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+		} else if !bytes.Equal(got, want) {
+			t.Errorf("%s: %d bytes, want %d; %s", name, len(got), len(want), sameBytes(want, got))
+		}
+	}
+}

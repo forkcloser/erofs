@@ -191,6 +191,10 @@ func (w *erofsWriter) checkLimits() error {
 			blocks++
 		}
 
+		if len(entry.tail) > 0 {
+			blocks++
+		}
+
 		if blocks > math.MaxUint32 {
 			return fmt.Errorf("mkfs: %s: image needs more than the %d blocks a 32-bit block address can name: %w",
 				entry.path, uint64(math.MaxUint32), ErrInvalid)
@@ -343,6 +347,15 @@ func (w *erofsWriter) assignFlatPlainAddrs(addr uint32) uint32 {
 			// #nosec G115 -- checkLimits bounded the image's block count, and so every address, to 32 bits
 			addr += uint32((ds + w.blockSize - 1) / w.blockSize)
 		}
+
+		if len(e.tail) > 0 {
+			e.tailBlkAddr = addr
+			// The tail's chunk: the one block of this image, after the
+			// chunks on the source's devices; one logical chunk is one
+			// block here, which the tail's entry keeps non-contiguous.
+			e.chunks = append(e.chunks, builder.Chunk{PhysicalBlock: uint64(addr), Count: 1})
+			addr++
+		}
 	}
 
 	return addr
@@ -400,6 +413,10 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 	for _, e := range w.entries {
 		if ds := w.flatPlainDataSize(e); ds > 0 {
 			dataBlocks += (ds + w.blockSize - 1) / w.blockSize
+		}
+
+		if len(e.tail) > 0 {
+			dataBlocks++
 		}
 	}
 
@@ -889,6 +906,10 @@ func (w *erofsWriter) writeDataBlocks(out io.Writer) error {
 	for _, e := range w.entries {
 		ds := w.flatPlainDataSize(e)
 		if ds == 0 {
+			if err := w.writeTailBlock(out, e); err != nil {
+				return err
+			}
+
 			continue
 		}
 
@@ -946,6 +967,30 @@ func (w *erofsWriter) writeDataBlocks(out io.Writer) error {
 			if _, err := out.Write(w.zeroBuf[:padSize]); err != nil {
 				return fmt.Errorf("write padding for %s: %w", e.path, err)
 			}
+		}
+
+		if err := w.writeTailBlock(out, e); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// writeTailBlock writes a metadata-only file's copied tail as one block,
+// where assignFlatPlainAddrs placed it.
+func (w *erofsWriter) writeTailBlock(out io.Writer, e *erofsEntry) error {
+	if len(e.tail) == 0 {
+		return nil
+	}
+
+	if _, err := out.Write(e.tail); err != nil {
+		return fmt.Errorf("write tail for %s: %w", e.path, err)
+	}
+
+	if pad := w.blockSize - len(e.tail)%w.blockSize; pad < w.blockSize {
+		if _, err := out.Write(w.zeroBuf[:pad]); err != nil {
+			return fmt.Errorf("write padding for %s: %w", e.path, err)
 		}
 	}
 

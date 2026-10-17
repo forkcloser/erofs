@@ -125,6 +125,13 @@ w.CopyFrom(layer2, erofs.MetadataOnly(), erofs.Merge())
 w.Close()
 ```
 
+A metadata-only copy of an EROFS image registers the image as an extra device
+of the result, followed by the image's own extra devices: every file's blocks
+stay where they are and the result's chunk indexes point at them; only a
+file's inline tail, shorter than a block, is copied, as one block. Open the
+result with `WithExtraDevices` over the source images in copy order, each
+followed by its own devices.
+
 ## Building an image programmatically
 
 ```go
