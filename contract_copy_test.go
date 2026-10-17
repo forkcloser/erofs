@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"path"
@@ -494,6 +495,13 @@ func checkEditedCopy(t *testing.T, im corpus.Image, img []byte, label string) in
 	switch {
 	case errors.Is(cerr, errPanic):
 		t.Fatalf("%s %s: %v", im.Name, label, cerr)
+	case cerr != nil && (errors.Is(cerr, io.ErrUnexpectedEOF) || errors.Is(cerr, io.EOF)) &&
+		referenceVerdict(img, im.Blob).class == "truncated":
+		// A structure the reference finds past the end of the image or of
+		// a device (whose length no field declares): the reader's Read
+		// passes the ReaderAt's own end through, "a failing reader", and
+		// the copy carries it as is.
+		return 1
 	case cerr != nil && !errors.Is(cerr, fs.ErrInvalid) && !errors.Is(cerr, erofs.ErrNotImplemented) && !errors.Is(cerr, fs.ErrNotExist):
 		// ErrNotExist is a directory block out of name order: ReadDir
 		// lists a name the lookup's binary search does not find, the
