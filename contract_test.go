@@ -1230,9 +1230,22 @@ func referenceVerdict(img, blob []byte) verdict {
 
 	complete := uint64(len(img)) >= ref.Super.Blocks*uint64(ref.Super.BlockSize)
 
+	// What the package documents as ErrNotImplemented, read off the
+	// superblock: extended inode slots, the 48-bit layout, and compression,
+	// which the image announces by its feature bits (LZ4 zero padding,
+	// compression configs, ztailpacking) or by available_compr_algs, even
+	// when no inode of the image is compressed; the kernel mounts such an
+	// image and reads its flat files.
+	compression := uint32(
+		erofsspec.FeatureIncompatLZ40Padding | erofsspec.FeatureIncompatComprCfgs | erofsspec.FeatureIncompatZTailpacking,
+	)
+
 	v := verdict{
-		complete:       complete,
-		notImplemented: ref.Super.ExtSlots > 0 || ref.Super.FeatureIncompat&erofsspec.FeatureIncompat48Bit != 0,
+		complete: complete,
+		notImplemented: ref.Super.ExtSlots > 0 ||
+			ref.Super.FeatureIncompat&erofsspec.FeatureIncompat48Bit != 0 ||
+			ref.Super.FeatureIncompat&compression != 0 ||
+			ref.Super.ComprAlgs != 0,
 	}
 	h := &strings.Builder{}
 
