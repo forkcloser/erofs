@@ -464,6 +464,10 @@ func Matrix() map[string][]string {
 	m["xattr-none"] = []string{"-b4096", "-x-1"}
 	m["xattr-prefix"] = []string{"-b4096", "--xattr-prefix=trusted.overlay."}
 	m["xattr-prefix-512"] = []string{"-b512", "--xattr-prefix=trusted.overlay.", "--xattr-prefix=user.lo"}
+	// Under fragments mkfs.erofs writes the prefix table into the packed
+	// inode, where the kernel reads it from unless PLAIN_XATTR_PFX says
+	// otherwise; without compression every file stays plain.
+	m["fragments-prefix"] = []string{"-b4096", "-Efragments", "--xattr-prefix=trusted.overlay."}
 	m["nosbcrc"] = []string{"-b4096", "-Enosbcrc"}
 	m["dot-omitted"] = []string{"-b4096", "-Edot-omitted"}
 	m["volume"] = []string{"-b4096", "-Lvolume"}
@@ -493,7 +497,8 @@ func CommittedSets() []Set {
 
 	for _, opts := range []string{
 		"b512", "b512-extended", "b1024-plain", "b4096", "b4096-extended", "b4096-plain", "b16384",
-		"chunk-indexes", "chunk-blockmap", "blobdev", "xattr-prefix-512", "nosbcrc", "dot-omitted",
+		"chunk-indexes", "chunk-blockmap", "blobdev", "xattr-prefix-512", "fragments-prefix", "nosbcrc",
+		"dot-omitted",
 	} {
 		sets = append(sets, Set{Name: opts, Tree: Tree, Opts: opts})
 	}

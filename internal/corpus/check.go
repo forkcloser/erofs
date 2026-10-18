@@ -54,8 +54,14 @@ func Check(tb testing.TB, im Image, ref *erofsspec.Image, nodes []Node, nsec boo
 		}
 	}
 
-	// inos counts inodes, which hardlinks share (dump.erofs -s, "inode count").
-	if got := uint64(len(nids)) + 1; ref.Super.Inos != 0 && got != ref.Super.Inos {
+	// inos counts inodes, which hardlinks share (dump.erofs -s, "inode count"),
+	// and the packed inode, which no path reaches.
+	got := uint64(len(nids)) + 1
+	if ref.Super.FeatureIncompat&erofsspec.FeatureIncompatFragments != 0 && ref.Super.PackedNid != 0 {
+		got++
+	}
+
+	if ref.Super.Inos != 0 && got != ref.Super.Inos {
 		tb.Errorf("inode count %d, superblock says %d", got, ref.Super.Inos)
 	}
 }

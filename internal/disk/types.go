@@ -25,7 +25,10 @@ const (
 	SizeSuperExtSlot = 16
 	// MinPageSize is the smallest page a kernel mounts EROFS with; the
 	// superblock is read from a page and must fit in it.
-	MinPageSize         = 4096
+	MinPageSize = 4096
+	// MaxNameLen is the longest name, of a dirent or an xattr after its
+	// prefix (EROFS_NAME_LEN).
+	MaxNameLen          = 255
 	SizeInodeCompact    = 32
 	SizeInodeExtended   = 64
 	SizeDirent          = 12
@@ -71,6 +74,9 @@ const (
 	// prefix; the kernel refuses the superblock when the id is not below
 	// XattrPrefixCount (EROFS_FEATURE_COMPAT_ISHARE_XATTRS).
 	FeatureCompatIshareXattrs = 0x00000020
+	// FeatureCompatPlainXattrPfx says the long xattr prefix table lies in
+	// the image itself, not in the packed inode (PLAIN_XATTR_PFX).
+	FeatureCompatPlainXattrPfx = 0x00000010
 	// NullAddr is the start block of a compact flat-plain inode with no data: the
 	// kernel maps such a file as a hole (EROFS_NULL_ADDR, 32-bit mode).
 	NullAddr = 0xFFFFFFFF
