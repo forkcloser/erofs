@@ -2070,8 +2070,11 @@ func (b *file) decodeInode(buf []byte, format uint16) (*inode, uint16, error) {
 			uid:         uint32(di.UID),
 			gid:         uint32(di.GID),
 			nlink:       int(di.Nlink),
-			mtime:       b.img.sb.BuildTime,
-			mtimeNs:     b.img.sb.BuildTimeNs,
+			// A compact inode's time is the superblock's epoch plus its
+			// 32-bit i_mtime, with the superblock's fixed nanoseconds
+			// (inode.c: erofs_read_inode).
+			mtime:   b.img.sb.BuildTime + uint64(di.Mtime),
+			mtimeNs: b.img.sb.BuildTimeNs,
 		}, di.XattrCount, nil
 	}
 

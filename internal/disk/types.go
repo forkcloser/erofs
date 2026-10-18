@@ -124,7 +124,7 @@ type InodeCompact struct {
 	Mode       uint16 // i_mode
 	Nlink      uint16 // i_nlink
 	Size       uint32 // i_size
-	Reserved   uint32 // i_reserved
+	Mtime      uint32 // i_mtime, seconds added to the superblock's epoch
 	InodeData  uint32 // i_u (i_raw_blkaddr, i_rdev, etc.)
 	Inode      uint32 // i_ino
 	UID        uint16 // i_uid
@@ -233,7 +233,7 @@ func (i *InodeCompact) Unmarshal(b []byte) {
 	i.Mode = binary.LittleEndian.Uint16(b[4:6])
 	i.Nlink = binary.LittleEndian.Uint16(b[6:8])
 	i.Size = binary.LittleEndian.Uint32(b[8:12])
-	i.Reserved = binary.LittleEndian.Uint32(b[12:16])
+	i.Mtime = binary.LittleEndian.Uint32(b[12:16])
 	i.InodeData = binary.LittleEndian.Uint32(b[16:20])
 	i.Inode = binary.LittleEndian.Uint32(b[20:24])
 	i.UID = binary.LittleEndian.Uint16(b[24:26])

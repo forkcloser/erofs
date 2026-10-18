@@ -299,7 +299,9 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			nlink = uint32(ino.Nlink)
 			size = uint64(ino.Size)
 			idata = ino.InodeData
-			mtime = buildTime
+			// The superblock's epoch plus i_mtime, as the kernel reads a
+			// compact inode's time.
+			mtime = buildTime + uint64(ino.Mtime)
 			mtimeNs = buildTimeNs
 			xcnt = ino.XattrCount
 			icSize = disk.SizeInodeCompact

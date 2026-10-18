@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/forkcloser/erofs"
 	"github.com/forkcloser/erofs/internal/corpus"
@@ -1278,5 +1279,70 @@ func TestReaderXattrPrefixTablePacked(t *testing.T) {
 
 	if _, err := erofs.Open(bytes.NewReader(appended)); err != nil {
 		t.Fatalf("the table in the image under PLAIN_XATTR_PFX: %v", err)
+	}
+}
+
+// TestReaderCompactInodeMtime: a compact inode's time is the superblock's
+// epoch plus its 32-bit i_mtime, with the superblock's fixed nanoseconds
+// (inode.c: erofs_read_inode), where the reader handed every compact inode
+// the epoch alone and the metadata-only copy did the same. mkfs.erofs makes
+// an inode extended when its time differs from the build time, so the
+// committed images never say otherwise; the fuzzer's input does: small-b512
+// with the high byte of d's i_mtime set.
+func TestReaderCompactInodeMtime(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "small-b512" {
+			continue
+		}
+
+		edited := bytes.Clone(im.Img)
+		edited[1263] = 0x3c
+		edited[1032] = 0x5a // the checksum feature cleared
+
+		sb := edited[disk.SuperBlockOffset:]
+		epoch := int64(binary.LittleEndian.Uint64(sb[24:]))
+		nsec := int64(binary.LittleEndian.Uint32(sb[32:]))
+		// d's inode starts at 1248; i_mtime is its bytes 12 to 15.
+		want := time.Unix(epoch+int64(binary.LittleEndian.Uint32(edited[1260:])), nsec)
+
+		if want.Unix() == epoch {
+			t.Fatal("test premise broken: the edit left d's i_mtime zero")
+		}
+
+		fsys, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		fi, err := fs.Stat(fsys, "d")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !fi.ModTime().Equal(want) {
+			t.Fatalf("d's mtime read as %v; want %v", fi.ModTime(), want)
+		}
+
+		var buf testBuffer
+
+		w := erofs.Create(&buf)
+		if err = w.CopyFrom(fsys, erofs.MetadataOnly()); err != nil {
+			t.Fatal(err)
+		}
+
+		if err = w.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		fi, err = fs.Stat(openWithDevices(t, buf.Bytes(), edited), "d")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !fi.ModTime().Equal(want) {
+			t.Fatalf("the metadata-only copy gives d an mtime of %v; want %v", fi.ModTime(), want)
+		}
 	}
 }
