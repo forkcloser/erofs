@@ -1189,7 +1189,17 @@ func (img *image) loadAt(addr, size int64) (*block, error) {
 
 	if n <= 0 {
 		img.putBlock(b)
-		return nil, fmt.Errorf("failed to read %d bytes at %d: %w", size, addr, io.EOF)
+		// Nothing of a structure the superblock places inside the image:
+		// the bytes end before their declared extent, the image's fault (a
+		// device that short is EIO to the kernel's readdir and lookup), not
+		// the reader's end of file. A bare io.EOF here read as "no more
+		// blocks" to the directory walks, which listed an empty directory
+		// and missed every name in the block.
+		if img.size > 0 {
+			return nil, fmt.Errorf("the image ends before the structure at %d: %w", addr, ErrCorrupt)
+		}
+
+		return nil, fmt.Errorf("failed to read %d bytes at %d: %w", size, addr, io.ErrUnexpectedEOF)
 	}
 
 	b.offset = 0
@@ -1456,6 +1466,17 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 	b.end = int32(blockEnd) // #nosec G115 -- checked above: at most blockSize, at most 1<<16
 	if n, err := reader.ReadAt(b.bytes(), start); err != nil {
 		img.putBlock(b)
+		// The block lies inside the image's declared extent (checked above,
+		// by the image's size or the device's blocks), so a reader that
+		// ends before it is an image shorter than its superblock says: the
+		// image's fault, as a device that short is EIO to the kernel, not
+		// the reader's end of file. A bare io.EOF here read as "no more
+		// blocks" to ReadDir and the lookup, which listed an empty
+		// directory and said ErrNotExist for every name in the block.
+		if errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("the image ends inside a block of nid %d: %w", fi.nid, ErrCorrupt)
+		}
+
 		return nil, fmt.Errorf("failed to read block for nid %d: %w", fi.nid, err)
 	} else if n != blockEnd-blockOffset {
 		img.putBlock(b)
