@@ -842,6 +842,159 @@ func TestContractGenericSourceTimesAndOwnership(t *testing.T) {
 	}
 }
 
+// coalesced joins adjacent DataRange entries that continue each other, a
+// hole after a hole or data at the offset the previous entry ends.
+func coalesced(ranges []erofs.DataRange) []erofs.DataRange {
+	var out []erofs.DataRange
+
+	for _, r := range ranges {
+		if n := len(out); n > 0 {
+			last := &out[n-1]
+			if last.Offset < 0 && r.Offset < 0 ||
+				last.Offset >= 0 && r.Offset >= 0 && last.Device == r.Device && last.Offset+last.Size == r.Offset {
+				last.Size += r.Size
+
+				continue
+			}
+		}
+
+		out = append(out, r)
+	}
+
+	return out
+}
+
+// TestContractGenericDataRangeIsStoredAsChunks: a generic source whose
+// FileInfo provides DataRange() is, metadata-only, "stored as chunk-based
+// inodes" on the device CopyFrom assigns the source (its DeviceBlocks),
+// each data entry at its offset there, each hole entry a hole; the copy's
+// DataRange answers the same slice with that device, the reference's
+// extents agree, and nothing of the data is in the image. A slice that
+// does not cover the file "from logical byte 0 to Size-1 in order, with no
+// gaps or overlaps" is refused as ErrInvalid: a negative or unaligned
+// offset, a zero or negative size, a device the source does not own, a sum
+// short of or past the size.
+func TestContractGenericDataRangeIsStoredAsChunks(t *testing.T) {
+	t.Parallel()
+
+	const bs = 4096
+
+	copyRanges := func(t *testing.T, size int64, ranges []erofs.DataRange) (corpus.Image, error) {
+		t.Helper()
+
+		src := &dataRangerFS{deviceBlocks: 1024, file: &dataRangerFileInfo{name: "f.bin", size: size, ranges: ranges}}
+		out := &testBuffer{}
+		w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+		if err := errors.Join(w.CopyFrom(src, erofs.MetadataOnly()), w.Close()); err != nil {
+			return corpus.Image{}, err
+		}
+
+		return corpus.Image{Name: "ranges", Img: out.Bytes(), Blob: make([]byte, 1024*bs)}, nil
+	}
+
+	for _, c := range []struct {
+		name   string
+		size   int64
+		ranges []erofs.DataRange
+	}{
+		{"one range", 2 * bs, []erofs.DataRange{{Offset: 10 * bs, Size: 2 * bs}}},
+		{"two ranges", 4 * bs, []erofs.DataRange{{Offset: 5 * bs, Size: bs}, {Offset: 20 * bs, Size: 3 * bs}}},
+		{"a hole after data", 4 * bs, []erofs.DataRange{{Offset: 2 * bs, Size: bs}, {Offset: -1, Size: 3 * bs}}},
+		{"a partial last block", 3*bs + 512, []erofs.DataRange{{Offset: 0, Size: 3 * bs}, {Offset: 3 * bs, Size: 512}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			im, err := copyRanges(t, c.size, c.ranges)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			fsys := openImage(t, im)
+
+			fi, err := fs.Stat(fsys, "f.bin")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got := fi.(interface{ DataRange() []erofs.DataRange }).DataRange()
+
+			var want []erofs.DataRange
+
+			for _, r := range c.ranges {
+				if r.Offset >= 0 {
+					r.Device = 1
+				}
+
+				want = append(want, r)
+			}
+
+			// The copy may join entries that are contiguous on the device,
+			// as the reference's extents do; the mapping is what is held.
+			if !slices.Equal(coalesced(got), coalesced(want)) {
+				t.Errorf("DataRange = %+v, want %+v (the source's, on device 1)", got, want)
+			}
+
+			ref := parseImage(t, im)
+
+			in, err := ref.Resolve("f.bin", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			exts, err := ref.Extents(in)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var pos int64
+			for i, x := range exts {
+				if x.Logical != pos {
+					t.Errorf("extent %d at logical %d, want %d", i, x.Logical, pos)
+				}
+
+				pos += x.Length
+			}
+
+			if pos != c.size {
+				t.Errorf("extents cover %d bytes, want %d", pos, c.size)
+			}
+
+			for _, x := range exts {
+				if !x.Hole && x.Device != 1 {
+					t.Errorf("extent %+v on device %d, want 1", x, x.Device)
+				}
+			}
+
+			fsckUnlessPlatformLimit(t, im)
+		})
+	}
+
+	for _, c := range []struct {
+		name   string
+		size   int64
+		ranges []erofs.DataRange
+	}{
+		{"negative offset", 4 * bs, []erofs.DataRange{{Offset: -bs, Size: 4 * bs}}},
+		{"zero size", 4 * bs, []erofs.DataRange{{Offset: 0, Size: 0}, {Offset: 0, Size: 4 * bs}}},
+		{"negative size", 4 * bs, []erofs.DataRange{{Offset: 0, Size: -1}}},
+		{"unaligned offset", 4 * bs, []erofs.DataRange{{Offset: 100, Size: 4 * bs}}},
+		{"another device", 4 * bs, []erofs.DataRange{{Device: 1, Offset: bs, Size: 4 * bs}}},
+		{"a sum short of the size", 4 * bs, []erofs.DataRange{{Offset: 0, Size: bs}}},
+		{"a sum past the size", 4 * bs, []erofs.DataRange{{Offset: 0, Size: 5 * bs}}},
+		{"an unaligned middle", 4 * bs, []erofs.DataRange{{Offset: 0, Size: 100}, {Offset: bs, Size: 4*bs - 100}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			if _, err := copyRanges(t, c.size, c.ranges); !errors.Is(err, fs.ErrInvalid) {
+				t.Fatalf("%v, want ErrInvalid", err)
+			}
+		})
+	}
+}
+
 // TestContractMergeWhiteoutOfHardlinkedName: a whiteout on one name of a
 // hard-linked pair leaves the other with the inode, "as unlink(2) does".
 func TestContractMergeWhiteoutOfHardlinkedName(t *testing.T) {
