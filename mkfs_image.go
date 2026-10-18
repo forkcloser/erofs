@@ -650,8 +650,12 @@ func (*Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPath str
 		blockEnd := min(pos+blockSize, dirSize)
 
 		blk := data[pos:blockEnd]
+		// A block shorter than one dirent holds no first name offset: the
+		// kernel's readdir ends in "bogus dirent" on it and the reader's
+		// ReadDir refuses it, so the copy refuses it in the same class
+		// rather than copying a directory short of its entries.
 		if len(blk) < disk.SizeDirent {
-			break
+			return fmt.Errorf("in %s: directory block of %d bytes: %w", parentPath, len(blk), ErrCorrupt)
 		}
 
 		// The same rules as the reader's ReadDir: the first entry's name

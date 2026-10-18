@@ -1298,7 +1298,7 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 		}
 
 		if format&^(disk.LayoutChunkFormatBits|disk.LayoutChunkFormatIndexes) != 0 {
-			return nil, fmt.Errorf("unsupported chunk format %x for nid %d: %w", format, fi.nid, ErrCorrupt)
+			return nil, fmt.Errorf("unsupported chunk format %x for nid %d: %w", format, fi.nid, ErrNotImplemented)
 		}
 
 		chunkbits := img.sb.BlkSizeBits + uint8(format&disk.LayoutChunkFormatBits)
@@ -2032,6 +2032,16 @@ func (b *file) finishInfo(buf []byte, xcnt uint16) error {
 		}
 
 		ino.xsize = xsize
+	}
+
+	// A chunk format word with a bit the kernel does not define is a format
+	// it lacks, judged with the inode at iget (inode.c, "unsupported chunk
+	// format"), so no Stat, ReadDir or Open serves the inode.
+	if ino.inodeLayout == disk.LayoutChunkBased {
+		// #nosec G115 -- the chunk format is the low 16 bits of i_u, as the kernel's __le16 c.format reads it
+		if chunkFmt := uint16(ino.inodeData); chunkFmt&^disk.LayoutChunkFormatAll != 0 {
+			return fmt.Errorf("unsupported chunk format %#x of nid %d: %w", chunkFmt, b.nid, ErrNotImplemented)
+		}
 	}
 
 	if ino.mode&fs.ModeSymlink == 0 || ino.inodeLayout != disk.LayoutFlatInline || ino.size < 0 {

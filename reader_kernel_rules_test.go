@@ -1346,3 +1346,65 @@ func TestReaderCompactInodeMtime(t *testing.T) {
 		}
 	}
 }
+
+// TestReaderChunkFormatBits: a chunk format word with a bit the kernel does
+// not define is a format it lacks, refused with the inode at iget (inode.c,
+// "unsupported chunk format", EOPNOTSUPP), so Lstat is ErrNotImplemented and
+// so is a metadata-only copy, where the reader served the inode and refused
+// its data as corrupt. The first input is the fuzzer's: small-blobdev-512
+// with inode 51's i_format turned chunk-based, so its start block reads as
+// chunk format 0x501; the second sets bit 7 on a chunked file of
+// small-chunk-512.
+func TestReaderChunkFormatBits(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		switch im.Name {
+		case "small-blobdev-512":
+			edited := bytes.Clone(im.Img)
+			edited[1632] = 0x19
+
+			whole := openWithDevices(t, im.Img, im.Blob)
+			cut := openWithDevices(t, edited, im.Blob)
+			refused := 0
+
+			err := fs.WalkDir(whole, ".", func(name string, _ fs.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+
+				// Inode 51's names are refused in the kernel's class; every
+				// other name is served as before.
+				switch _, lerr := fs.Lstat(cut, name); {
+				case errors.Is(lerr, erofs.ErrNotImplemented):
+					refused++
+				case lerr != nil:
+					t.Errorf("Lstat of %s on the edited image: %v", name, lerr)
+				}
+
+				return nil
+			})
+			if err != nil || refused == 0 {
+				t.Fatalf("walk: %v, %d names refused; want inode 51's", err, refused)
+			}
+		case "small-chunk-512":
+			edited := bytes.Clone(im.Img)
+			edited[1032] = 0x00 // the checksum feature cleared
+			at := inodeOffset(t, im.Img, "multi") + 16
+			edited[at] |= 0x80
+
+			source := openWithDevices(t, edited)
+
+			if _, err := fs.Lstat(source, "multi"); !errors.Is(err, erofs.ErrNotImplemented) {
+				t.Fatalf("Lstat of a chunked file with chunk format bit 7: %v; want ErrNotImplemented", err)
+			}
+
+			var buf testBuffer
+
+			w := erofs.Create(&buf)
+			if err := w.CopyFrom(source, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrNotImplemented) {
+				t.Fatalf("CopyFrom(MetadataOnly) of that image: %v; want ErrNotImplemented", err)
+			}
+		}
+	}
+}
