@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"os"
 	"path"
 	"slices"
 	"strings"
@@ -686,6 +687,78 @@ func TestContractCopyHardLinkScopeIsOneCall(t *testing.T) {
 	want := slices.Concat(nodesA, nodesB)
 	im := corpus.Image{Name: "hard-link-scope", Img: out.Bytes(), Tree: want}
 	corpus.Check(t, im, parseImage(t, im), want, true)
+}
+
+// TestContractMetadataOnlyCopyAfterTheCopysOwnDevice: the source image is
+// registered "after the copy's earlier devices": a writer with its own data
+// file (device 1) that copies an image metadata-only places the image at
+// device 2 and the image's own devices after it, and the result reads the
+// writer's own file from its data file and the source's files from the
+// source, each at its own slot.
+func TestContractMetadataOnlyCopyAfterTheCopysOwnDevice(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"small-b512", "small-blobdev-512"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			src := committed(t, name)
+
+			df, err := os.CreateTemp(t.TempDir(), "data")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			defer func() { _ = df.Close() }()
+
+			out := &testBuffer{}
+			w := erofs.Create(
+				out,
+				erofs.WithBuildTime(corpus.BuildTime, 0),
+				erofs.WithBlockSize(512),
+				erofs.WithDataFile(df),
+			)
+
+			at := time.Unix(corpus.BuildTime, 0)
+			if err := errors.Join(
+				w.Mkdir("/", corpus.RootMode),
+				w.Chown("/", 0, 0),
+				w.Chtimes("/", at, at),
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			own := corpus.Node{
+				Path: "own",
+				Type: tar.TypeReg,
+				Mode: 0o644,
+				Data: bytes.Repeat([]byte("o"), 5000),
+				Sec:  corpus.BuildTime,
+			}
+			writeNode(t, w, own)
+
+			if err := errors.Join(w.CopyFrom(openImage(t, src), erofs.MetadataOnly()), w.Close()); err != nil {
+				t.Fatal(err)
+			}
+
+			blob, err := os.ReadFile(df.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			want := append([]corpus.Node{own}, src.Tree...)
+			im := corpus.Image{Name: name + "-after-own-device", Img: out.Bytes(), Tree: want}
+			im.Devices = append([][]byte{blob, src.Img}, src.Extra()...)
+
+			ref := parseImage(t, im)
+			if got := len(ref.Devices); got != len(im.Devices) {
+				t.Fatalf("%d device slots, want %d (the data file, the image, its devices)", got, len(im.Devices))
+			}
+
+			corpus.Check(t, im, ref, want, true)
+			fsckUnlessPlatformLimit(t, im)
+		})
+	}
 }
 
 // TestContractMergeWhiteoutOfHardlinkedName: a whiteout on one name of a
