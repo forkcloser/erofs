@@ -44,8 +44,10 @@ import (
 	"archive/tar"
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"io/fs"
 	"maps"
@@ -53,11 +55,15 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"testing/fstest"
 	"time"
+	"unicode/utf8"
 
 	"github.com/forkcloser/erofs"
 	"github.com/forkcloser/erofs/internal/corpus"
+	"github.com/forkcloser/erofs/internal/disk"
 	"github.com/forkcloser/erofs/internal/erofsspec"
 )
 
@@ -1270,6 +1276,774 @@ func TestContractReferenceDeviceCountIsTheGiven(t *testing.T) {
 				err,
 			)
 		}
+	}
+}
+
+// failingReaderAt answers every read past limit with its own error, and the
+// bytes before it; limit 0 fails the first read.
+type failingReaderAt struct {
+	data  []byte
+	limit int64
+	err   error
+}
+
+func (r failingReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if off >= r.limit {
+		return 0, r.err
+	}
+
+	n := copy(p, r.data[off:min(int64(len(r.data)), r.limit)])
+	if int64(n) < int64(len(p)) {
+		return n, r.err
+	}
+
+	return n, nil
+}
+
+// TestContractReaderPassesTheReaderAtsErrorThrough: "a failing reader (whose
+// error passes through)": the ReaderAt's own error reaches the caller from
+// Open and from a read after it, wrapping neither ErrCorrupt nor ErrInvalid
+// nor a short read's io.ErrUnexpectedEOF; what the package judged corrupt
+// is the bytes, never the transport.
+func TestContractReaderPassesTheReaderAtsErrorThrough(t *testing.T) {
+	t.Parallel()
+
+	errTransport := errors.New("the transport failed") //nolint:err113 // the test's own sentinel
+
+	check := func(t *testing.T, what string, err error) {
+		t.Helper()
+
+		switch {
+		case err == nil:
+			t.Fatalf("%s: no error from a failing ReaderAt", what)
+		case !errors.Is(err, errTransport):
+			t.Fatalf("%s: %v, want the ReaderAt's own error", what, err)
+		case errors.Is(err, erofs.ErrCorrupt), errors.Is(err, fs.ErrInvalid), errors.Is(err, io.ErrUnexpectedEOF):
+			t.Fatalf("%s: %v names the bytes or a short read for a transport failure", what, err)
+		}
+	}
+
+	t.Run("at Open", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := erofs.Open(failingReaderAt{err: errTransport})
+		check(t, "Open", err)
+	})
+
+	for _, im := range corpus.Committed(t) {
+		if im.Tree == nil || im.Blob != nil {
+			continue
+		}
+
+		t.Run(im.Name, func(t *testing.T) {
+			t.Parallel()
+
+			if openImage(t, im) == nil {
+				t.Skip("a 48-bit image: the package does not open it")
+			}
+
+			// The failure placed at every block boundary in turn, so that it
+			// lands on metadata (an inode, a directory block, a chunk map,
+			// an xattr area) as well as on file data; whichever call meets
+			// it first, Open or the walk's, hands the ReaderAt's error on.
+			bs := int64(1) << parseImage(t, im).Super.BlockBits
+
+			var reached int
+
+			for limit := bs; limit < int64(len(im.Img)); limit += bs {
+				fsys, err := erofs.Open(failingReaderAt{data: im.Img, limit: limit, err: errTransport})
+				if err != nil {
+					check(t, fmt.Sprintf("Open failing past %d", limit), err)
+
+					reached++
+
+					continue
+				}
+
+				werr := fs.WalkDir(fsys, ".", func(name string, d fs.DirEntry, err error) error {
+					if err != nil {
+						check(t, fmt.Sprintf("WalkDir %s failing past %d", name, limit), err)
+
+						reached++
+
+						return fs.SkipAll
+					}
+
+					if _, lerr := fs.Lstat(fsys, name); lerr != nil {
+						check(t, fmt.Sprintf("Lstat %s failing past %d", name, limit), lerr)
+
+						reached++
+
+						return fs.SkipAll
+					}
+
+					if !d.Type().IsRegular() {
+						return nil
+					}
+
+					if _, rerr := fs.ReadFile(fsys, name); rerr != nil {
+						check(t, fmt.Sprintf("ReadFile %s failing past %d", name, limit), rerr)
+
+						reached++
+
+						return fs.SkipAll
+					}
+
+					return nil
+				})
+				if werr != nil {
+					t.Fatalf("WalkDir failing past %d: %v", limit, werr)
+				}
+			}
+
+			if reached == 0 {
+				t.Fatalf("%s: no block boundary failed anything the walk reads", im.Name)
+			}
+		})
+	}
+}
+
+// TestContractConformsToTestFS: fstest.TestFS, the standard
+// library's own conformance walk of an fs.FS (Open, ReadDir, ReadFile, Stat,
+// Glob, Sub, the DirEntry and FileInfo agreements), over every committed
+// image whose tree it can walk (TestFS opens every entry and Open follows a
+// symlink, so the corpus tree's dangling symlinks keep it to the small-*
+// images, the assembled ones and the writer's image of the tree without
+// them), naming every regular file the tree holds.
+func TestContractConformsToTestFS(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Tree == nil {
+			continue
+		}
+
+		t.Run(im.Name, func(t *testing.T) {
+			t.Parallel()
+
+			fsys := openImage(t, im)
+			if fsys == nil {
+				t.Skip("a 48-bit image: the package does not open it")
+			}
+
+			// TestFS opens every entry it lists and Open follows a symlink,
+			// so a tree with a dangling one is not its to walk.
+			var expected []string
+
+			for _, n := range im.Tree {
+				if n.Type == tar.TypeSymlink {
+					if f, err := fsys.Open(n.Path); err == nil {
+						_ = f.Close()
+					} else if errors.Is(err, fs.ErrNotExist) {
+						t.Skipf("%s: %s is a dangling symlink, which TestFS would open", im.Name, n.Path)
+					}
+				}
+
+				if n.Type == tar.TypeReg && fs.ValidPath(n.Path) && utf8.ValidString(n.Path) {
+					expected = append(expected, n.Path)
+				}
+			}
+
+			if err := fstest.TestFS(fsys, expected...); err != nil {
+				t.Fatalf("fstest.TestFS: %v", err)
+			}
+		})
+	}
+
+	// The corpus tree without its dangling symlinks, as the writer lays it
+	// out: the walk over the writer's image of the full shape.
+	t.Run("writer-tree", func(t *testing.T) {
+		t.Parallel()
+
+		var nodes, expected []string
+
+		kept := make([]corpus.Node, 0, len(corpus.Tree()))
+		paths := map[string]bool{}
+
+		for _, n := range corpus.Tree() {
+			paths[n.Path] = true
+		}
+
+		for _, n := range corpus.Tree() {
+			if n.Type == tar.TypeSymlink && (path.IsAbs(n.Link) || !paths[path.Join(path.Dir(n.Path), n.Link)]) {
+				nodes = append(nodes, n.Path)
+
+				continue
+			}
+
+			kept = append(kept, n)
+
+			if n.Type == tar.TypeReg && fs.ValidPath(n.Path) && utf8.ValidString(n.Path) {
+				expected = append(expected, n.Path)
+			}
+		}
+
+		if len(nodes) == 0 {
+			t.Fatal("the corpus tree holds no dangling symlink; the committed images cover it")
+		}
+
+		im := corpus.Image{Name: "writer-tree", Img: writeImage(t, kept), Tree: kept}
+
+		if err := fstest.TestFS(openImage(t, im), expected...); err != nil {
+			t.Fatalf("fstest.TestFS over the writer's tree without %v: %v", nodes, err)
+		}
+	})
+}
+
+// TestContractReaderRefusesBadMagic: a superblock without the magic is
+// refused at Open as ErrInvalidSuperblock, which is ErrCorrupt, which is
+// fs.ErrInvalid: the three names of one refusal, each an errors.Is.
+func TestContractReaderRefusesBadMagic(t *testing.T) {
+	t.Parallel()
+
+	img := bytes.Clone(committed(t, "small-b4096-extended").Img)
+	binary.LittleEndian.PutUint32(img[1024:], 0xdeadbeef)
+
+	_, err := erofs.Open(bytes.NewReader(img))
+	if err == nil {
+		t.Fatal("Open accepted a superblock without the magic")
+	}
+
+	for _, want := range []error{erofs.ErrInvalidSuperblock, erofs.ErrCorrupt, fs.ErrInvalid} {
+		if !errors.Is(err, want) {
+			t.Errorf("Open: %v, want it to be %v", err, want)
+		}
+	}
+}
+
+// TestContractNonUTF8NameRoundTrips: a name that is not UTF-8 is a name
+// like any other to the writer and the reader: written, listed by ReadDir,
+// opened by that byte string, read by the reference under it.
+func TestContractNonUTF8NameRoundTrips(t *testing.T) {
+	t.Parallel()
+
+	const raw = "\xff\xfe-name"
+
+	if fs.ValidPath(raw) {
+		t.Fatal("the name is meant to fail fs.ValidPath")
+	}
+
+	nodes := []corpus.Node{{Path: raw, Type: tar.TypeReg, Mode: 0o644, Data: []byte("payload"), Sec: corpus.BuildTime}}
+	im := corpus.Image{Name: "non-utf8", Img: writeImage(t, nodes), Tree: nodes}
+	corpus.Check(t, im, parseImage(t, im), nodes, true)
+
+	fsys := openImage(t, im)
+
+	got, err := fs.ReadFile(fsys, raw)
+	if err != nil || string(got) != "payload" {
+		t.Fatalf("ReadFile(%q) = %q, %v", raw, got, err)
+	}
+
+	ents, err := fs.ReadDir(fsys, ".")
+	if err != nil || len(ents) != 1 || ents[0].Name() != raw {
+		t.Fatalf("ReadDir(\".\") = %v, %v; want the one raw name", ents, err)
+	}
+}
+
+// unsizedReaderAt is a ReaderAt with no Size method: the reader cannot
+// learn the image's length from it and takes the superblock's word.
+type unsizedReaderAt struct{ r *bytes.Reader }
+
+func (u unsizedReaderAt) ReadAt(p []byte, off int64) (int, error) { return u.r.ReadAt(p, off) }
+
+// TestContractReaderServesAShortImageThroughAnUnsizedReader: through a
+// ReaderAt that exposes no Size, the reader takes the superblock's word for
+// the image's length and learns the ReaderAt's end only by reading. An
+// image cut short then reads, or refuses, and never loses: every name the
+// whole image holds is read whole or refused as the ReaderAt's end
+// (io.EOF, io.ErrUnexpectedEOF) or ErrCorrupt, never fs.ErrNotExist; a
+// directory lists what the whole image lists or fails; and a block
+// delivered short is still read short where what is asked lies within it
+// (an inode in the final bytes, as the block loader promises), so an entry
+// whose inode and inline bytes end before the cut is served.
+func TestContractReaderServesAShortImageThroughAnUnsizedReader(t *testing.T) {
+	t.Parallel()
+
+	served, opened := 0, 0
+
+	var mu sync.Mutex
+
+	for _, im := range corpus.Committed(t) {
+		if im.Tree == nil || openImage(t, im) == nil {
+			continue
+		}
+
+		t.Run(im.Name, func(t *testing.T) {
+			t.Parallel()
+
+			var opts []erofs.OpenOpt
+			for _, d := range im.Extra() {
+				opts = append(opts, erofs.WithExtraDevices(bytes.NewReader(d)))
+			}
+
+			full := openImage(t, im)
+			files := map[string][]byte{}
+			dirs := map[string]int{}
+
+			if err := fs.WalkDir(full, ".", func(name string, d fs.DirEntry, err error) error {
+				switch {
+				case err != nil:
+					return err
+				case d.IsDir():
+					ents, derr := fs.ReadDir(full, name)
+					dirs[name] = len(ents)
+
+					return derr
+				case d.Type().IsRegular():
+					files[name], err = fs.ReadFile(full, name)
+
+					return err
+				}
+
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			ref := parseImage(t, im)
+			bs := 1 << ref.Super.BlockBits
+
+			// The entries whose inode, xattrs and inline bytes all lie in
+			// the last block and end before its last byte: a one-byte cut
+			// must still serve them.
+			var within []string
+
+			_ = ref.Walk(func(e erofsspec.Entry) error {
+				in := e.Inode
+				start := int64(ref.Super.MetaBlkAddr)*int64(bs) + int64(in.Nid)*32
+				end := start + 32 + int64(in.XattrSize)
+
+				if in.Extended {
+					end += 32
+				}
+
+				if in.Layout == erofsspec.LayoutFlatInline && in.Size < int64(bs) && !in.IsDir() {
+					end += in.Size
+				}
+
+				if start >= int64(len(im.Img)-bs) && end < int64(len(im.Img))-1 && !in.IsDir() {
+					within = append(within, e.Path)
+				}
+
+				return nil
+			})
+
+			check := func(t *testing.T, fsys fs.FS) {
+				t.Helper()
+
+				refused := func(what string, err error) {
+					t.Helper()
+
+					if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) &&
+						!errors.Is(err, erofs.ErrCorrupt) {
+						t.Errorf("%s: %v, want the ReaderAt's end or ErrCorrupt", what, err)
+					}
+				}
+
+				for name, n := range dirs {
+					ents, err := fs.ReadDir(fsys, name)
+
+					switch {
+					case err != nil:
+						refused("ReadDir "+name, err)
+					case len(ents) != n:
+						t.Errorf("ReadDir %s: %d entries, the whole image lists %d, and no error", name, len(ents), n)
+					}
+				}
+
+				for name, data := range files {
+					got, err := fs.ReadFile(fsys, name)
+
+					switch {
+					case errors.Is(err, fs.ErrNotExist):
+						t.Errorf("ReadFile %s: %v for a name the whole image holds", name, err)
+					case err != nil:
+						refused("ReadFile "+name, err)
+					case !bytes.Equal(got, data):
+						t.Errorf("ReadFile %s: %d bytes differ from the whole image's %d", name, len(got), len(data))
+					}
+				}
+			}
+
+			t.Run("one byte short", func(t *testing.T) {
+				t.Parallel()
+
+				fsys, err := erofs.Open(unsizedReaderAt{bytes.NewReader(im.Img[:len(im.Img)-1])}, opts...)
+				if err != nil {
+					t.Fatalf("Open: %v", err)
+				}
+
+				check(t, fsys)
+
+				for _, name := range within {
+					if _, err := fs.Lstat(fsys, name); err != nil {
+						t.Errorf("Lstat %s, whose inode ends before the cut: %v", name, err)
+					}
+
+					if data, ok := files[name]; ok {
+						if got, err := fs.ReadFile(fsys, name); err != nil || !bytes.Equal(got, data) {
+							t.Errorf("ReadFile %s, whose bytes end before the cut: %d bytes, %v", name, len(got), err)
+						}
+					}
+				}
+
+				mu.Lock()
+				served += len(within)
+				mu.Unlock()
+			})
+
+			t.Run("one block short", func(t *testing.T) {
+				t.Parallel()
+
+				fsys, err := erofs.Open(unsizedReaderAt{bytes.NewReader(im.Img[:len(im.Img)-bs])}, opts...)
+				if err != nil {
+					if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) &&
+						!errors.Is(err, erofs.ErrCorrupt) {
+						t.Fatalf("Open: %v, want the ReaderAt's end or ErrCorrupt", err)
+					}
+
+					return
+				}
+
+				mu.Lock()
+				opened++
+				mu.Unlock()
+
+				check(t, fsys)
+			})
+		})
+	}
+
+	t.Cleanup(func() {
+		if served == 0 {
+			t.Error(
+				"no committed image has an entry inside its last block ending before the last byte: the short block is never served",
+			)
+		}
+
+		// Every committed image lays its inode table last, so a cut of a
+		// whole block takes an inode and Open refuses; the cuts that land
+		// past the inode table are the metadata-first image's, in
+		// TestContractReaderRefusesWhatLiesPastAnUnsizedReadersEnd.
+		if opened == 0 {
+			t.Log(
+				"no committed image opens one block short: the whole-block cut is held by the metadata-first image alone",
+			)
+		}
+	})
+}
+
+// metadataFirst rearranges a writer's image, which lays its inode table
+// last, so the inode table follows the superblock's block and the data and
+// directory blocks follow it: the superblock's meta_blkaddr becomes 1, the
+// blocks between move up by the inode table's length, and every flat
+// inode's start block moves with them. The format allows either order
+// (the kernel addresses the inode table by meta_blkaddr and data by block
+// number), and the caller proves the result against the reference and
+// fsck.erofs. Only images without shared xattrs, chunked inodes or extra
+// devices are rearranged.
+func metadataFirst(tb testing.TB, img []byte) []byte {
+	tb.Helper()
+
+	ref, err := erofsspec.Parse(img)
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	bs := ref.Super.BlockSize
+	meta := int(ref.Super.MetaBlkAddr)
+	blocks := len(img) / bs
+
+	if meta < 1 || meta >= blocks || len(img)%bs != 0 || ref.Super.XattrBlkAddr != 0 {
+		tb.Fatalf("an image of %d blocks with the inode table at %d and shared xattrs at %d is not rearranged",
+			blocks, meta, ref.Super.XattrBlkAddr)
+	}
+
+	shift := blocks - meta
+	out := make([]byte, len(img))
+	copy(out, img[:bs])
+	copy(out[bs:], img[meta*bs:])
+	copy(out[(1+shift)*bs:], img[bs:meta*bs])
+	binary.LittleEndian.PutUint32(out[disk.SuperBlockOffset+40:], 1)
+
+	moved := map[uint64]bool{}
+	move := func(in *erofsspec.Inode) {
+		if moved[in.Nid] || in.Layout > erofsspec.LayoutFlatInline {
+			if in.Layout > erofsspec.LayoutFlatInline {
+				tb.Fatalf("nid %d has layout %d: only flat inodes are rearranged", in.Nid, in.Layout)
+			}
+
+			return
+		}
+
+		moved[in.Nid] = true
+
+		if in.StartBlk < 1 || in.StartBlk >= uint64(meta) {
+			return
+		}
+
+		// i_u, the start block, is the u32 at byte 16 of either inode
+		// form; the inode now lies at block 1 plus 32 bytes per nid.
+		at := bs + int(in.Nid)*32 + 16
+		binary.LittleEndian.PutUint32(out[at:], uint32(in.StartBlk)+uint32(shift))
+	}
+
+	root, err := ref.Inode(ref.Super.RootNid)
+	if err != nil {
+		tb.Fatal(err)
+	}
+
+	move(root)
+
+	if err := ref.Walk(func(e erofsspec.Entry) error {
+		move(e.Inode)
+
+		return nil
+	}); err != nil {
+		tb.Fatal(err)
+	}
+
+	// The superblock checksum the writer stamps: crc32c seeded with
+	// erofsspec.ChecksumSeed, never inverted, from the byte after the
+	// checksum field to the end of the superblock's block.
+	sb := out[disk.SuperBlockOffset:]
+
+	span := bs
+	if span > disk.SuperBlockOffset {
+		span -= disk.SuperBlockOffset
+	}
+
+	crc := ^crc32.Update(^uint32(erofsspec.ChecksumSeed), crc32.MakeTable(crc32.Castagnoli), sb[8:span])
+	binary.LittleEndian.PutUint32(sb[4:], crc)
+
+	return out
+}
+
+// TestContractReaderRefusesWhatLiesPastAnUnsizedReadersEnd: on an image
+// whose data and directory blocks follow the inode table (a layout the
+// format allows and the kernel mounts; neither mkfs.erofs nor the writer
+// produces one, so it is assembled from a writer's image), a cut through an
+// unsized ReaderAt can land past every inode, between an inode and its
+// xattr body, or inside the inode table, and the reader's answers follow
+// the bytes: an entry whose inode, xattr body, inline bytes and blocks all
+// end at or before the cut, found through ancestors that do too, is served
+// whole; one whose own bytes run past the cut is refused as the ReaderAt's
+// end or ErrCorrupt, never shortened (a file is not read short with a nil
+// error, a directory does not list fewer names with a nil error) and never
+// "not found"; one found through an ancestor's blocks that run past the
+// cut is served right or refused, never "not found". The metadata-first
+// image is proven against the reference and fsck.erofs first.
+func TestContractReaderRefusesWhatLiesPastAnUnsizedReadersEnd(t *testing.T) {
+	t.Parallel()
+
+	nodes := []corpus.Node{
+		{
+			Path:   "f",
+			Type:   tar.TypeReg,
+			Mode:   0o644,
+			Data:   bytes.Repeat([]byte("f"), 4196),
+			Xattrs: map[string]string{"user.f": "file"},
+		},
+		{Path: "d", Type: tar.TypeDir, Mode: 0o755},
+	}
+	for i := range 20 {
+		n := corpus.Node{Path: fmt.Sprintf("d/%s%02d", strings.Repeat("n", 200), i), Type: tar.TypeReg, Mode: 0o644}
+		if i%3 == 0 {
+			// Distinct values: a value shared by enough entries could be
+			// written once as a shared xattr, outside the inode table.
+			n.Xattrs = map[string]string{"user.k": strings.Repeat(string(rune('a'+i)), 40+i)}
+		}
+
+		nodes = append(nodes, n)
+	}
+
+	im := corpus.Image{
+		Name: "metadata-first",
+		Img:  metadataFirst(t, writeImage(t, nodes, erofs.WithNoInlineData())),
+		Tree: nodes,
+	}
+	ref := parseImage(t, im)
+
+	if ref.Super.MetaBlkAddr != 1 {
+		t.Fatalf("the inode table is at block %d, want 1", ref.Super.MetaBlkAddr)
+	}
+
+	corpus.CheckTree(t, im, ref, nodes, true)
+
+	if err := corpus.FsckVerdict(t, im); err != nil {
+		t.Fatalf("fsck.erofs on the metadata-first image: %v", err)
+	}
+
+	full := openImage(t, im)
+	if full == nil {
+		t.Fatal("the reader does not open the metadata-first image")
+	}
+
+	bs := int64(ref.Super.BlockSize)
+
+	// An entry's bytes: the inode and its xattr body (Lstat needs them),
+	// then its inline tail and its blocks (ReadFile and ReadDir need them
+	// too). A cut at or past the end serves the operation whole.
+	type span struct{ stat, read int64 }
+
+	spans := map[string]span{}
+	files := map[string][]byte{}
+	dirs := map[string]int{"": 0}
+
+	var cuts []int64
+
+	measure := func(in *erofsspec.Inode) span {
+		loc := bs + int64(in.Nid)*32
+
+		isize := int64(32)
+		if in.Extended {
+			isize = 64
+		}
+
+		stat := loc + isize + int64(in.XattrSize)
+		read := stat
+
+		switch {
+		case in.StartBlk == disk.NullAddr || in.Size == 0:
+		case in.Layout == erofsspec.LayoutFlatInline:
+			read = max(stat+in.Size%bs, int64(in.StartBlk)*bs+in.Size/bs*bs)
+		default:
+			read = int64(in.StartBlk)*bs + in.Size
+		}
+
+		cuts = append(cuts, loc, loc+1, loc+isize, stat, read)
+
+		return span{stat: stat, read: read}
+	}
+
+	root, err := ref.Inode(ref.Super.RootNid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	spans[""] = measure(root)
+
+	if err = ref.Walk(func(e erofsspec.Entry) error {
+		spans[e.Path] = measure(e.Inode)
+
+		switch {
+		case e.Inode.IsDir():
+			dirs[e.Path] = 0
+		case e.Inode.IsRegular():
+			files[e.Path] = nil
+		}
+
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	fsName := func(name string) string {
+		if name == "" {
+			return "."
+		}
+
+		return name
+	}
+
+	for name := range files {
+		if files[name], err = fs.ReadFile(full, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for name := range dirs {
+		ents, derr := fs.ReadDir(full, fsName(name))
+		if derr != nil {
+			t.Fatal(derr)
+		}
+
+		dirs[name] = len(ents)
+	}
+
+	if spans["f"].read <= 2*bs || spans["d"].read <= 2*bs {
+		t.Fatalf("f ends at %d and d at %d: neither lies past the inode table", spans["f"].read, spans["d"].read)
+	}
+
+	// A name is looked up through its ancestors: their inodes and their
+	// directory blocks.
+	found := func(name string) int64 {
+		var end int64
+		for dir := path.Dir(name); dir != "."; dir = path.Dir(dir) {
+			end = max(end, spans[dir].read)
+		}
+
+		return max(end, spans[""].read)
+	}
+
+	for b := int64(1); b < int64(len(im.Img))/bs; b++ {
+		cuts = append(cuts, b*bs, b*bs+1)
+	}
+
+	cuts = append(cuts, int64(len(im.Img))-1)
+	slices.Sort(cuts)
+	cuts = slices.Compact(cuts)
+
+	refused := func(t *testing.T, what string, err error) {
+		t.Helper()
+
+		if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, erofs.ErrCorrupt) {
+			t.Errorf("%s: %v, want the ReaderAt's end or ErrCorrupt", what, err)
+		}
+	}
+
+	// judge applies the law to one operation: own is the first byte past
+	// what the operation itself needs, via what its lookup needs; whole
+	// says whether a nil error came with the whole image's answer.
+	judge := func(t *testing.T, what string, own, via, cut int64, err error, whole bool) {
+		t.Helper()
+
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			t.Errorf("%s: %v for a name the whole image holds", what, err)
+		case own > cut && err == nil:
+			t.Errorf("%s, whose bytes run to %d: no error", what, own)
+		case own > cut:
+			refused(t, what, err)
+		case via > cut && err != nil:
+			refused(t, what, err)
+		case err != nil:
+			t.Errorf("%s, whose bytes end at %d, found through bytes ending at %d: %v", what, own, via, err)
+		case !whole:
+			t.Errorf("%s: a nil error and not the whole image's answer", what)
+		}
+	}
+
+	for _, cut := range cuts {
+		t.Run(fmt.Sprintf("cut at %d", cut), func(t *testing.T) {
+			t.Parallel()
+
+			fsys, err := erofs.Open(unsizedReaderAt{bytes.NewReader(im.Img[:cut])})
+			if err != nil {
+				if spans[""].read <= cut {
+					t.Fatalf("Open with the root before the cut: %v", err)
+				}
+
+				refused(t, "Open", err)
+
+				return
+			}
+
+			for name, sp := range spans {
+				_, err := fs.Lstat(fsys, fsName(name))
+				judge(t, "Lstat "+fsName(name), sp.stat, found(name), cut, err, true)
+			}
+
+			for name, data := range files {
+				got, err := fs.ReadFile(fsys, name)
+				judge(t, "ReadFile "+name, spans[name].read, found(name), cut, err, bytes.Equal(got, data))
+			}
+
+			for name, n := range dirs {
+				ents, err := fs.ReadDir(fsys, fsName(name))
+				judge(t, "ReadDir "+fsName(name), spans[name].read, found(name), cut, err, len(ents) == n)
+			}
+		})
 	}
 }
 

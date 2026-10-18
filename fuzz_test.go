@@ -264,7 +264,7 @@ func pathImages(tb testing.TB) []pathImage {
 func FuzzReaderPaths(f *testing.F) {
 	images := pathImages(f)
 
-	for _, p := range []string{".", "d", "d/sym", "d/symdir/", "many/f000", "l0/l1/l2", strings.Repeat("l0/", 2), strings.Repeat("p", 4097), "../x", "/abs", "d//x", "l0/l1/l2/l3/l4/l5/l6/l7/l8/l9/l10/l11/l12/l13/l14/l15/l16/l17/l18/l19/l20/l21/l22/l23/l24/l25/l26/l27/l28/l29/l30/l31/l32/l33/l34/l35/l36/l37/l38/l39/up/l1", "\x00", "d/f\xff"} {
+	for _, p := range []string{".", "d", "d/sym", "d/symdir/", "many/f000", "l0/l1/l2", strings.Repeat("l0/", 2), strings.Repeat("p", 4097), "../x", "/abs", "d//x", "/", "./d", "d/.", "d/./f", "d/../d/f", "d/f/../f", "d/", "", "l0/l1/l2/l3/l4/l5/l6/l7/l8/l9/l10/l11/l12/l13/l14/l15/l16/l17/l18/l19/l20/l21/l22/l23/l24/l25/l26/l27/l28/l29/l30/l31/l32/l33/l34/l35/l36/l37/l38/l39/up/l1", "\x00", "d/f\xff"} {
 		for i := range images {
 			f.Add(uint8(i), p)
 		}
@@ -313,6 +313,11 @@ func checkInvalidPath(t *testing.T, im pathImage, path string) {
 	for call, err := range map[string]error{"Open": openErr, "Stat": statErr, "ReadFile": readErr, "ReadDir": dirErr} {
 		if !errors.Is(err, fs.ErrInvalid) {
 			t.Fatalf("%s %q (invalid): %s: %v, want ErrInvalid", im.name, path, call, err)
+		}
+
+		// A bad argument is the caller's, never the image's.
+		if errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("%s %q (invalid): %s: %v names the image for a bad path", im.name, path, call, err)
 		}
 	}
 }
