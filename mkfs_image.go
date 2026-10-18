@@ -521,11 +521,21 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				whole := uint64((int64(size) - tail + int64(blockSize) - 1) >> blkBits)
 				switch {
 				case whole == 0:
-				case idata == disk.NullAddr:
-					// The kernel maps the null address as a hole; a tail after
-					// it keeps its place only if the hole is spelled out.
+				case compact && idata == disk.NullAddr:
+					// The kernel maps the null address as a hole on a compact
+					// inode only (an extended inode's start block is 48 bits
+					// wide, so there it is block 0xffffffff, judged below); a
+					// tail after the hole keeps its place only if the hole is
+					// spelled out.
 					fe.chunks = deviceChunks(builder.NullPhysicalBlock, whole, 0)
 				default:
+					// Bounded as Stat bounds the file's blocks (locateRange),
+					// so the copy refuses what Stat refuses rather than
+					// naming blocks past every device.
+					if _, _, err := img.locateRange(int64(idata)<<blkBits, int64(size)-tail); err != nil {
+						return fmt.Errorf("nid %d: %w", cur.nid, err)
+					}
+
 					fe.chunks = img.flatChunks(uint64(idata), whole)
 					fe.contiguous = tail == 0 && len(fe.chunks) == 1
 

@@ -6,12 +6,14 @@ package erofs_test
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io/fs"
 	"testing"
 
 	"github.com/forkcloser/erofs"
 	"github.com/forkcloser/erofs/internal/corpus"
+	"github.com/forkcloser/erofs/internal/disk"
 )
 
 // TestCopyFromChunkOnMappedDevice: a chunk addressed on the primary device
@@ -121,5 +123,52 @@ func TestCopyFromChunkPastExplicitDevice(t *testing.T) {
 				t.Fatalf("CopyFrom(MetadataOnly) of %s: %v; want ErrCorrupt", tc.name, err)
 			}
 		}
+	}
+}
+
+// TestCopyFromFlatPastDevice: a flat file's blocks are bounded by the copy
+// as Stat bounds them, and the null address is a hole on a compact inode
+// only: on an extended inode it is block 0xffffffff, past every device, so
+// Stat refuses the file and the metadata-only copy refuses it in the same
+// class rather than writing a file of zeros. The first input is the
+// fuzzer's: small-b512 with the size of d/sub/e14, an extended flat-inline
+// inode at the null address, raised to 5963777 bytes; the second is a
+// Writer image with a's start block set to the null address.
+func TestCopyFromFlatPastDevice(t *testing.T) {
+	t.Parallel()
+
+	for _, src := range corpus.Committed(t) {
+		if src.Name != "small-b512" {
+			continue
+		}
+
+		edited := bytes.Clone(src.Img)
+		edited[6538] = 0x5b
+
+		refusedByBoth(t, edited, "d/sub/e14")
+	}
+
+	img := buildImage(t, func(w *erofs.Writer) { writeFile(t, w, "/a", bytes.Repeat([]byte("a"), 5000)) })
+	binary.LittleEndian.PutUint32(img[inodeOffset(t, img, "a")+16:], disk.NullAddr)
+
+	refusedByBoth(t, img, "a")
+}
+
+// refusedByBoth: Stat of path is ErrCorrupt on img, and so is a
+// metadata-only copy of img.
+func refusedByBoth(t *testing.T, img []byte, path string) {
+	t.Helper()
+
+	source := openWithDevices(t, img)
+
+	if _, err := fs.Stat(source, path); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Fatalf("test premise broken: Stat of %s: %v", path, err)
+	}
+
+	var buf testBuffer
+
+	w := erofs.Create(&buf)
+	if err := w.CopyFrom(source, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Fatalf("CopyFrom(MetadataOnly) with %s past every device: %v; want ErrCorrupt", path, err)
 	}
 }
