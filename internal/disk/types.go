@@ -51,6 +51,9 @@ const (
 	LayoutChunkFormatBits    = 0x001F
 	LayoutChunkFormatIndexes = 0x0020
 	LayoutChunkFormat48Bit   = 0x0040
+	// LayoutChunkFormatAll is every chunk format bit the kernel defines
+	// (EROFS_CHUNK_FORMAT_ALL); a bit outside it is a format it lacks.
+	LayoutChunkFormatAll = 0x007F
 
 	// An inode's i_format: bit 0 set for an extended inode, the data layout
 	// in bits 1 to 3.
