@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io/fs"
-	"log" //nolint:depguard // examples end on log.Fatal, as the standard library's do
+	"log/slog"
 	"os"
 
 	erofs "github.com/forkcloser/erofs"
@@ -12,18 +12,27 @@ import (
 
 func ExampleOpen() {
 	// Any io.ReaderAt holding an image will do; an *os.File is the usual one.
-	path := buildExampleImage()
+	path, err := buildExampleImage()
+	if err != nil {
+		slog.Error("build the example image", "err", err)
+
+		return
+	}
 
 	f, err := os.Open(path)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("open the image", "err", err)
+
+		return
 	}
 
 	img, err := erofs.Open(f)
 	if err != nil {
 		_ = f.Close()
 
-		log.Fatal(err)
+		slog.Error("read the image", "err", err)
+
+		return
 	}
 
 	err = fs.WalkDir(img, ".", func(path string, _ fs.DirEntry, err error) error {
@@ -39,7 +48,7 @@ func ExampleOpen() {
 	_ = os.Remove(path)
 
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("walk the image", "err", err)
 	}
 	// Output:
 	// .
@@ -50,46 +59,42 @@ func ExampleOpen() {
 
 // buildExampleImage writes a small image to a temporary file and returns
 // its path.
-//
-//revive:disable:deep-exit an example helper fails as an example does, with log.Fatal
-func buildExampleImage() string {
+func buildExampleImage() (string, error) {
 	out, err := os.CreateTemp("", "erofs-example-*.img")
 	if err != nil {
-		log.Fatal(err)
+		return "", err
 	}
 
 	path := out.Name()
 
 	w := erofs.Create(out)
 	if err = w.Mkdir("/usr", 0o755); err != nil {
-		log.Fatal(err)
+		return "", err
 	}
 
 	h, err := w.Create("/etc/hostname")
 	if err != nil {
-		log.Fatal(err)
+		return "", err
 	}
 
 	if _, err := h.Write([]byte("example\n")); err != nil {
-		log.Fatal(err)
+		return "", err
 	}
 
 	if err := h.Close(); err != nil {
-		log.Fatal(err)
+		return "", err
 	}
 
 	if err := w.Close(); err != nil {
-		log.Fatal(err)
+		return "", err
 	}
 
 	if err := out.Close(); err != nil {
-		log.Fatal(err)
+		return "", err
 	}
 
-	return path
+	return path, nil
 }
-
-//revive:enable:deep-exit
 
 func ExampleCreate() {
 	var buf testBuffer
@@ -98,34 +103,48 @@ func ExampleCreate() {
 
 	f, err := w.Create("/hello.txt")
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("create the file", "err", err)
+
+		return
 	}
 
 	if _, err = f.Write([]byte("hello world\n")); err != nil {
-		log.Fatal(err)
+		slog.Error("write the file", "err", err)
+
+		return
 	}
 
 	if err = f.Close(); err != nil {
-		log.Fatal(err)
+		slog.Error("close the file", "err", err)
+
+		return
 	}
 
 	if err = w.Mkdir("/dir", 0o755); err != nil {
-		log.Fatal(err)
+		slog.Error("make the directory", "err", err)
+
+		return
 	}
 
 	if err = w.Close(); err != nil {
-		log.Fatal(err)
+		slog.Error("close the image", "err", err)
+
+		return
 	}
 
 	// Read back
 	img, err := erofs.Open(bytes.NewReader(buf.Bytes()))
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("read the image back", "err", err)
+
+		return
 	}
 
 	data, err := fs.ReadFile(img, "hello.txt")
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("read hello.txt", "err", err)
+
+		return
 	}
 
 	fmt.Print(string(data))
