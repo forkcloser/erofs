@@ -270,6 +270,15 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 		return nil, fmt.Errorf("unsupported incompatible feature 0x%x: %w", unknownFeat, ErrNotImplemented)
 	}
 
+	// The kernel reads the superblock from one page and refuses extension
+	// slots running past it (super.c: "invalid sb_extslots"); the smallest
+	// page is 4 KiB, so a block below that still leaves the page's room.
+	sbSize := disk.SizeSuperBlock + int(i.sb.ExtSlots)*disk.SizeSuperExtSlot
+	if sbSize > max(1<<i.sb.BlkSizeBits, disk.MinPageSize)-disk.SuperBlockOffset {
+		return nil, fmt.Errorf("sb_extslots %d puts the superblock past its page: %w",
+			i.sb.ExtSlots, ErrInvalidSuperblock)
+	}
+
 	// Judged here, against the count, not when the prefix table is first
 	// read: the kernel refuses the image at mount (super.c).
 	if i.sb.FeatureCompat&disk.FeatureCompatIshareXattrs != 0 && i.sb.IshareXattrPrefixID >= i.sb.XattrPrefixCount {
@@ -715,17 +724,6 @@ func (img *image) checkImageRange(off, n int64) error {
 // unexpectedly large files.
 const maxReadFileSize = 128 << 20 // 128 MiB
 
-// mapDev resolves map->m_bdev and map->m_pa mapping for go-erofs.
-// It works similarly to erofs_map_dev in the linux kernel.
-func (img *image) mapDev(deviceID uint16, pa int64) (io.ReaderAt, int64, error) {
-	dev, off, err := img.locate(deviceID, pa)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	return img.deviceReader(dev), off, nil
-}
-
 // locateRange places a flat file's data range, addressed on the primary
 // device, where erofs_map_dev does: inside an extra device's mapped range
 // it is that device's, bounded by the device's block count; otherwise the
@@ -818,6 +816,31 @@ func (img *image) locate(deviceID uint16, pa int64) (uint16, int64, error) {
 }
 
 // blockSize returns the filesystem block size.
+// boundOnDevice refuses a range that runs past its device: the image's
+// extent for device 0, the slot's block count for an extra device; a slot
+// of zero blocks declares nothing to bound by.
+func (img *image) boundOnDevice(dev uint16, off, n int64) error {
+	if dev == 0 {
+		return img.checkImageRange(off, n)
+	}
+
+	if int(dev) > len(img.devices) {
+		return fmt.Errorf("invalid device id %d: %w", dev, ErrCorrupt)
+	}
+
+	blocks := int64(img.devices[dev-1].blocks)
+	if blocks == 0 {
+		return nil
+	}
+
+	if off < 0 || n < 0 || off > math.MaxInt64-n || off+n > blocks<<img.sb.BlkSizeBits {
+		return fmt.Errorf("data range [%d, +%d) runs past the end of device %d's %d blocks: %w",
+			off, n, dev, blocks, ErrCorrupt)
+	}
+
+	return nil
+}
+
 func (img *image) blockSize() uint32 { return 1 << img.sb.BlkSizeBits }
 
 // blocks is the image's own block count, what a device slot naming it holds.
@@ -860,7 +883,7 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 		// Data is contiguous starting at dataBlkAddr. An address outside the
 		// image is left to the block reader, which reports it; so is the
 		// null address, a hole.
-		if ino.inodeData == disk.NullAddr {
+		if ino.nullAddress() {
 			return nil
 		}
 
@@ -971,10 +994,14 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 			return nil
 		}
 
-		reader, mapped, err := img.mapDev(deviceID, dataOffset)
-		if err != nil {
+		// Bounded like the block path: a device shorter than the file's
+		// run would end the direct read as the file's end.
+		dev, mapped, err := img.locate(deviceID, dataOffset)
+		if err != nil || img.boundOnDevice(dev, mapped, ino.size) != nil {
 			return nil
 		}
+
+		reader := img.deviceReader(dev)
 
 		return io.NewSectionReader(reader, mapped, ino.size)
 	default:
@@ -1203,7 +1230,7 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 		// The null address is the whole file as a hole, as the kernel maps
 		// it; the bounds are the same arithmetic over an untrusted size as
 		// the chunk case's, so the same check stands before them.
-		if fi.inodeData == disk.NullAddr {
+		if fi.nullAddress() {
 			if blockOffset < 0 || blockEnd > blockSize || blockOffset >= blockEnd {
 				return nil, fmt.Errorf(
 					"invalid block bounds [%d:%d] for nid %d: %w",
@@ -1353,16 +1380,28 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 			addr += (blockPos - int64(cn<<chunkbits))
 		}
 
-		reader, mappedAddr, err := img.mapDev(deviceID, addr)
+		dev, mappedAddr, err := img.locate(deviceID, addr)
 		if err != nil {
 			return nil, fmt.Errorf("failed to map device for nid %d: %w", fi.nid, err)
 		}
 
 		addr = mappedAddr
 
+		// Bounded before the read: a device's end would otherwise reach the
+		// caller as the file's, an empty read where the index points past
+		// the device.
+		if err := img.boundOnDevice(dev, addr+int64(blockOffset), int64(blockEnd-blockOffset)); err != nil {
+			return nil, fmt.Errorf("nid %d: %w", fi.nid, err)
+		}
+
 		b := img.getBlock()
-		if n, err := reader.ReadAt(b.buf[blockOffset:blockEnd], addr+int64(blockOffset)); err != nil {
+		if n, err := img.deviceReader(dev).ReadAt(b.buf[blockOffset:blockEnd], addr+int64(blockOffset)); err != nil {
 			img.putBlock(b)
+
+			if errors.Is(err, io.EOF) {
+				return nil, fmt.Errorf("the device ends inside a block of nid %d: %w", fi.nid, ErrCorrupt)
+			}
+
 			return nil, fmt.Errorf("failed to read block for nid %d: %w", fi.nid, err)
 		} else if n != (blockEnd - blockOffset) {
 			img.putBlock(b)
@@ -1956,16 +1995,46 @@ func (b *file) readInfo() (ino *inode, err error) {
 			b.nid, inoType, b.ftype, ErrCorrupt)
 	}
 
-	if xcnt > 0 {
-		xsize, err := xattrBodySize(b.nid, xcnt)
-		if err != nil {
-			return nil, err
-		}
+	if err := b.finishInfo(buf, xcnt); err != nil {
+		b.info = nil
 
-		b.info.xsize = xsize
+		return nil, err
 	}
 
 	return b.info, nil
+}
+
+// finishInfo sizes the inode's xattr body and judges a fast symlink's
+// inline target with its inode, as the kernel's erofs_fill_symlink does
+// (!i_size || strlen(link) != i_size), so no Stat, ReadDir or Open serves
+// an inode whose target is empty or holds a NUL. buf is the inode's block
+// from the inode on; a target running past it is refused where it is read.
+func (b *file) finishInfo(buf []byte, xcnt uint16) error {
+	ino := b.info
+
+	if xcnt > 0 {
+		xsize, err := xattrBodySize(b.nid, xcnt)
+		if err != nil {
+			return err
+		}
+
+		ino.xsize = xsize
+	}
+
+	if ino.mode&fs.ModeSymlink == 0 || ino.inodeLayout != disk.LayoutFlatInline || ino.size < 0 {
+		return nil
+	}
+
+	if ino.size == 0 {
+		return fmt.Errorf("inode %d: invalid fast symlink size 0: %w", b.nid, ErrCorrupt)
+	}
+
+	start := int64(ino.icsize) + int64(ino.xsize)
+	if end := start + ino.size; end <= int64(len(buf)) && bytes.IndexByte(buf[start:end], 0) >= 0 {
+		return fmt.Errorf("inode %d: invalid fast symlink target: %w", b.nid, ErrCorrupt)
+	}
+
+	return nil
 }
 
 // decodeInode decodes the compact or extended inode in buf, whose i_format
@@ -2057,7 +2126,11 @@ func checkInodeFormat(nid uint64, format, mode uint16) error {
 		return fmt.Errorf("inode %d: i_format %#x: %w", nid, format, ErrNotImplemented)
 	}
 
-	if layout := (format & disk.InodeFormatLayoutMask) >> 1; layout >= disk.LayoutMax {
+	// The compressed layouts are refused here, not when data is read: an
+	// empty compressed file never reaches the data path, and the doc
+	// promises ErrNotImplemented for the inode.
+	layout := (format & disk.InodeFormatLayoutMask) >> 1
+	if layout >= disk.LayoutMax || layout == disk.LayoutCompressedFull || layout == disk.LayoutCompressedCompact {
 		return fmt.Errorf("inode %d: datalayout %d: %w", nid, layout, ErrNotImplemented)
 	}
 
@@ -2108,13 +2181,22 @@ func (b *file) statInfo() (*fileInfo, error) {
 	// Chunk-based layout requires a ReadAt on the image; defer until needed.
 	if ino.mode.IsRegular() && ino.size > 0 {
 		if ino.inodeLayout == disk.LayoutChunkBased {
-			// Capture a snapshot of the fields buildChunkDataRanges needs.
-			// We must not capture ino by pointer: the caller may reuse it.
+			// The index is read here, at Stat, so that a chunk past its
+			// device is refused where a flat range past the image is; the
+			// ranges are built again on demand, from a snapshot of the
+			// inode, which the caller may reuse.
 			inoCopy := *ino
 			img := b.img
+
+			if _, err := b.buildChunkDataRanges(&inoCopy); err != nil {
+				return nil, err
+			}
+
 			fi.rangesLoader = func() []DataRange {
 				f := &file{img: img}
-				return f.buildChunkDataRanges(&inoCopy)
+				ranges, _ := f.buildChunkDataRanges(&inoCopy) // judged at Stat; a failure since reads as none
+
+				return ranges
 			}
 		} else {
 			ranges, err := b.buildDataRanges(ino, fi.rangeBuf[:0])
@@ -2134,7 +2216,7 @@ func (b *file) statInfo() (*fileInfo, error) {
 // for every file without a whole block, so it is one bit away from every
 // inline file.
 func (b *file) flatPlainRange(ino *inode, dst []DataRange) ([]DataRange, error) {
-	if ino.inodeData == disk.NullAddr {
+	if ino.nullAddress() {
 		return append(dst, DataRange{Offset: holeOffset, Size: ino.size}), nil
 	}
 
@@ -2191,7 +2273,7 @@ func (b *file) buildDataRanges(ino *inode, dst []DataRange) ([]DataRange, error)
 
 		return append(dst, DataRange{Device: 0, Offset: trailingAddr, Size: tailSize}), nil
 	case disk.LayoutChunkBased:
-		return b.buildChunkDataRanges(ino), nil
+		return b.buildChunkDataRanges(ino)
 	}
 
 	return nil, nil
@@ -2216,13 +2298,13 @@ const maxChunkIndexBytes = 64 << 20 // 64 MiB
 // so the invariant sum(Size) == ino.size holds precisely.
 //
 //nolint:gocognit // one pass over the chunk index, coalescing holes and contiguous extents in place
-func (b *file) buildChunkDataRanges(ino *inode) []DataRange {
+func (b *file) buildChunkDataRanges(ino *inode) ([]DataRange, error) {
 	// #nosec G115 -- the chunk format is the low 16 bits of i_u, as the kernel's __le16 c.format reads it
 	chunkFmt := uint16(ino.inodeData)
 	// 48-bit chunk addressing is not yet implemented; the null-chunk sentinel
 	// (blkLo == 0xFFFFFFFF) is only unambiguous in 32-bit address mode.
 	if chunkFmt&disk.LayoutChunkFormat48Bit != 0 {
-		return nil
+		return nil, fmt.Errorf("48-bit chunk format for nid %d: %w", ino.nid, ErrNotImplemented)
 	}
 
 	chunkBits := b.img.sb.BlkSizeBits + uint8(chunkFmt&disk.LayoutChunkFormatBits)
@@ -2251,12 +2333,12 @@ func (b *file) buildChunkDataRanges(ino *inode) []DataRange {
 
 	needed := int64(nchunks) * int64(unit)
 	if !b.img.chunkIndexFits(baseOffset, needed) {
-		return nil
+		return nil, fmt.Errorf("chunk index of nid %d lies past the end of the image: %w", ino.nid, ErrCorrupt)
 	}
 
 	idxBuf := make([]byte, needed)
 	if _, err := b.img.meta.ReadAt(idxBuf, baseOffset); err != nil {
-		return nil
+		return nil, fmt.Errorf("chunk index of nid %d: %w", ino.nid, err)
 	}
 
 	var ranges []DataRange
@@ -2296,14 +2378,18 @@ func (b *file) buildChunkDataRanges(ino *inode) []DataRange {
 		// reach it. Unlike readInfo, nothing here has a recover().
 		byteOffset, err := b.img.chunkAddr(phys)
 		if err != nil {
-			return nil
+			return nil, err
 		}
 
 		// The same translation the readers apply: an address on the primary
 		// device inside an extra device's mapped range is that device's.
 		deviceID, byteOffset, err = b.img.locate(deviceID, byteOffset)
 		if err != nil {
-			return nil
+			return nil, err
+		}
+
+		if err := b.img.boundOnDevice(deviceID, byteOffset, size); err != nil {
+			return nil, fmt.Errorf("nid %d: %w", ino.nid, err)
 		}
 
 		// Merge with the previous entry if it is a data range that is
@@ -2319,7 +2405,7 @@ func (b *file) buildChunkDataRanges(ino *inode) []DataRange {
 		ranges = append(ranges, DataRange{Device: deviceID, Offset: byteOffset, Size: size})
 	}
 
-	return ranges
+	return ranges, nil
 }
 
 type direntry struct {
@@ -2373,9 +2459,13 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 		}
 
 		buf := b.bytes()
+		// A block shorter than one dirent holds no first name offset to
+		// read: the kernel's readdir ends in "bogus dirent" on it whatever
+		// the bytes beyond i_size say, and the lookup refuses it already.
 		if len(buf) < disk.SizeDirent {
 			d.img.putBlock(b)
-			break
+
+			return ents, fmt.Errorf("directory block of %d bytes for nid %d: %w", len(buf), fi.nid, ErrCorrupt)
 		}
 
 		var dirents [2]disk.Dirent
@@ -2385,12 +2475,14 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 		entryN := dirents[0].NameOff / disk.SizeDirent
 		bufLen := len(buf)
 
-		// Validate that NameOff is within bounds and dirent entries fit.
-		if int(dirents[0].NameOff) > bufLen || entryN == 0 {
+		// The first name offset counts the block's entries, so it is a
+		// whole number of dirents inside the block, as readdir checks it
+		// (dir.c, "invalid de[0].nameoff") and as lookupBlock already did.
+		if int(dirents[0].NameOff) >= bufLen || entryN == 0 || dirents[0].NameOff%disk.SizeDirent != 0 {
 			d.img.putBlock(b)
 
 			return ents, fmt.Errorf(
-				"invalid dirent name offset %d (buf size %d): %w",
+				"invalid de[0].nameoff %d (buf size %d): %w",
 				dirents[0].NameOff,
 				bufLen,
 				ErrCorrupt,
@@ -2757,6 +2849,15 @@ type inode struct {
 func (ino *inode) flatDataOffset() int64 {
 	// inode core size + xattr size
 	return int64(ino.icsize) + int64(ino.xsize)
+}
+
+// nullAddress is a flat-plain inode with no data: i_u the null address on a
+// compact inode, where the kernel's start block is 32 bits wide. An extended
+// inode's is 48 bits (startblk_lo with i_nb above it, inode.c), so the same
+// low word there is block 0xffffffff, past any device this reader opens,
+// and is refused where every address past the device is.
+func (ino *inode) nullAddress() bool {
+	return ino.icsize == disk.SizeInodeCompact && ino.inodeData == disk.NullAddr
 }
 
 // fileInfo implements [fs.FileInfo] and provides extended metadata

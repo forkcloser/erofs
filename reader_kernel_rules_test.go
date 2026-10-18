@@ -12,16 +12,18 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/erofs/internal/corpus"
 	"github.com/forkcloser/erofs/internal/disk"
 )
 
 // The reader follows the kernel's rules where an image departs from what
 // mkfs.erofs writes: the superblock checksum is verified before the feature
 // bits are read, an i_format bit the kernel does not define is a format this
-// reader lacks, a flat-plain file at the null address reads as zeros, and a
+// reader lacks, a compact flat-plain file at the null address reads as zeros, and a
 // FIFO or a socket has no device number whatever its i_u slot holds.
 
 // buildImage writes a small tree and returns the image's bytes.
@@ -391,12 +393,12 @@ func TestReaderFlatPlainNullAddress(t *testing.T) {
 		}
 	})
 
-	// The file is inline; make it flat-plain at the null address, the
-	// shape one bit away from what mkfs.erofs writes for every such file.
+	// The file is inline; make it a compact flat-plain inode at the null
+	// address, the kernel's hole (an extended inode's start block is 48
+	// bits wide, and the same word there is an address past the device:
+	// TestReaderExtendedNullAddress).
 	at := inodeOffset(t, img, "a")
-	format := binary.LittleEndian.Uint16(img[at:])
-	binary.LittleEndian.PutUint16(img[at:], format&^disk.InodeFormatLayoutMask|disk.LayoutFlatPlain<<1)
-	binary.LittleEndian.PutUint32(img[at+16:], disk.NullAddr)
+	compactHole(img, at, uint32(len(content)))
 
 	fsys, err := erofs.Open(bytes.NewReader(img))
 	if err != nil {
@@ -418,10 +420,11 @@ func TestReaderFlatPlainNullAddress(t *testing.T) {
 		t.Fatalf("a null-address file's ranges: %+v; want one hole of %d", ranges, len(content))
 	}
 
-	// The same shape on a symlink is a target of zeros, which the kernel
-	// reads as the empty string: refused, as an empty target is.
+	// A flat-plain symlink at the null address is refused: on this
+	// extended inode the address lies past the device, and on a compact
+	// one the target would be zeros, the empty string to the kernel.
 	at = inodeOffset(t, img, "l")
-	format = binary.LittleEndian.Uint16(img[at:])
+	format := binary.LittleEndian.Uint16(img[at:])
 	binary.LittleEndian.PutUint16(img[at:], format&^disk.InodeFormatLayoutMask|disk.LayoutFlatPlain<<1)
 	binary.LittleEndian.PutUint32(img[at+16:], disk.NullAddr)
 
@@ -724,17 +727,22 @@ func TestReaderFlatDataOnMappedDevice(t *testing.T) {
 	}
 }
 
-// TestReaderUndefinedDatalayout: an i_format naming a data layout the kernel
-// does not define (5 to 7) is ErrNotImplemented when the inode is read, as
-// the kernel refuses the inode (inode.c, "unsupported datalayout"), not a
-// file served until its data is asked for.
-func TestReaderUndefinedDatalayout(t *testing.T) {
+// TestReaderUnsupportedDatalayout: an i_format naming a data layout the
+// kernel does not define (5 to 7) or one this reader does not implement
+// (the compressed ones, 1 and 3) is ErrNotImplemented when the inode is
+// read, as the kernel refuses the undefined ones (inode.c, "unsupported
+// datalayout") and as the package's doc promises for compressed inodes,
+// not a file served until its data is asked for: an empty compressed file
+// has no data to ask for.
+func TestReaderUnsupportedDatalayout(t *testing.T) {
 	t.Parallel()
 
 	img := buildImage(t, func(w *erofs.Writer) { writeFile(t, w, "/a", []byte("a")) })
 	at := inodeOffset(t, img, "a")
 
-	for layout := uint16(disk.LayoutMax); layout <= 7; layout++ {
+	for _, layout := range []uint16{
+		disk.LayoutCompressedFull, disk.LayoutCompressedCompact, disk.LayoutMax, disk.LayoutMax + 1, disk.LayoutMax + 2,
+	} {
 		bad := bytes.Clone(img)
 		format := binary.LittleEndian.Uint16(bad[at:])
 		binary.LittleEndian.PutUint16(bad[at:], format&^disk.InodeFormatLayoutMask|layout<<1)
@@ -751,6 +759,408 @@ func TestReaderUndefinedDatalayout(t *testing.T) {
 
 		if _, err := fs.ReadFile(fsys, "a"); !errors.Is(err, erofs.ErrNotImplemented) {
 			t.Fatalf("layout %d: ReadFile: %v; want ErrNotImplemented", layout, err)
+		}
+	}
+
+	// The fuzzer's find: b512 with one inode's i_format set to 0x17, an
+	// empty compressed-compact inode, served by Stat before.
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "b512" {
+			continue
+		}
+
+		edited := bytes.Clone(im.Img)
+		edited[4544] = 0x17
+
+		fsys, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		refused := 0
+
+		err = fs.WalkDir(fsys, ".", func(name string, _ fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+
+			switch _, err := fs.Lstat(fsys, name); {
+			case errors.Is(err, erofs.ErrNotImplemented):
+				refused++
+			case err != nil:
+				return err
+			}
+
+			return nil
+		})
+		if err != nil || refused != 1 {
+			t.Fatalf(
+				"b512 with a compressed inode: walk %v, %d refused; want one ErrNotImplemented and nothing else",
+				err,
+				refused,
+			)
+		}
+	}
+}
+
+// TestReaderExtendedNullAddress: the null address names a hole on a compact
+// inode only; on an extended inode the start block is 48 bits wide
+// (startblk_lo under i_nb, inode.c's addrmask), so 0xffffffff there is
+// block 0xffffffff, past the device, refused at Stat as every address past
+// the device is. The first input is the fuzzer's: small-b512's d/sub/e16,
+// an all-inline file whose i_u holds the null address, with its layout
+// turned to flat-plain.
+func TestReaderExtendedNullAddress(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "small-b512" {
+			continue
+		}
+
+		edited := bytes.Clone(im.Img)
+		edited[6720] = 0x01
+
+		fsys, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := fs.Stat(fsys, "d/sub/e16"); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("small-b512 d/sub/e16 as flat-plain at the null address: Stat %v; want ErrCorrupt", err)
+		}
+	}
+
+	img := buildImage(t, func(w *erofs.Writer) { writeFile(t, w, "/a", []byte("a")) })
+	at := inodeOffset(t, img, "a")
+
+	edited := bytes.Clone(img)
+	format := binary.LittleEndian.Uint16(edited[at:])
+	binary.LittleEndian.PutUint16(edited[at:], format&^disk.InodeFormatLayoutMask|disk.LayoutFlatPlain<<1)
+	binary.LittleEndian.PutUint32(edited[at+16:], disk.NullAddr)
+	stampChecksum(edited)
+
+	fsys, err := erofs.Open(bytes.NewReader(edited))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fs.Stat(fsys, "a"); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Fatalf("an extended flat-plain inode at the null address: Stat %v; want ErrCorrupt", err)
+	}
+
+	if _, err := fs.ReadFile(fsys, "a"); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Fatalf("an extended flat-plain inode at the null address: ReadFile %v; want ErrCorrupt", err)
+	}
+}
+
+// TestReaderChunkPastDevice: a chunk index whose range runs past its
+// device's declared blocks is ErrCorrupt at Stat, the counterpart of the
+// bound a flat range meets, and a read of the file is ErrCorrupt rather
+// than a clean end at offset zero, which a consumer would take for an empty
+// file. The input is the fuzzer's: small-blobdev-512 with d/sub/e08's one
+// chunk index moved to a block far past the blob's 47.
+func TestReaderChunkPastDevice(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "small-blobdev-512" {
+			continue
+		}
+
+		edited := bytes.Clone(im.Img)
+		edited[3110] = 0x5a
+
+		fsys, err := erofs.Open(bytes.NewReader(edited), erofs.WithExtraDevices(bytes.NewReader(im.Blob)))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := fs.Stat(fsys, "d/sub/e08"); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("Stat of a chunk past its device: %v; want ErrCorrupt", err)
+		}
+
+		link, oerr := fsys.Open("d/sub/e08")
+		if oerr != nil {
+			t.Fatalf("Open: %v", oerr)
+		}
+
+		var buf [1]byte
+
+		if n, err := link.Read(buf[:]); !errors.Is(err, erofs.ErrCorrupt) || n != 0 {
+			t.Fatalf("Read of a chunk past its device: %d, %v; want 0 and ErrCorrupt", n, err)
+		}
+
+		if _, err := fs.ReadFile(fsys, "d/sub/e08"); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("ReadFile of a chunk past its device: %v; want ErrCorrupt", err)
+		}
+	}
+}
+
+// TestReaderFastSymlinkTarget: a fast symlink whose inline target holds a
+// NUL, or is empty, is refused with its inode, as the kernel's
+// erofs_fill_symlink refuses it ("invalid fast symlink size"), so Lstat is
+// ErrCorrupt and a metadata-only copy of the image refuses too, not
+// ReadLink alone. The
+// first input is the fuzzer's: small-chunk-512 with the one byte of d/s's
+// target set to zero.
+func TestReaderFastSymlinkTarget(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "small-chunk-512" {
+			continue
+		}
+
+		edited := bytes.Clone(im.Img)
+		edited[1824] = 0x00
+
+		fsys, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := fs.Lstat(fsys, "d/s"); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("Lstat of a fast symlink with a NUL in its target: %v; want ErrCorrupt", err)
+		}
+
+		var buf testBuffer
+
+		w := erofs.Create(&buf)
+		if err := w.CopyFrom(fsys, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("CopyFrom(MetadataOnly) of an image with such a symlink: %v; want ErrCorrupt", err)
+		}
+	}
+
+	img := buildImage(t, func(w *erofs.Writer) {
+		if err := w.Symlink("ab", "/l"); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	// The Writer packs the target beside its extended inode, which carries
+	// no xattrs here.
+	at := inodeOffset(t, img, "l") + disk.SizeInodeExtended
+	if string(img[at:at+2]) != "ab" {
+		t.Fatalf("test premise broken: the target beside the inode reads %q", img[at:at+2])
+	}
+
+	img[at+1] = 0
+
+	fsys, err := erofs.Open(bytes.NewReader(img))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, lerr := fs.Lstat(fsys, "l"); !errors.Is(lerr, erofs.ErrCorrupt) {
+		t.Fatalf("Lstat of a Writer symlink given a NUL: %v; want ErrCorrupt", lerr)
+	}
+
+	// The other half of the kernel's rule: a fast symlink of size zero.
+	// i_size is the eight bytes at offset 8 of the extended inode.
+	empty := buildImage(t, func(w *erofs.Writer) {
+		if serr := w.Symlink("ab", "/l"); serr != nil {
+			t.Fatal(serr)
+		}
+	})
+	at = inodeOffset(t, empty, "l")
+	binary.LittleEndian.PutUint64(empty[at+8:], 0)
+
+	fsys, err = erofs.Open(bytes.NewReader(empty))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, lerr := fs.Lstat(fsys, "l"); !errors.Is(lerr, erofs.ErrCorrupt) {
+		t.Fatalf("Lstat of a fast symlink of size zero: %v; want ErrCorrupt", lerr)
+	}
+}
+
+// TestReaderDirentNameOffset: a directory block whose first name offset is
+// not a whole number of dirents is refused by ReadDir as the kernel's readdir
+// refuses it ("invalid de[0].nameoff"), before any entry is served; the
+// reader took the quotient as the entry count and served a listing cut
+// short. The first input is the fuzzer's: b512 with the first name offset
+// of a block of "many" set to 123, which read as ten entries of three
+// hundred.
+func TestReaderDirentNameOffset(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "b512" {
+			continue
+		}
+
+		edited := bytes.Clone(im.Img)
+		edited[27144] = 0x7b
+
+		fsys, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		ents, err := fs.ReadDir(fsys, "many")
+		if !errors.Is(err, erofs.ErrCorrupt) || !strings.Contains(err.Error(), "invalid de[0].nameoff") ||
+			len(ents) != 0 {
+			t.Fatalf(
+				"b512 many with de[0].nameoff 123: %d entries, %v; want none and the kernel's refusal",
+				len(ents),
+				err,
+			)
+		}
+	}
+
+	img := buildImage(t, func(w *erofs.Writer) {
+		if err := w.Mkdir("/d", 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		writeFile(t, w, "/d/x", []byte("x"))
+		writeFile(t, w, "/d/y", []byte("y"))
+	})
+
+	// The Writer packs a small directory's dirents beside its extended
+	// inode, which carries no xattrs here: the first dirent's name offset
+	// is the first two bytes after its nid, nid and type.
+	at := inodeOffset(t, img, "d") + disk.SizeInodeExtended + 8
+
+	nameOff := binary.LittleEndian.Uint16(img[at:])
+	if nameOff != 4*disk.SizeDirent {
+		t.Fatalf("test premise broken: de[0].nameoff is %d, want %d for four entries", nameOff, 4*disk.SizeDirent)
+	}
+
+	// An odd offset is refused as the kernel's rule, not by what the names
+	// at the odd offset happen to hold.
+	for _, bad := range []uint16{nameOff + 1, nameOff - 5} {
+		edited := bytes.Clone(img)
+		binary.LittleEndian.PutUint16(edited[at:], bad)
+		stampChecksum(edited)
+
+		fsys, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatalf("nameoff %d: Open: %v", bad, err)
+		}
+
+		if _, err := fs.ReadDir(
+			fsys,
+			"d",
+		); !errors.Is(err, erofs.ErrCorrupt) ||
+			!strings.Contains(err.Error(), "invalid de[0].nameoff") {
+			t.Fatalf("nameoff %d: ReadDir: %v; want the kernel's refusal", bad, err)
+		}
+	}
+}
+
+// TestReaderShortDirectoryBlock: a directory whose size leaves a last block
+// shorter than one dirent is refused by ReadDir as ErrCorrupt, as the
+// kernel's readdir refuses it ("bogus dirent" or "invalid de[0].nameoff",
+// whatever lies past i_size in the block), where the reader served the
+// directory without that block's entries. The first input is the fuzzer's:
+// small-b512 with the size of inode 151 set to 6.
+func TestReaderShortDirectoryBlock(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "small-b512" {
+			continue
+		}
+
+		edited := bytes.Clone(im.Img)
+		edited[4840], edited[4841] = 0x06, 0x00
+
+		fsys, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		refused := 0
+
+		err = fs.WalkDir(fsys, ".", func(_ string, _ fs.DirEntry, err error) error {
+			if errors.Is(err, erofs.ErrCorrupt) {
+				refused++
+
+				return fs.SkipDir
+			}
+
+			return err
+		})
+		if err != nil || refused != 1 {
+			t.Fatalf(
+				"small-b512 with a six-byte directory: walk %v, %d refused; want one ErrCorrupt and nothing else",
+				err,
+				refused,
+			)
+		}
+	}
+
+	img := buildImage(t, func(w *erofs.Writer) {
+		if err := w.Mkdir("/d", 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		writeFile(t, w, "/d/x", []byte("x"))
+	})
+
+	// i_size is the eight bytes at offset 8 of the extended inode: a
+	// directory of six bytes has one block of six.
+	at := inodeOffset(t, img, "d")
+	binary.LittleEndian.PutUint64(img[at+8:], 6)
+
+	fsys, err := erofs.Open(bytes.NewReader(img))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fs.ReadDir(fsys, "d"); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Fatalf("ReadDir of a six-byte directory: %v; want ErrCorrupt", err)
+	}
+}
+
+// TestReaderSuperblockExtSlots: the kernel reads the superblock from one
+// page and refuses extension slots running past it (super.c: "invalid
+// sb_extslots"), so Open refuses them as a corrupt superblock. The room is
+// the larger of the block and a 4 KiB page, less the superblock offset: 184
+// slots fit a 512-byte or 4 KiB block and 185 do not, while a 64 KiB block
+// holds every count the byte can name. The fuzzer's input, small-blobdev-512
+// with 204 slots, is committed beside the harness.
+func TestReaderSuperblockExtSlots(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		blockSize int
+		fits      byte
+		refused   byte
+	}{
+		{blockSize: 512, fits: 184, refused: 185},
+		{blockSize: 4096, fits: 184, refused: 185},
+		{blockSize: 65536, fits: 255},
+	} {
+		var buf testBuffer
+
+		w := erofs.Create(&buf, erofs.WithBlockSize(tc.blockSize))
+		writeFile(t, w, "/a", []byte("a"))
+
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		img := buf.Bytes()
+		img[disk.SuperBlockOffset+13] = tc.fits
+		stampChecksum(img)
+
+		if _, err := erofs.Open(bytes.NewReader(img)); err != nil {
+			t.Fatalf("block %d with %d extension slots: %v", tc.blockSize, tc.fits, err)
+		}
+
+		if tc.refused == 0 {
+			continue
+		}
+
+		img[disk.SuperBlockOffset+13] = tc.refused
+		stampChecksum(img)
+
+		if _, err := erofs.Open(bytes.NewReader(img)); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("block %d with %d extension slots: %v; want ErrCorrupt", tc.blockSize, tc.refused, err)
 		}
 	}
 }
