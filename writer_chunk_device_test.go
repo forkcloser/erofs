@@ -75,3 +75,51 @@ func TestCopyFromChunkOnMappedDevice(t *testing.T) {
 		}
 	}
 }
+
+// TestCopyFromChunkPastExplicitDevice: a chunk whose bytes run past its
+// device is refused by the reader at Stat, as the kernel refuses the read,
+// and the metadata-only copy refuses it in the same class rather than
+// writing a chunk nothing can read: a chunk naming its device outright at a
+// block past the device, or one whose start fits and whose logical bytes do
+// not, named outright or through the primary device's mapped range. The
+// inputs are the fuzzer's: small-blobdev-512 with d/sub/e07's one-byte
+// chunk moved to block 100 of its 47-block blob, and with the third of
+// multi's three 1024-byte chunks, 952 bytes long, moved to the blob's last
+// two blocks.
+func TestCopyFromChunkPastExplicitDevice(t *testing.T) {
+	t.Parallel()
+
+	for _, src := range corpus.Committed(t) {
+		if src.Name != "small-blobdev-512" {
+			continue
+		}
+
+		for _, tc := range []struct {
+			name  string
+			path  string
+			edits map[int]byte
+		}{
+			{"a chunk at block 100 of a 47-block device", "d/sub/e07", map[int]byte{3012: 0x64}},
+			{"a chunk of 952 bytes starting at the device's block 46", "multi", map[int]byte{1620: 46}},
+			{"the same through the mapped range, block 59 on device 0", "multi", map[int]byte{1618: 0x5a, 1620: 59}},
+		} {
+			edited := bytes.Clone(src.Img)
+			for at, b := range tc.edits {
+				edited[at] = b
+			}
+
+			source := openWithDevices(t, edited, src.Blob)
+
+			if _, err := fs.Stat(source, tc.path); !errors.Is(err, erofs.ErrCorrupt) {
+				t.Fatalf("test premise broken: Stat of %s: %v", tc.name, err)
+			}
+
+			var buf testBuffer
+
+			w := erofs.Create(&buf)
+			if err := w.CopyFrom(source, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrCorrupt) {
+				t.Fatalf("CopyFrom(MetadataOnly) of %s: %v; want ErrCorrupt", tc.name, err)
+			}
+		}
+	}
+}
