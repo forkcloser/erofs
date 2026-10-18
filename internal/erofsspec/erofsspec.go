@@ -193,6 +193,18 @@ func Parse(img []byte, extra ...[][]byte) (*Image, error) {
 		return nil, err
 	}
 
+	// "extra devices don't match (ondisk %u, given %u)": a mount given
+	// devices needs the superblock's count to be theirs (erofs_scan_devices,
+	// -EINVAL); given none, the table is taken as the image's own layout.
+	ondisk := 0
+	if im.Super.FeatureIncompat&FeatureIncompatDeviceTable != 0 {
+		ondisk = int(im.Super.ExtraDevices)
+	}
+
+	if len(im.extra) > 0 && ondisk != len(im.extra) {
+		return nil, fmt.Errorf("%w: extra devices don't match (ondisk %d, given %d)", ErrCorrupt, ondisk, len(im.extra))
+	}
+
 	if err := im.parsePrefixes(); err != nil {
 		return nil, err
 	}
