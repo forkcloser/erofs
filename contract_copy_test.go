@@ -761,6 +761,87 @@ func TestContractMetadataOnlyCopyAfterTheCopysOwnDevice(t *testing.T) {
 	}
 }
 
+// TestContractGenericSourceTimesAndOwnership: "a source with neither still
+// contributes mode, size and ModTime": a generic source's entries keep
+// their ModTime, a symlink's included; an entry with no ModTime is at the
+// epoch, not the build time; a Sys() *builder.Entry contributes ownership
+// and, when its Mtime is set, the time over the FileInfo's; Lstat on the
+// image answers each, and the reference reads the same.
+func TestContractGenericSourceTimesAndOwnership(t *testing.T) {
+	t.Parallel()
+
+	when := time.Date(2024, time.March, 4, 5, 6, 7, 890, time.UTC)
+
+	src := fstest.MapFS{
+		"dir":   &fstest.MapFile{Mode: fs.ModeDir | 0o755, ModTime: when},
+		"dir/f": &fstest.MapFile{Data: []byte("x"), Mode: 0o644, ModTime: when.Add(time.Hour)},
+		"link": &fstest.MapFile{
+			Data:    []byte("dir/f"),
+			Mode:    fs.ModeSymlink | 0o777,
+			ModTime: when.Add(2 * time.Hour),
+		},
+		"untimed": &fstest.MapFile{Data: []byte("y"), Mode: 0o644},
+		"withsys": &fstest.MapFile{
+			Data:    []byte("z"),
+			Mode:    0o644,
+			ModTime: when,
+			Sys:     &builder.Entry{UID: 7, GID: 8},
+		},
+		"stampedsys": &fstest.MapFile{
+			Data:    []byte("w"),
+			Mode:    0o644,
+			ModTime: when,
+			Sys:     &builder.Entry{Mtime: 1234, MtimeNs: 5},
+		},
+	}
+
+	out := &testBuffer{}
+	w := erofs.Create(out, erofs.WithBuildTime(99, 0))
+
+	if err := errors.Join(w.CopyFrom(src), w.Close()); err != nil {
+		t.Fatal(err)
+	}
+
+	im := corpus.Image{Name: "generic-times", Img: out.Bytes()}
+	fsys, ref := openImage(t, im), parseImage(t, im)
+
+	for name, want := range map[string]time.Time{
+		"dir":        when,
+		"dir/f":      when.Add(time.Hour),
+		"link":       when.Add(2 * time.Hour),
+		"untimed":    time.Unix(0, 0),
+		"withsys":    when,
+		"stampedsys": time.Unix(1234, 5),
+	} {
+		fi, err := fs.Lstat(fsys, name)
+		if err != nil {
+			t.Fatalf("Lstat %s: %v", name, err)
+		}
+
+		if got := fi.ModTime(); !got.Equal(want) {
+			t.Errorf("%s: mtime %v, want %v", name, got, want)
+		}
+
+		in, err := lookupNoFollow(ref, name)
+		if err != nil {
+			t.Fatalf("reference %s: %v", name, err)
+		}
+
+		if in.Mtime != want.Unix() || int64(in.MtimeNs) != int64(want.Nanosecond()) {
+			t.Errorf("%s: the reference reads %d.%09d, want %v", name, in.Mtime, in.MtimeNs, want)
+		}
+	}
+
+	st, err := fs.Lstat(fsys, "withsys")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if sys, ok := st.Sys().(*erofs.Stat); !ok || sys.UID != 7 || sys.GID != 8 {
+		t.Errorf("withsys: %+v, want uid 7 gid 8 from the source's Sys()", st.Sys())
+	}
+}
+
 // TestContractMergeWhiteoutOfHardlinkedName: a whiteout on one name of a
 // hard-linked pair leaves the other with the inode, "as unlink(2) does".
 func TestContractMergeWhiteoutOfHardlinkedName(t *testing.T) {
