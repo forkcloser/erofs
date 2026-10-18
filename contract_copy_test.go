@@ -704,9 +704,9 @@ func TestContractMetadataOnlyCopyAfterTheCopysOwnDevice(t *testing.T) {
 
 			src := committed(t, name)
 
-			df, err := os.CreateTemp(t.TempDir(), "data")
-			if err != nil {
-				t.Fatal(err)
+			df, derr := os.CreateTemp(t.TempDir(), "data")
+			if derr != nil {
+				t.Fatal(derr)
 			}
 
 			defer func() { _ = df.Close() }()
