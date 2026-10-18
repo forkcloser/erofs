@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/forkcloser/erofs"
 	"github.com/forkcloser/erofs/internal/corpus"
@@ -1161,6 +1162,187 @@ func TestReaderSuperblockExtSlots(t *testing.T) {
 
 		if _, err := erofs.Open(bytes.NewReader(img)); !errors.Is(err, erofs.ErrCorrupt) {
 			t.Fatalf("block %d with %d extension slots: %v; want ErrCorrupt", tc.blockSize, tc.refused, err)
+		}
+	}
+}
+
+// TestReaderXattrPrefixTable: the kernel reads the long xattr prefix table
+// at mount (xattr.c: erofs_xattr_prefixes_init) and refuses the image when
+// an item lies past the end or is not a prefix, a base index and an infix of
+// at most 255 bytes; Open refuses the same, where the reader served the
+// image until an xattr named a prefix. The fuzzer's input, small-blobdev-512
+// with 204 prefixes at offset 0 of a 6656-byte image, is committed beside
+// the harness. Here a Writer image gains one item at its end.
+func TestReaderXattrPrefixTable(t *testing.T) {
+	t.Parallel()
+
+	base := buildImage(t, func(w *erofs.Writer) { writeFile(t, w, "/a", []byte("a")) })
+
+	// withTable appends item (a 16-bit length then its bytes) to the image
+	// and points a table of count entries at it.
+	withTable := func(count byte, item []byte) []byte {
+		img := bytes.Clone(base)
+		at := len(img)
+		img = append(img, item...)
+		img = append(img, make([]byte, (4-len(item)%4)%4)...)
+		img[disk.SuperBlockOffset+91] = count
+		binary.LittleEndian.PutUint32(img[disk.SuperBlockOffset+92:], uint32(at/4))
+		stampChecksum(img)
+
+		return img
+	}
+
+	prefix := append([]byte{5, 0, 1}, "foo."...)
+
+	if _, err := erofs.Open(bytes.NewReader(withTable(1, prefix))); err != nil {
+		t.Fatalf("one prefix of five bytes at the image's end: %v", err)
+	}
+
+	// 256 bytes, the base index and a 255-byte infix, is the longest item.
+	longest := append([]byte{0, 1, 1}, bytes.Repeat([]byte("x"), 255)...)
+	if _, err := erofs.Open(bytes.NewReader(withTable(1, longest))); err != nil {
+		t.Fatalf("one prefix of 256 bytes: %v", err)
+	}
+
+	long := append([]byte{1, 1, 1}, bytes.Repeat([]byte("x"), 256)...) // 257 bytes: one over the bound
+
+	past := withTable(1, prefix)
+	binary.LittleEndian.PutUint32(past[disk.SuperBlockOffset+92:], uint32(len(past)/4))
+	stampChecksum(past)
+
+	for name, img := range map[string][]byte{
+		"a second item past the end": withTable(2, prefix),
+		"a zero length, 65536 bytes": withTable(1, []byte{0, 0, 1}),
+		"an item one byte over":      withTable(1, long),
+		"an item cut by the image":   withTable(1, prefix)[:len(base)+4],
+		"a start past the image":     past,
+	} {
+		if _, err := erofs.Open(bytes.NewReader(img)); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("%s: %v; want ErrCorrupt", name, err)
+		}
+	}
+}
+
+// TestReaderXattrPrefixTablePacked: the table lies in the packed inode's
+// data when the Fragments feature names one and PLAIN_XATTR_PFX is clear
+// (xattr.c: erofs_xattr_prefixes_init), else in the image. The Writer emits
+// neither, so a Writer image is given the feature and /a as its packed
+// inode: with /a's content a table, Open serves it from there; with /a's
+// content one byte, Open reads that byte as the table and refuses, unless
+// PLAIN_XATTR_PFX points it back at a table appended to the image.
+func TestReaderXattrPrefixTablePacked(t *testing.T) {
+	t.Parallel()
+
+	table := append([]byte{5, 0, 1}, "foo.\x00"...) // one item, padded to four
+
+	// packed builds an image of /a holding content, the Fragments feature
+	// set, /a as the packed inode and a table of one prefix at offset 0.
+	packed := func(content []byte) []byte {
+		img := buildImage(t, func(w *erofs.Writer) { writeFile(t, w, "/a", content) })
+		sb := img[disk.SuperBlockOffset:]
+		meta := int(binary.LittleEndian.Uint32(sb[40:])) << sb[12]
+		nid := (inodeOffset(t, img, "a") - meta) / disk.SizeInodeCompact
+
+		binary.LittleEndian.PutUint32(sb[80:], binary.LittleEndian.Uint32(sb[80:])|disk.FeatureIncompatFragments)
+		binary.LittleEndian.PutUint64(sb[96:], uint64(nid))
+		sb[91] = 1
+
+		stampChecksum(img)
+
+		return img
+	}
+
+	if _, err := erofs.Open(bytes.NewReader(packed(table))); err != nil {
+		t.Fatalf("a table in the packed inode's data: %v", err)
+	}
+
+	if _, err := erofs.Open(bytes.NewReader(packed([]byte("a")))); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Fatalf("a packed inode of one byte as the table: %v; want ErrCorrupt", err)
+	}
+
+	// The same image with the table appended and the start pointing at it:
+	// read from the packed inode the start lies past its one byte; under
+	// PLAIN_XATTR_PFX it is read from the image and served.
+	appended := packed([]byte("a"))
+	at := len(appended)
+	appended = append(appended, table...)
+	sb := appended[disk.SuperBlockOffset:]
+	binary.LittleEndian.PutUint32(sb[92:], uint32(at/4))
+	stampChecksum(appended)
+
+	if _, err := erofs.Open(bytes.NewReader(appended)); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Fatalf("a start past the packed inode's data: %v; want ErrCorrupt", err)
+	}
+
+	binary.LittleEndian.PutUint32(sb[8:], binary.LittleEndian.Uint32(sb[8:])|disk.FeatureCompatPlainXattrPfx)
+	stampChecksum(appended)
+
+	if _, err := erofs.Open(bytes.NewReader(appended)); err != nil {
+		t.Fatalf("the table in the image under PLAIN_XATTR_PFX: %v", err)
+	}
+}
+
+// TestReaderCompactInodeMtime: a compact inode's time is the superblock's
+// epoch plus its 32-bit i_mtime, with the superblock's fixed nanoseconds
+// (inode.c: erofs_read_inode), where the reader handed every compact inode
+// the epoch alone and the metadata-only copy did the same. mkfs.erofs makes
+// an inode extended when its time differs from the build time, so the
+// committed images never say otherwise; the fuzzer's input does: small-b512
+// with the high byte of d's i_mtime set.
+func TestReaderCompactInodeMtime(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "small-b512" {
+			continue
+		}
+
+		edited := bytes.Clone(im.Img)
+		edited[1263] = 0x3c
+		edited[1032] = 0x5a // the checksum feature cleared
+
+		sb := edited[disk.SuperBlockOffset:]
+		epoch := int64(binary.LittleEndian.Uint64(sb[24:]))
+		nsec := int64(binary.LittleEndian.Uint32(sb[32:]))
+		// d's inode starts at 1248; i_mtime is its bytes 12 to 15.
+		want := time.Unix(epoch+int64(binary.LittleEndian.Uint32(edited[1260:])), nsec)
+
+		if want.Unix() == epoch {
+			t.Fatal("test premise broken: the edit left d's i_mtime zero")
+		}
+
+		fsys, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		fi, err := fs.Stat(fsys, "d")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !fi.ModTime().Equal(want) {
+			t.Fatalf("d's mtime read as %v; want %v", fi.ModTime(), want)
+		}
+
+		var buf testBuffer
+
+		w := erofs.Create(&buf)
+		if err = w.CopyFrom(fsys, erofs.MetadataOnly()); err != nil {
+			t.Fatal(err)
+		}
+
+		if err = w.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		fi, err = fs.Stat(openWithDevices(t, buf.Bytes(), edited), "d")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !fi.ModTime().Equal(want) {
+			t.Fatalf("the metadata-only copy gives d an mtime of %v; want %v", fi.ModTime(), want)
 		}
 	}
 }

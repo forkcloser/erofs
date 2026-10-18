@@ -381,6 +381,14 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 		}
 	}
 
+	// The kernel reads the long xattr prefix table at mount, after the root
+	// inode, and refuses the image on a table it cannot read; a reader that
+	// served the image until an xattr named a prefix would serve what the
+	// kernel does not mount.
+	if err := i.loadLongPrefixes(); err != nil {
+		return nil, err
+	}
+
 	return &i, nil
 }
 
@@ -412,9 +420,7 @@ type image struct {
 	devices      []deviceInfo // parsed device table entries
 	deviceIDMask uint16
 	blkPool      sync.Pool
-	longPrefixes []string // cached long xattr prefixes
-	prefixesOnce sync.Once
-	prefixesErr  error
+	longPrefixes []string // the long xattr prefix table, read at Open
 }
 
 func (img *image) Open(name string) (fs.File, error) {
@@ -1041,92 +1047,99 @@ func (*image) readMetadata(r io.Reader) ([]byte, error) {
 	return data, nil
 }
 
-// loadLongPrefixes loads and caches the long xattr prefixes from the packed inode
-// using the regular inode read logic to handle compressed/non-inline data.
-//
-// Long xattr name prefixes are used to optimize storage of xattrs with common
-// prefixes. They are stored sequentially in a special "packed inode" or
-// "meta inode".
-// See: https://docs.kernel.org/filesystems/erofs.html#extended-attributes
-//
-//nolint:gocognit // the one-shot load inside the sync.Once: the closure is the function
+// loadLongPrefixes reads the long xattr prefix table, xattr_prefix_count
+// items from byte offset xattr_prefix_start * 4, each a metadata item: a
+// 16-bit length, zero meaning 65536, then the bytes, a base index and an
+// infix of at most 255 bytes (erofs_xattr_long_prefix). The kernel reads the
+// table at mount (xattr.c: erofs_xattr_prefixes_init) and refuses the image
+// when it runs past the end or an item is not a prefix; so does Open, which
+// calls this once. The items lie in the packed inode's data when the image
+// has one and the PLAIN_XATTR_PFX feature does not say otherwise, else in
+// the image itself.
 func (img *image) loadLongPrefixes() error {
-	img.prefixesOnce.Do(func() {
-		if img.sb.XattrPrefixCount == 0 {
-			return
-		}
-
-		var r io.Reader
-
-		// Calculate the starting offset. XattrPrefixStart is defined in the
-		// superblock as being in units of 4 bytes from the start of the corresponding inode
-		startOffset := int64(img.sb.XattrPrefixStart) * 4
-
-		if (img.sb.FeatureIncompat&disk.FeatureIncompatFragments != 0) && img.sb.PackedNid > 0 {
-			// The packed inode (identified by PackedNid in the superblock) is a special
-			// inode used for shared data and metadata.
-			// We use ".packed" as a descriptive name for this internal inode.
-			f := &file{
-				img:   img,
-				name:  ".packed",
-				nid:   img.sb.PackedNid,
-				ftype: 0, // regular file
-			}
-
-			// Read inode info to determine size and layout
-			fi, err := f.readInfo()
-			if err != nil {
-				img.prefixesErr = fmt.Errorf("failed to read packed inode: %w", err)
-				return
-			}
-
-			if startOffset > fi.size {
-				img.prefixesErr = fmt.Errorf(
-					"xattr prefix start offset %d exceeds packed inode size %d: %w",
-					startOffset,
-					fi.size,
-					ErrCorrupt,
-				)
-
-				return
-			}
-
-			// Set the read offset
-			f.offset = startOffset
-			r = bufio.NewReader(f)
-		} else {
-			// FIXME(hsiangkao): should avoid hacky 1<<32 here since we don't care about the end
-			r = io.NewSectionReader(img.meta, startOffset, 1<<32)
-		}
-
-		img.longPrefixes = make([]string, img.sb.XattrPrefixCount)
-		for i := range int(img.sb.XattrPrefixCount) {
-			data, err := img.readMetadata(r)
-			if err != nil {
-				img.prefixesErr = fmt.Errorf("failed to read long xattr prefix %d: %w", i, err)
-				return
-			}
-
-			// First byte is the base_index referencing a standard xattr prefix
-			baseIndex := xattrIndex(data[0])
-
-			// Remaining bytes are the infix to be appended to the base prefix
-			infix := string(data[1:])
-
-			// Construct full prefix: base prefix + infix
-			img.longPrefixes[i] = baseIndex.String() + infix
-		}
-	})
-
-	return img.prefixesErr
-}
-
-// getLongPrefix returns the long xattr prefix at the given index.
-func (img *image) getLongPrefix(index uint8) (string, error) {
-	if err := img.loadLongPrefixes(); err != nil {
-		return "", err
+	if img.sb.XattrPrefixCount == 0 {
+		return nil
 	}
 
+	r, err := img.prefixSource(int64(img.sb.XattrPrefixStart) * 4)
+	if err != nil {
+		return err
+	}
+
+	prefixes := make([]string, img.sb.XattrPrefixCount)
+	for i := range int(img.sb.XattrPrefixCount) {
+		data, err := img.readMetadata(r)
+		if err != nil {
+			// The table running past its source is the image's fault, as a
+			// block device answers it with an I/O error at mount.
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return fmt.Errorf("long xattr prefix %d past the end of its source: %w", i, ErrCorrupt)
+			}
+
+			return fmt.Errorf("failed to read long xattr prefix %d: %w", i, err)
+		}
+
+		// Shorter than the base index alone cannot happen (a zero length
+		// reads as 65536); longer than the index and EROFS_NAME_LEN is
+		// EFSCORRUPTED in the kernel.
+		if len(data) > 1+disk.MaxNameLen {
+			return fmt.Errorf("long xattr prefix %d of %d bytes: %w", i, len(data), ErrCorrupt)
+		}
+
+		// The base index names a built-in prefix the infix is appended to.
+		prefixes[i] = xattrIndex(data[0]).String() + string(data[1:])
+	}
+
+	img.longPrefixes = prefixes
+
+	return nil
+}
+
+// prefixSource is where the long xattr prefix table lies, read from
+// startOffset: the packed inode's data when the image has one and the
+// PLAIN_XATTR_PFX feature does not say otherwise, else the image itself,
+// bounded by its size when that is known.
+func (img *image) prefixSource(startOffset int64) (io.Reader, error) {
+	switch {
+	case img.sb.FeatureCompat&disk.FeatureCompatPlainXattrPfx == 0 &&
+		img.sb.FeatureIncompat&disk.FeatureIncompatFragments != 0 && img.sb.PackedNid > 0:
+		// The packed inode (identified by PackedNid in the superblock) is a
+		// special inode used for shared data and metadata.
+		f := &file{
+			img:   img,
+			name:  ".packed",
+			nid:   img.sb.PackedNid,
+			ftype: 0, // regular file
+		}
+
+		fi, err := f.readInfo()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read packed inode: %w", err)
+		}
+
+		if startOffset > fi.size {
+			return nil, fmt.Errorf("xattr prefix start offset %d exceeds packed inode size %d: %w",
+				startOffset, fi.size, ErrCorrupt)
+		}
+
+		f.offset = startOffset
+
+		return bufio.NewReader(f), nil
+	case img.size > 0:
+		if startOffset >= img.size {
+			return nil, fmt.Errorf("xattr prefix table starts at %d, outside the %d byte image: %w",
+				startOffset, img.size, ErrCorrupt)
+		}
+
+		return io.NewSectionReader(img.meta, startOffset, img.size-startOffset), nil
+	default:
+		return io.NewSectionReader(img.meta, startOffset, math.MaxInt64-startOffset), nil
+	}
+}
+
+// getLongPrefix returns the long xattr prefix at the given index, from the
+// table Open read.
+func (img *image) getLongPrefix(index uint8) (string, error) {
 	if int(index) >= len(img.longPrefixes) {
 		return "", fmt.Errorf(
 			"long xattr prefix index %d out of range (max %d): %w",
@@ -2057,8 +2070,11 @@ func (b *file) decodeInode(buf []byte, format uint16) (*inode, uint16, error) {
 			uid:         uint32(di.UID),
 			gid:         uint32(di.GID),
 			nlink:       int(di.Nlink),
-			mtime:       b.img.sb.BuildTime,
-			mtimeNs:     b.img.sb.BuildTimeNs,
+			// A compact inode's time is the superblock's epoch plus its
+			// 32-bit i_mtime, with the superblock's fixed nanoseconds
+			// (inode.c: erofs_read_inode).
+			mtime:   b.img.sb.BuildTime + uint64(di.Mtime),
+			mtimeNs: b.img.sb.BuildTimeNs,
 		}, di.XattrCount, nil
 	}
 
