@@ -582,9 +582,11 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				var chunks []builder.Chunk
 
 				if indexed {
-					chunks, err = fsys.parseChunks(at(chunkAddr), chunkFmt, size, blkBits, img.deviceIDMask)
+					chunks, err = fsys.parseChunks(
+						at(chunkAddr), chunkFmt, size, blkBits, img.deviceIDMask, img.locateChunk,
+					)
 				} else {
-					chunks, err = parseBlockMap(at(chunkAddr), chunkFmt, size, blkBits)
+					chunks, err = parseBlockMap(at(chunkAddr), chunkFmt, size, blkBits, img.locateChunk)
 				}
 
 				if err != nil {
@@ -755,6 +757,7 @@ func (*Writer) parseChunks(
 	fileSize uint64,
 	blkBits uint8,
 	deviceIDMask uint16,
+	place chunkPlacer,
 ) ([]builder.Chunk, error) {
 	// The same format rules the reader's loadBlock applies. 48-bit chunk
 	// addressing is unimplemented end to end, so a source declaring it must
@@ -828,6 +831,16 @@ func (*Writer) parseChunks(
 		// reader would never look at.
 		deviceID := binary.LittleEndian.Uint16(data[off+2:off+4]) & deviceIDMask
 		physBlock := uint64(startBlkLo)
+
+		// Every chunk lands where erofs_map_dev lands it, judged by its own
+		// start before runs are joined, its bytes bounded there as Stat
+		// bounds them.
+		var err error
+
+		deviceID, physBlock, err = place(deviceID, physBlock, chunkBytes(i, chunkBits, fileSize))
+		if err != nil {
+			return nil, err
+		}
 
 		if len(chunks) > 0 {
 			prev := &chunks[len(chunks)-1]
@@ -1027,10 +1040,30 @@ func deviceChunks(start, blocks uint64, device uint16) []builder.Chunk {
 	return chunks
 }
 
+// chunkPlacer places a chunk's first block, on device deviceID, where
+// erofs_map_dev lands it, with its n logical bytes bounded there as Stat
+// bounds them: the device and the block on it, or the refusal.
+type chunkPlacer func(deviceID uint16, block uint64, n int64) (uint16, uint64, error)
+
+// chunkBytes is the logical size of chunk i of a fileSize-byte file.
+func chunkBytes(i int, chunkBits uint8, fileSize uint64) int64 {
+	size := uint64(1) << chunkBits
+	// #nosec G115 -- i is below the chunk count, so the start is below fileSize
+	start := uint64(i) << chunkBits
+
+	return int64(min(size, fileSize-start)) // #nosec G115 -- at most one chunk, far below MaxInt64
+}
+
 // parseBlockMap reads a chunk-based inode's block map, the unindexed chunk
-// format: one 32-bit block address per chunk, the null address a hole, every
-// block on the image's own device.
-func parseBlockMap(data []byte, chunkFmt uint16, fileSize uint64, blkBits uint8) ([]builder.Chunk, error) {
+// format: one 32-bit block address per chunk, the null address a hole, each
+// addressed on the primary device and placed where erofs_map_dev lands it.
+func parseBlockMap(
+	data []byte,
+	chunkFmt uint16,
+	fileSize uint64,
+	blkBits uint8,
+	place chunkPlacer,
+) ([]builder.Chunk, error) {
 	if chunkFmt&^disk.LayoutChunkFormatBits != 0 {
 		return nil, fmt.Errorf("unsupported chunk format %#x: %w", chunkFmt, ErrNotImplemented)
 	}
@@ -1049,12 +1082,18 @@ func parseBlockMap(data []byte, chunkFmt uint16, fileSize uint64, blkBits uint8)
 	for i := range nchunks {
 		addr := binary.LittleEndian.Uint32(data[i*4:])
 
-		start := uint64(addr)
 		if addr == disk.NullAddr {
-			start = builder.NullPhysicalBlock
+			chunks = append(chunks, deviceChunks(builder.NullPhysicalBlock, blocksPerChunk, 0)...)
+
+			continue
 		}
 
-		chunks = append(chunks, deviceChunks(start, blocksPerChunk, 0)...)
+		dev, start, err := place(0, uint64(addr), chunkBytes(i, chunkBits, fileSize))
+		if err != nil {
+			return nil, err
+		}
+
+		chunks = append(chunks, deviceChunks(start, blocksPerChunk, dev)...)
 	}
 
 	return chunks, nil
@@ -1103,6 +1142,31 @@ func (img *image) flatRun(start, blocks uint64) (uint64, uint16, uint64) {
 	}
 
 	return next, 0, start
+}
+
+// locateChunk is the chunkPlacer of an image, the reader's own placement
+// and bound: an explicit device id names its device, a device-0 block
+// inside an extra device's mapped range is that device's and the rest the
+// image's (erofs_map_dev, as locate reads it), and the chunk's n logical
+// bytes are bounded on that device as boundOnDevice bounds them at Stat, so
+// the copy refuses what Stat refuses and places what the kernel reads.
+func (img *image) locateChunk(deviceID uint16, block uint64, n int64) (uint16, uint64, error) {
+	if block > uint64(math.MaxInt64)>>img.sb.BlkSizeBits {
+		return 0, 0, fmt.Errorf("chunk block %d is out of range: %w", block, ErrCorrupt)
+	}
+
+	// #nosec G115 -- bounded just above
+	dev, off, err := img.locate(deviceID, int64(block)<<img.sb.BlkSizeBits)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	if err := img.boundOnDevice(dev, off, n); err != nil {
+		return 0, 0, err
+	}
+
+	// #nosec G115 -- locate returns a non-negative offset
+	return dev, uint64(off) >> img.sb.BlkSizeBits, nil
 }
 
 // readFlat reads n bytes of flat data at device-0 address pa from the
