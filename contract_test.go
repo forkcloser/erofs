@@ -1218,6 +1218,34 @@ type verdict struct {
 	complete       bool // the image holds every block its superblock declares: a structure past its end points outside it
 }
 
+// TestContractReferenceWithoutDevices: an image declaring extra devices and
+// given none parses, as the kernel mounts it (erofs_scan_devices, flatdev:
+// the table stands as the image's own layout); the count is held against
+// the devices only when some are given.
+func TestContractReferenceWithoutDevices(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Blob == nil {
+			continue
+		}
+
+		ref, err := erofsspec.Parse(im.Img)
+		if err != nil {
+			t.Fatalf("%s without its blob: %v", im.Name, err)
+		}
+
+		if ref.Super.ExtraDevices != 1 || len(ref.Devices) != 1 {
+			t.Fatalf(
+				"%s: %d extra devices declared, %d slots read, want 1 and 1",
+				im.Name,
+				ref.Super.ExtraDevices,
+				len(ref.Devices),
+			)
+		}
+	}
+}
+
 // referenceVerdict reads everything the reference can: the superblock,
 // every inode of the walk, every directory, content, target and xattr.
 func referenceVerdict(img, blob []byte) verdict {
