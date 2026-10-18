@@ -53,6 +53,7 @@ import (
 	"maps"
 	"os"
 	"path"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -2042,6 +2043,52 @@ func TestContractReaderRefusesWhatLiesPastAnUnsizedReadersEnd(t *testing.T) {
 			for name, n := range dirs {
 				ents, err := fs.ReadDir(fsys, fsName(name))
 				judge(t, "ReadDir "+fsName(name), spans[name].read, found(name), cut, err, len(ents) == n)
+			}
+		})
+	}
+}
+
+// TestContractReaderRefusesCompressedImages: an image mkfs.erofs compresses
+// is refused at Open as ErrNotImplemented ("compressed inodes ... with
+// ErrNotImplemented"): the reference reads a compressed inode as its own
+// limit, or, where mkfs.erofs compressed nothing of a small tree, reads the
+// image under the announced compression the judge knows as the reader's
+// not-implemented class; either way the pair agrees and nothing is served.
+func TestContractReaderRefusesCompressedImages(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("the Windows build of mkfs.erofs has no compression")
+	}
+
+	corpus.MkfsPath(t)
+
+	tarball := corpus.Tar(t, corpus.Small())
+
+	for _, args := range [][]string{{"-zlz4"}, {"-zlz4", "-b512"}, {"-zlz4", "-Ededupe"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			t.Parallel()
+
+			im := corpus.Mkfs(t, "compressed", args, tarball)
+
+			if _, err := erofs.Open(bytes.NewReader(im.Img)); !errors.Is(err, erofs.ErrNotImplemented) {
+				t.Fatalf("Open: %v, want ErrNotImplemented", err)
+			}
+
+			// With small files mkfs.erofs may compress none of them: then
+			// the reference reads the image and the superblock's announced
+			// compression is the judge's not-implemented flag; with a
+			// compressed inode the reference refuses by its own limit.
+			ref, got := referenceVerdict(im.Img, nil), readerVerdict(im.Img, nil)
+			if got.class != "unsupported" || !ref.notImplemented && ref.class != "unsupported" {
+				t.Fatalf(
+					"reference %s (%v, announced %v), reader %s (%v)",
+					ref.class, ref.err, ref.notImplemented, got.class, got.err,
+				)
+			}
+
+			if d := judge(ref, got); d != "" {
+				t.Fatal(d)
 			}
 		})
 	}
