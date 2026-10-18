@@ -199,6 +199,58 @@ func TestContractReaderAgreesWithReferenceOnWriterImages(t *testing.T) {
 	}
 }
 
+// TestContractWideDirectoryAtEveryBlockSize: a directory of more entries
+// than three blocks hold, at every block size up to the format's largest
+// (65536, where a dirent's name offset reaches the top of its 16 bits),
+// is listed and looked up whole by the reader as the reference reads it
+// and as the tree was written, and passes fsck.erofs where the tool reads
+// the block size.
+func TestContractWideDirectoryAtEveryBlockSize(t *testing.T) {
+	t.Parallel()
+
+	for _, bs := range []int{512, 4096, 65536} {
+		t.Run(fmt.Sprintf("b%d", bs), func(t *testing.T) {
+			t.Parallel()
+
+			// 19 bytes per dirent: 12 of header and a 7-byte name.
+			n := 3*bs/19 + 5
+			nodes := []corpus.Node{{Path: "d", Type: tar.TypeDir, Mode: 0o755}}
+
+			for i := range n {
+				nodes = append(nodes, corpus.Node{Path: fmt.Sprintf("d/f%06d", i), Type: tar.TypeReg, Mode: 0o644})
+			}
+
+			im := corpus.Image{
+				Name: fmt.Sprintf("wide-b%d", bs),
+				Img:  writeImage(t, nodes, erofs.WithBlockSize(bs)),
+				Tree: nodes,
+			}
+			ref := parseImage(t, im)
+
+			corpus.Check(t, im, ref, nodes, true)
+			fsckUnlessPlatformLimit(t, im)
+
+			fsys := openImage(t, im)
+			checkReader(t, fsys, ref)
+
+			ents, err := fs.ReadDir(fsys, "d")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if len(ents) != n {
+				t.Fatalf("ReadDir d: %d entries, want %d", len(ents), n)
+			}
+
+			for _, e := range ents {
+				if _, err := fs.Stat(fsys, "d/"+e.Name()); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 // writeImage builds an image of the tree with the package's writer:
 // directories before their children, hardlinks after their targets, every
 // node's mode, owner, time and xattrs set through the writer's methods.
