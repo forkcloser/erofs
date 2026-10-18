@@ -845,7 +845,7 @@ func TestContractGenericSourceTimesAndOwnership(t *testing.T) {
 // coalesced joins adjacent DataRange entries that continue each other, a
 // hole after a hole or data at the offset the previous entry ends.
 func coalesced(ranges []erofs.DataRange) []erofs.DataRange {
-	var out []erofs.DataRange
+	out := make([]erofs.DataRange, 0, len(ranges))
 
 	for _, r := range ranges {
 		if n := len(out); n > 0 {
@@ -1313,3 +1313,118 @@ func copyAgrees(src []byte, srcExtra [][]byte, dst []byte, dstExtra [][]byte) st
 
 	return ""
 }
+
+// The generic sources with a DataRange, for the DataRange contract.
+
+// dataRangerFileInfo is a test fs.FileInfo whose DataRange() returns
+// caller-supplied ranges, simulating a source (e.g. ext4 or OCI layer
+// reader) that knows where its file bytes live without holding a data reader.
+// content is the data returned by Read(); if nil, Read returns zeros.
+type dataRangerFileInfo struct {
+	name    string
+	size    int64
+	ranges  []erofs.DataRange
+	content []byte // data served by Read(); nil means return zeros
+}
+
+func (fi *dataRangerFileInfo) Name() string                 { return fi.name }
+func (fi *dataRangerFileInfo) Size() int64                  { return fi.size }
+func (*dataRangerFileInfo) Mode() fs.FileMode               { return 0o644 }
+func (*dataRangerFileInfo) ModTime() time.Time              { return time.Time{} }
+func (*dataRangerFileInfo) IsDir() bool                     { return false }
+func (*dataRangerFileInfo) Sys() any                        { return nil }
+func (fi *dataRangerFileInfo) DataRange() []erofs.DataRange { return fi.ranges }
+
+// dataRangerFS is a minimal fs.FS that exposes one regular file whose
+// FileInfo implements DataRange().  It also implements DeviceBlocks() so
+// CopyFrom records the backing-device size.
+type dataRangerFS struct {
+	file *dataRangerFileInfo
+	// deviceBlocks is the declared size (in 4096-byte blocks) of the backing device.
+	deviceBlocks uint64
+}
+
+func (f *dataRangerFS) DeviceBlocks() uint64 { return f.deviceBlocks }
+
+func (f *dataRangerFS) Open(name string) (fs.File, error) {
+	if name == "." {
+		return &dataRangerDir{fs: f}, nil
+	}
+
+	if name == f.file.name {
+		return &dataRangerFile{info: f.file}, nil
+	}
+
+	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+}
+
+type dataRangerDir struct {
+	fs      *dataRangerFS
+	didRead bool
+}
+
+func (*dataRangerDir) Stat() (fs.FileInfo, error) {
+	return &dataRangerDirInfo{}, nil
+}
+
+func (*dataRangerDir) Read([]byte) (int, error) {
+	//nolint:err113 // a fake's failure fixture
+	return 0, &fs.PathError{Op: "read", Path: ".", Err: errors.New("is a directory")}
+}
+func (*dataRangerDir) Close() error { return nil }
+func (d *dataRangerDir) ReadDir(int) ([]fs.DirEntry, error) {
+	if d.didRead {
+		return nil, io.EOF
+	}
+
+	d.didRead = true
+
+	return []fs.DirEntry{&dataRangerEntry{info: d.fs.file}}, nil
+}
+
+type dataRangerDirInfo struct{}
+
+func (*dataRangerDirInfo) Name() string       { return "." }
+func (*dataRangerDirInfo) Size() int64        { return 0 }
+func (*dataRangerDirInfo) Mode() fs.FileMode  { return fs.ModeDir | 0o755 }
+func (*dataRangerDirInfo) ModTime() time.Time { return time.Time{} }
+func (*dataRangerDirInfo) IsDir() bool        { return true }
+func (*dataRangerDirInfo) Sys() any           { return nil }
+
+type dataRangerEntry struct{ info *dataRangerFileInfo }
+
+func (e *dataRangerEntry) Name() string               { return e.info.name }
+func (*dataRangerEntry) IsDir() bool                  { return false }
+func (*dataRangerEntry) Type() fs.FileMode            { return 0 }
+func (e *dataRangerEntry) Info() (fs.FileInfo, error) { return e.info, nil }
+
+type dataRangerFile struct {
+	info   *dataRangerFileInfo
+	offset int64
+}
+
+func (f *dataRangerFile) Stat() (fs.FileInfo, error) { return f.info, nil }
+func (f *dataRangerFile) Read(p []byte) (int, error) {
+	if f.offset >= f.info.size {
+		return 0, io.EOF
+	}
+
+	var n int
+	if f.info.content != nil {
+		// Serve actual content so leak-detection tests can catch accidental reads.
+		n = copy(p, f.info.content[f.offset:])
+	} else {
+		// No content supplied: return zeros up to size.
+		end := min(int64(len(p)), f.info.size-f.offset)
+		for i := range p[:end] {
+			p[i] = 0
+		}
+
+		n = int(end)
+	}
+
+	f.offset += int64(n)
+
+	return n, nil
+}
+func (*dataRangerFile) Close() error { return nil }
