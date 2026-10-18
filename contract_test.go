@@ -1218,6 +1218,61 @@ type verdict struct {
 	complete       bool // the image holds every block its superblock declares: a structure past its end points outside it
 }
 
+// TestContractReferenceWithoutDevices: an image declaring extra devices and
+// given none parses, as the kernel mounts it (erofs_scan_devices, flatdev:
+// the table stands as the image's own layout); the count is held against
+// the devices only when some are given.
+func TestContractReferenceWithoutDevices(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Blob == nil {
+			continue
+		}
+
+		ref, err := erofsspec.Parse(im.Img)
+		if err != nil {
+			t.Fatalf("%s without its blob: %v", im.Name, err)
+		}
+
+		if ref.Super.ExtraDevices != 1 || len(ref.Devices) != 1 {
+			t.Fatalf(
+				"%s: %d extra devices declared, %d slots read, want 1 and 1",
+				im.Name,
+				ref.Super.ExtraDevices,
+				len(ref.Devices),
+			)
+		}
+	}
+}
+
+// TestContractReferenceDeviceCountIsTheGiven: the count the reference holds
+// against the devices it is given is the superblock's under the
+// device-table feature and zero without it, so a blob image whose feature
+// bit is cleared is refused at Parse when its blob is given, before any
+// read, as erofs_scan_devices refuses the mount.
+func TestContractReferenceDeviceCountIsTheGiven(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Blob == nil {
+			continue
+		}
+
+		img := bytes.Clone(im.Img)
+		img[1024+80] &^= byte(erofsspec.FeatureIncompatDeviceTable)
+		img[1024+8] = 0 // the checksum feature, so the edit is judged on its own
+
+		if _, err := erofsspec.Parse(img, im.Extra()); !errors.Is(err, erofsspec.ErrCorrupt) {
+			t.Fatalf(
+				"%s without the device-table feature, blob given: Parse %v, want ErrCorrupt at Parse",
+				im.Name,
+				err,
+			)
+		}
+	}
+}
+
 // referenceVerdict reads everything the reference can: the superblock,
 // every inode of the walk, every directory, content, target and xattr.
 func referenceVerdict(img, blob []byte) verdict {
