@@ -71,7 +71,9 @@ func TestLoadAtShortReadAtEOF(t *testing.T) {
 }
 
 // TestLoadAtBeyondEOF covers reads with nothing to return, which must still
-// fail rather than hand back an empty block.
+// fail rather than hand back an empty block: the reader ending before a
+// structure is unexpected (this test image declares no extent, so it is not
+// ErrCorrupt), and never the plain io.EOF that a block loop reads as the end.
 func TestLoadAtBeyondEOF(t *testing.T) {
 	t.Parallel()
 
@@ -79,8 +81,8 @@ func TestLoadAtBeyondEOF(t *testing.T) {
 
 	if _, err := img.loadAt(100, 4096); err == nil {
 		t.Error("loadAt at EOF succeeded; want an error")
-	} else if !errors.Is(err, io.EOF) {
-		t.Errorf("err = %v; want io.EOF", err)
+	} else if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Errorf("err = %v; want io.ErrUnexpectedEOF", err)
 	}
 
 	if _, err := img.loadAt(5000, 4096); err == nil {

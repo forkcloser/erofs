@@ -1408,3 +1408,103 @@ func TestReaderChunkFormatBits(t *testing.T) {
 		}
 	}
 }
+
+// readAtOnly is a ReaderAt with no Size, so Open takes the superblock's word
+// for the image's length.
+type readAtOnly struct{ r io.ReaderAt }
+
+func (r readAtOnly) ReadAt(p []byte, off int64) (int, error) { return r.r.ReadAt(p, off) }
+
+// TestReaderShortImageUnsized: an image cut short behind a ReaderAt with no
+// Size has a directory block the reader cannot deliver; the kernel's readdir
+// and lookup end in EIO on a device that short, and the reader answers
+// ErrCorrupt (or the reader's own end) from ReadDir and from Stat alike,
+// never an empty listing or ErrNotExist. The first input is QA's:
+// small-blobdev-512 less its last block, d/sub's block among the missing;
+// the second a Writer image cut where the root's dirents begin.
+func TestReaderShortImageUnsized(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "small-blobdev-512" {
+			continue
+		}
+
+		whole, err := erofs.Open(bytes.NewReader(im.Img), erofs.WithExtraDevices(bytes.NewReader(im.Blob)))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		short := readAtOnly{bytes.NewReader(im.Img[:len(im.Img)-512])}
+
+		cut, err := erofs.Open(short, erofs.WithExtraDevices(bytes.NewReader(im.Blob)))
+		if err != nil {
+			t.Fatalf("Open of the cut image through an unsized reader: %v", err)
+		}
+
+		ents, err := fs.ReadDir(cut, "d/sub")
+		if !shortImageError(err) {
+			t.Fatalf("ReadDir of d/sub, its block cut: %d entries, %v; want ErrCorrupt or the reader's end",
+				len(ents), err)
+		}
+
+		err = fs.WalkDir(whole, ".", func(name string, _ fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+
+			if _, err := fs.Lstat(cut, name); errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("Lstat of %s on the cut image: %v; the whole image has it", name, err)
+			}
+
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	img := buildImage(t, func(w *erofs.Writer) { writeFile(t, w, "/a", []byte("a")) })
+	at := inodeOffset(t, img, ".") + disk.SizeInodeExtended
+
+	cut, err := erofs.Open(readAtOnly{bytes.NewReader(img[:at])})
+	if err != nil {
+		t.Fatalf("Open of a Writer image cut at the root's dirents: %v", err)
+	}
+
+	ents, err := fs.ReadDir(cut, ".")
+	if !shortImageError(err) {
+		t.Fatalf("ReadDir of a root whose dirents are cut: %d entries, %v; want ErrCorrupt or the reader's end",
+			len(ents), err)
+	}
+
+	if _, err = fs.Lstat(cut, "a"); err == nil || errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Lstat of a on a root whose dirents are cut: %v; want ErrCorrupt or the reader's end", err)
+	}
+
+	// An xattr body the reader cannot deliver is the image's fault too: the
+	// Writer packs it right after the inode, so a cut there leaves the
+	// inode and takes its attributes.
+	img = buildImage(t, func(w *erofs.Writer) {
+		writeFile(t, w, "/a", []byte("a"))
+
+		if xerr := w.Setxattr("/a", "user.k", "v"); xerr != nil {
+			t.Fatal(xerr)
+		}
+	})
+	at = inodeOffset(t, img, "a") + disk.SizeInodeExtended
+
+	cut, err = erofs.Open(readAtOnly{bytes.NewReader(img[:at])})
+	if err != nil {
+		t.Fatalf("Open of a Writer image cut at a's xattrs: %v", err)
+	}
+
+	if _, err = fs.Stat(cut, "a"); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Fatalf("Stat of a file whose xattr body is cut: %v; want ErrCorrupt", err)
+	}
+}
+
+// shortImageError is what a structure the reader cannot deliver may answer.
+func shortImageError(err error) bool {
+	return errors.Is(err, erofs.ErrCorrupt) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
