@@ -1246,6 +1246,33 @@ func TestContractReferenceWithoutDevices(t *testing.T) {
 	}
 }
 
+// TestContractReferenceDeviceCountIsTheGiven: the count the reference holds
+// against the devices it is given is the superblock's under the
+// device-table feature and zero without it, so a blob image whose feature
+// bit is cleared is refused at Parse when its blob is given, before any
+// read, as erofs_scan_devices refuses the mount.
+func TestContractReferenceDeviceCountIsTheGiven(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Blob == nil {
+			continue
+		}
+
+		img := bytes.Clone(im.Img)
+		img[1024+80] &^= byte(erofsspec.FeatureIncompatDeviceTable)
+		img[1024+8] = 0 // the checksum feature, so the edit is judged on its own
+
+		if _, err := erofsspec.Parse(img, im.Extra()); !errors.Is(err, erofsspec.ErrCorrupt) {
+			t.Fatalf(
+				"%s without the device-table feature, blob given: Parse %v, want ErrCorrupt at Parse",
+				im.Name,
+				err,
+			)
+		}
+	}
+}
+
 // referenceVerdict reads everything the reference can: the superblock,
 // every inode of the walk, every directory, content, target and xattr.
 func referenceVerdict(img, blob []byte) verdict {
