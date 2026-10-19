@@ -104,18 +104,6 @@ func (i *sparseInfo) DataRange() []erofs.DataRange {
 	return i.s.ranges
 }
 
-// sparseBlob lays out four blocks: the marker in block 1 must never surface,
-// because logical block 1 of the file is a hole.
-func sparseBlob(bs int) []byte {
-	blob := make([]byte, 8*bs)
-	copy(blob[0*bs:], bytes.Repeat([]byte("A"), bs))
-	copy(blob[1*bs:], bytes.Repeat([]byte("X"), bs))
-	copy(blob[2*bs:], bytes.Repeat([]byte("B"), bs))
-	copy(blob[3*bs:], bytes.Repeat([]byte("C"), bs))
-
-	return blob
-}
-
 func newSparseFS(bs int, blob []byte) *sparseFS {
 	return &sparseFS{
 		blockSize: uint32(bs),

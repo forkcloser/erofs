@@ -102,14 +102,6 @@ func TestChunkBasedXattrAlignment(t *testing.T) {
 	}
 }
 
-func firstByte(b []byte) byte {
-	if len(b) == 0 {
-		return 0
-	}
-
-	return b[0]
-}
-
 // chunkSourceFS is a minimal source fs.FS holding one 4096-byte regular file
 // whose chunk map is supplied verbatim, so a test can express a chunk mapping
 // the public API would otherwise refuse to build.

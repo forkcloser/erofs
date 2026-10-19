@@ -11,24 +11,6 @@ import (
 	"github.com/forkcloser/erofs"
 )
 
-// writeFile creates, fills and closes one file.
-func writeFile(t *testing.T, w *erofs.Writer, name string, data []byte) {
-	t.Helper()
-
-	f, err := w.Create(name)
-	if err != nil {
-		t.Fatalf("Create(%q): %v", name, err)
-	}
-
-	if _, err := f.Write(data); err != nil {
-		t.Fatalf("Write(%q): %v", name, err)
-	}
-
-	if err := f.Close(); err != nil {
-		t.Fatalf("Close(%q): %v", name, err)
-	}
-}
-
 // TestCreateRejectsSecondOpenFile covers two files open at once. Both
 // recorded the same start offset while their bytes were appended to one
 // shared stream, so the second file's region pointed at the first file's
