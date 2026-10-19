@@ -19,6 +19,7 @@ import (
 
 	"github.com/forkcloser/erofs"
 	"github.com/forkcloser/erofs/internal/corpus"
+	"github.com/forkcloser/erofs/internal/disk"
 	"github.com/forkcloser/erofs/internal/erofsspec"
 )
 
@@ -1267,6 +1268,15 @@ func TestContractWriterHoles(t *testing.T) {
 		info, _ := b.statOf(t, name)
 		checkRanges(t, b.fsys, b.ref, name, info, in)
 	}
+
+	// A chunk-based inode, every chunk a hole or not, is under the
+	// chunked-file feature: the superblock declares it.
+	if b.ref.Super.FeatureIncompat&disk.FeatureIncompatChunkedFile == 0 {
+		t.Errorf(
+			"feature_incompat %#x lacks the chunked-file bit for an image with a chunk-based inode",
+			b.ref.Super.FeatureIncompat,
+		)
+	}
 }
 
 // TestContractWriterBlockSizeOption: "An invalid size causes subsequent
@@ -1646,6 +1656,79 @@ func TestContractWriterLinkOfSpecialInodes(t *testing.T) {
 	}
 }
 
+// TestContractWriterParentMustBeADirectory: an entry beneath a regular
+// file is refused as ErrNotDirectory by every method that creates one
+// (Create, Mkdir, Symlink, Mknod, Link), and the image holds no trace of
+// it: the file is a leaf in the reference's walk.
+func TestContractWriterParentMustBeADirectory(t *testing.T) {
+	t.Parallel()
+
+	errs := map[string]error{}
+
+	b := wBuild(t, func(w *erofs.Writer) {
+		mustCreate(t, w, "f", []byte("f"))
+		mustCreate(t, w, "g", []byte("g"))
+
+		_, errs["Create"] = w.Create("f/child")
+		errs["Mkdir"] = w.Mkdir("f/child", 0o755)
+		errs["Symlink"] = w.Symlink("g", "f/child")
+		errs["Mknod"] = w.Mknod("f/child", fs.ModeNamedPipe|0o644, 0)
+		errs["Link"] = w.Link("g", "f/child")
+	})
+
+	for call, err := range errs {
+		if !errors.Is(err, erofs.ErrNotDirectory) {
+			t.Errorf("%s beneath a file: %v, want ErrNotDirectory", call, err)
+		}
+	}
+
+	var names []string
+
+	if err := b.ref.Walk(func(e erofsspec.Entry) error {
+		names = append(names, e.Path)
+
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	slices.Sort(names)
+
+	if want := []string{"f", "g"}; !slices.Equal(names, want) {
+		t.Errorf("the image holds %q, want %q", names, want)
+	}
+}
+
+// TestContractWriterDataFileThatCannotSeekFailsTheWriter: WithDataFile's
+// file is positioned by a Seek before its first use; a file that refuses
+// it (here one already closed) fails the Create that needs it and the
+// writer's Close after, rather than writing data at one offset and chunk
+// indexes at another.
+func TestContractWriterDataFileThatCannotSeekFailsTheWriter(t *testing.T) {
+	t.Parallel()
+
+	df, err := os.CreateTemp(t.TempDir(), "data-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := df.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	w := erofs.Create(&testBuffer{}, erofs.WithDataFile(df), erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if f, err := w.Create("a"); err == nil {
+		_ = f.Close()
+
+		t.Error("Create with a data file that cannot seek succeeded")
+	}
+
+	if err := w.Close(); err == nil {
+		t.Error("Close with a data file that cannot seek succeeded")
+	}
+}
+
 // TestContractWriterLifecycle: what a closed writer or file refuses, as
 // fs.ErrClosed ("FS already closed", "write to closed file"): a write or a
 // second Close of a closed file, a second Close of the writer, a Create
@@ -1855,6 +1938,12 @@ func TestContractWriterOneOpenFile(t *testing.T) {
 
 	if early := w.Close(); early == nil {
 		t.Error("Close with a open succeeded")
+	}
+
+	// CopyFrom appends to the stream a is writing; it is refused while a
+	// is open rather than interleaving its bytes into a's region.
+	if copied := w.CopyFrom(fstest.MapFS{"c": &fstest.MapFile{Data: []byte("c")}}); copied == nil {
+		t.Error("CopyFrom while a is open for writing succeeded")
 	}
 
 	if err = a.Close(); err != nil {
