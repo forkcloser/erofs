@@ -1508,3 +1508,39 @@ func TestReaderShortImageUnsized(t *testing.T) {
 func shortImageError(err error) bool {
 	return errors.Is(err, erofs.ErrCorrupt) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
+
+// TestReaderDirBlkBits: the superblock's dirblkbits is reserved at zero, and
+// the kernel refuses any other value at mount ("dirblkbits %u isn't
+// supported"), the block size bits included, where the reader accepted
+// those as "the same granularity". The first input is the fuzzer's:
+// small-blobdev-512 with dirblkbits set to 9, its block size bits.
+func TestReaderDirBlkBits(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "small-blobdev-512" {
+			continue
+		}
+
+		edited := bytes.Clone(im.Img)
+		edited[1114] = 0x09
+		edited[1032] = 0x00 // the checksum feature cleared
+
+		blob := erofs.WithExtraDevices(bytes.NewReader(im.Blob))
+		if _, err := erofs.Open(bytes.NewReader(edited), blob); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("Open with dirblkbits 9 on a 512-byte-block image: %v; want ErrCorrupt", err)
+		}
+	}
+
+	img := buildImage(t, func(w *erofs.Writer) { writeFile(t, w, "/a", []byte("a")) })
+
+	for _, bits := range []byte{img[disk.SuperBlockOffset+12], 1} {
+		bad := bytes.Clone(img)
+		bad[disk.SuperBlockOffset+90] = bits
+		stampChecksum(bad)
+
+		if _, err := erofs.Open(bytes.NewReader(bad)); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("Open with dirblkbits %d: %v; want ErrCorrupt", bits, err)
+		}
+	}
+}

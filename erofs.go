@@ -367,12 +367,11 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 	if err := i.checkNid(uint64(i.sb.RootNid)); err != nil {
 		return nil, fmt.Errorf("root %w", err)
 	}
-	// Zero means "same as the filesystem block size", which is what this
-	// writer emits. Any other disagreeing value would have dirents read at
-	// one granularity and written at another.
-	if i.sb.DirBlkBits != 0 && i.sb.DirBlkBits != i.sb.BlkSizeBits {
-		return nil, fmt.Errorf("directory block bits %d do not match block size bits %d: %w",
-			i.sb.DirBlkBits, i.sb.BlkSizeBits, ErrInvalidSuperblock)
+	// The field is reserved at zero: the kernel refuses any other value at
+	// mount (super.c: "dirblkbits %u isn't supported"), the block size bits
+	// included, and this writer emits zero.
+	if i.sb.DirBlkBits != 0 {
+		return nil, fmt.Errorf("directory block bits %d are not supported: %w", i.sb.DirBlkBits, ErrInvalidSuperblock)
 	}
 
 	i.blkPool.New = func() any {
