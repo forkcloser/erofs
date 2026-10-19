@@ -103,18 +103,6 @@ func openWithDevices(t *testing.T, img []byte, devices ...[]byte) fs.FS {
 	return fsys
 }
 
-// sparseBlob lays out four blocks: the marker in block 1 must never surface,
-// because logical block 1 of the file is a hole.
-func sparseBlob(bs int) []byte {
-	blob := make([]byte, 8*bs)
-	copy(blob[0*bs:], bytes.Repeat([]byte("A"), bs))
-	copy(blob[1*bs:], bytes.Repeat([]byte("X"), bs))
-	copy(blob[2*bs:], bytes.Repeat([]byte("B"), bs))
-	copy(blob[3*bs:], bytes.Repeat([]byte("C"), bs))
-
-	return blob
-}
-
 // sameTree holds got to want: the same paths, each with the same type,
 // bits, size, time and ownership, the same bytes for a file and the same
 // target for a symlink.
