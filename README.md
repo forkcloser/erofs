@@ -84,7 +84,7 @@ has no entry and hides it.
 - [x] Read erofs files created with default `mkfs.erofs` options
 - [x] Read chunk-based erofs files with indexes
 - [x] Xattr support including long xattr prefixes
-- [x] Extra devices for chunked data
+- [x] Extra devices for chunked data, and an image opened without them as the kernel mounts it (flatdev: metadata and in-image data served, blob data refused where it is read)
 - [x] Create erofs files from any `fs.FS`
 - [x] Directory to erofs packing
 - [x] AUFS whiteout to overlayfs conversion

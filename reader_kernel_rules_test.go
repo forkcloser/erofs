@@ -1544,3 +1544,121 @@ func TestReaderDirBlkBits(t *testing.T) {
 		}
 	}
 }
+
+// TestReaderFlatdev: an image given none of its extra devices opens as the
+// kernel mounts it, in flatdev mode (super.c: erofs_scan_devices): the
+// device table stands, every name, Stat, directory listing and link target
+// is the one the image gives with its blob, and a file whose data lives in
+// the absent blob is refused where it is read rather than served from
+// nowhere (small-blobdev-512 keeps every file's data in its blob). Given a
+// wrong number of devices, Open refuses as the kernel refuses the mount.
+func TestReaderFlatdev(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "small-blobdev-512" {
+			continue
+		}
+
+		whole := openWithDevices(t, im.Img, im.Blob)
+
+		flat, err := erofs.Open(bytes.NewReader(im.Img))
+		if err != nil {
+			t.Fatalf("Open without the blob: %v", err)
+		}
+
+		refused := 0
+
+		err = fs.WalkDir(whole, ".", func(name string, _ fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+
+			sameEntry(t, whole, flat, name)
+
+			want, err := fs.Lstat(whole, name)
+			if err != nil || !want.Mode().IsRegular() || want.Size() == 0 {
+				return err
+			}
+
+			wantData, err := fs.ReadFile(whole, name)
+			if err != nil {
+				return err
+			}
+
+			switch gotData, err := fs.ReadFile(flat, name); {
+			case err == nil && bytes.Equal(gotData, wantData):
+			case errors.Is(err, erofs.ErrCorrupt):
+				refused++
+			default:
+				t.Errorf("%s without the blob: %d bytes, %v; want the data or ErrCorrupt", name, len(gotData), err)
+			}
+
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if refused == 0 {
+			t.Fatal("without the blob no file was refused; the blob holds their data")
+		}
+
+		two := erofs.WithExtraDevices(bytes.NewReader(im.Blob), bytes.NewReader(im.Blob))
+		if _, err := erofs.Open(bytes.NewReader(im.Img), two); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("Open with two devices for a one-device image: %v; want ErrCorrupt", err)
+		}
+	}
+}
+
+// sameEntry reports name's Lstat, and its listing or link target, differing
+// between two images.
+func sameEntry(t *testing.T, want, got fs.FS, name string) {
+	t.Helper()
+
+	w, err := fs.Lstat(want, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := fs.Lstat(got, name)
+	if err != nil {
+		t.Errorf("%s: Lstat %v", name, err)
+
+		return
+	}
+
+	if g.Mode() != w.Mode() || g.Size() != w.Size() || !g.ModTime().Equal(w.ModTime()) {
+		t.Errorf("%s: %v %d %v; want %v %d %v", name, g.Mode(), g.Size(), g.ModTime(), w.Mode(), w.Size(), w.ModTime())
+	}
+
+	switch {
+	case w.IsDir():
+		we, err := fs.ReadDir(want, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		ge, err := fs.ReadDir(got, name)
+		if err != nil || len(ge) != len(we) {
+			t.Errorf("%s: %d entries, %v; want %d", name, len(ge), err, len(we))
+
+			return
+		}
+
+		for i := range we {
+			if ge[i].Name() != we[i].Name() {
+				t.Errorf("%s: entry %d is %q; want %q", name, i, ge[i].Name(), we[i].Name())
+			}
+		}
+	case w.Mode()&fs.ModeSymlink != 0:
+		wl, err := fs.ReadLink(want, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if gl, err := fs.ReadLink(got, name); err != nil || gl != wl {
+			t.Errorf("%s: target %q, %v; want %q", name, gl, err, wl)
+		}
+	}
+}
