@@ -11,7 +11,7 @@
 # fuzzes with it. Each sets EROFS_REQUIRE_MKFS=1, so a missing binary fails
 # the leg instead of skipping.
 #
-# Minimal glue: GitHub's own actions pinned by SHA, aqua at .aqua/aqua.yaml's
+# Minimal glue: GitHub's own actions pinned by SHA, hermetic at .hermetic/hermetic.yaml's
 # pins, `just` running the recipes a laptop runs. No third-party actions,
 # hence no egress-filtering action either.
 name: ci
@@ -63,20 +63,17 @@ jobs:
 
       # The script reads its tarball pins through `limen pins get`, so the
       # pinned limen must be on PATH here as in every other job that runs it.
-      - name: Install aqua (pinned, checksum-verified)
-        uses: ./.github/actions/setup-aqua
+      - name: Install hermetic (pinned, verified)
+        uses: ./.github/actions/setup-hermetic
 
-      # The shared verify legs' aqua store and Go caches, same keys: this is
+      # The shared verify legs' hermetic store and Go caches, same keys: this is
       # the same runner again, with an image.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ env.AQUA_ROOT_DIR }}/pkgs
-          key: aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.aqua/aqua.yaml', '.aqua/aqua-checksums.json', '.limen/aqua-registry.yaml') }}
+          path: ${{ env.HERMETIC_ROOT_DIR }}/store/pkgs
+          key: aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.hermetic/hermetic.yaml', '.hermetic/aqua-checksums.json', '.limen/hermetic-registry.yaml') }}
           restore-keys: |
             aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-
-
-      - name: Install pinned tools
-        run: aqua install --only-link
 
       - id: gocache
         run: |
@@ -115,18 +112,15 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install aqua (pinned, checksum-verified)
-        uses: ./.github/actions/setup-aqua
+      - name: Install hermetic (pinned, verified)
+        uses: ./.github/actions/setup-hermetic
 
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ env.AQUA_ROOT_DIR }}/pkgs
-          key: aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.aqua/aqua.yaml', '.aqua/aqua-checksums.json', '.limen/aqua-registry.yaml') }}
+          path: ${{ env.HERMETIC_ROOT_DIR }}/store/pkgs
+          key: aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.hermetic/hermetic.yaml', '.hermetic/aqua-checksums.json', '.limen/hermetic-registry.yaml') }}
           restore-keys: |
             aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-
-
-      - name: Install pinned tools
-        run: aqua install --only-link
 
       - name: Cross-compile mkfs.erofs for windows
         run: .github/scripts/build-erofs-utils.sh windows
@@ -158,20 +152,17 @@ jobs:
           path: build/erofs-utils/bin
 
       # The shared verify lane's windows cache image, same prefix and hash:
-      # this is the windows-2025 leg again, with an image. Before setup-aqua,
-      # which takes the AQUA_ROOT_DIR it sets.
+      # this is the windows-2025 leg again, with an image. Before setup-hermetic,
+      # which takes the HERMETIC_ROOT_DIR it sets.
       - id: image
         uses: ./.github/actions/windows-cache-image
         with:
           mode: attach
           prefix: win-image-${{ runner.os }}-${{ runner.arch }}-
-          hash: ${{ hashFiles('.aqua/aqua.yaml', '.aqua/aqua-checksums.json', '.limen/aqua.yaml', '.limen/aqua-registry.yaml', '**/go.sum') }}
+          hash: ${{ hashFiles('.hermetic/hermetic.yaml', '.hermetic/aqua-checksums.json', '.limen/hermetic.yaml', '.limen/hermetic-registry.yaml', '**/go.sum') }}
 
-      - name: Install aqua (pinned, checksum-verified)
-        uses: ./.github/actions/setup-aqua
-
-      - name: Install pinned tools
-        run: aqua install --only-link
+      - name: Install hermetic (pinned, verified)
+        uses: ./.github/actions/setup-hermetic
 
       - name: Test
         env:
@@ -199,11 +190,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install aqua (pinned, checksum-verified)
-        uses: ./.github/actions/setup-aqua
-
-      - name: Install pinned tools
-        run: aqua install --only-link
+      - name: Install hermetic (pinned, verified)
+        uses: ./.github/actions/setup-hermetic
 
       - name: Build erofs-utils (interim)
         run: .github/scripts/build-erofs-utils.sh native

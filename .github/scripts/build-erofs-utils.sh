@@ -4,7 +4,7 @@
 # Installs into build/erofs-utils/ — the root .justfile prepends its bin/ to
 # limen's hermetic PATH; a /usr/local install is invisible to `just test`. The
 # apt/brew build-dependency packages are the one unpinned input. INTERIM until
-# a forkcloser erofs-utils release is pinned in .aqua/aqua.yaml.
+# a forkcloser erofs-utils release is pinned in .hermetic/hermetic.yaml.
 #
 # Usage:
 #   build-erofs-utils.sh native    build and install for this host (linux or
@@ -15,6 +15,12 @@
 # Set SKIP_DEPS=1 to skip the apt/brew build-dependency step (a developer
 # machine that already has autotools and lz4).
 set -euo pipefail
+
+# The build wants the runner's coreutils, autotools and compiler, not the
+# pinned tools: hermetic's links do not resolve outside the checkout, where the
+# build runs. limen, for pin below, still resolves through hermetic's bin
+# further down.
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
 MINGW_HOST="x86_64-w64-mingw32"
 
