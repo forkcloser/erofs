@@ -295,8 +295,18 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 		i.deviceIDMask = uint16(roundupPowerOfTwo(uint32(i.sb.ExtraDevices)+1) - 1)
 	}
 
-	if int(ondiskExtraDevices) != len(o.extraDevices) {
-		// TODO: Provide options for skipping extra devices and error out later?
+	// Given none of its extra devices, the image is opened as the kernel
+	// mounts it, in flatdev mode (super.c: erofs_scan_devices): the device
+	// table stands, and a read addressed to an extra device goes to the
+	// image itself at the slot's mapped address (data.c: erofs_map_dev).
+	// Each slot's reader is then that window of the image, bounded by the
+	// image's extent, so the metadata and whatever data the image holds are
+	// served, and data that lives in a blob that is not there fails where it
+	// is read. Devices given must match the count, as the kernel refuses
+	// the mount ("extra devices don't match").
+	flatdev := len(o.extraDevices) == 0 && ondiskExtraDevices > 0
+
+	if !flatdev && int(ondiskExtraDevices) != len(o.extraDevices) {
 		return nil, fmt.Errorf(
 			"%w: extra devices count %d does not match provided %d",
 			ErrInvalidSuperblock,
@@ -320,8 +330,16 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 
 			var slot disk.DeviceSlot
 			slot.Unmarshal(slotBuf[:])
+
+			var device io.ReaderAt
+			if flatdev {
+				device = i.flatWindow(r, slot.MappedBlkAddr)
+			} else {
+				device = o.extraDevices[idx]
+			}
+
 			i.devices[idx] = deviceInfo{
-				device:        o.extraDevices[idx],
+				device:        device,
 				mappedBlkAddr: slot.MappedBlkAddr,
 				blocks:        slot.Blocks,
 			}
@@ -818,6 +836,21 @@ func (img *image) locate(deviceID uint16, pa int64) (uint16, int64, error) {
 	}
 
 	return 0, pa, nil
+}
+
+// flatWindow is an extra device's reader in flatdev mode: the image from
+// the slot's mapped address to its end (the kernel adds the slot's uniaddr
+// to the address and reads the primary device), or to no end when the
+// image's extent is unknown, every read past it the image's end.
+func (img *image) flatWindow(r io.ReaderAt, mappedBlkAddr uint32) io.ReaderAt {
+	start := int64(mappedBlkAddr) << img.sb.BlkSizeBits
+	length := int64(math.MaxInt64) - start
+
+	if img.size > 0 {
+		length = max(img.size-start, 0)
+	}
+
+	return io.NewSectionReader(r, start, length)
 }
 
 // blockSize returns the filesystem block size.
