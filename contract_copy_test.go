@@ -3,6 +3,7 @@ package erofs_test
 import (
 	"archive/tar"
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -10,7 +11,9 @@ import (
 	"maps"
 	"os"
 	"path"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -19,6 +22,7 @@ import (
 	"github.com/forkcloser/erofs"
 	"github.com/forkcloser/erofs/internal/builder"
 	"github.com/forkcloser/erofs/internal/corpus"
+	"github.com/forkcloser/erofs/internal/disk"
 	"github.com/forkcloser/erofs/internal/erofsspec"
 )
 
@@ -144,8 +148,113 @@ func TestContractCopyFromImageIsTheImage(t *testing.T) {
 				ref := parseImage(t, c.im)
 				corpus.Check(t, c.im, ref, src.Tree, strings.HasPrefix(src.Name, "writer-"))
 				fsckUnlessPlatformLimit(t, c.im)
+				sameThroughThePackage(t, openImage(t, src), openImage(t, c.im))
 			})
 		}
+	}
+}
+
+// sameThroughThePackage walks want through the package's reader and holds
+// got to it: every name, its type and mode, every directory's listing and
+// every regular file's bytes, read through got's own devices (a copy's
+// data lives on the source image and its devices, under the slots the copy
+// wrote for them).
+func sameThroughThePackage(t *testing.T, want, got fs.FS) {
+	t.Helper()
+
+	if err := fs.WalkDir(want, ".", func(name string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		wi, err := fs.Lstat(want, name)
+		if err != nil {
+			return err
+		}
+
+		gi, err := fs.Lstat(got, name)
+		if err != nil {
+			t.Errorf("%s: the copy's Lstat: %v", name, err)
+
+			return nil
+		}
+
+		if wi.Mode() != gi.Mode() || wi.Size() != gi.Size() {
+			t.Errorf(
+				"%s: the copy's Lstat says %v %d, the source's %v %d",
+				name,
+				gi.Mode(),
+				gi.Size(),
+				wi.Mode(),
+				wi.Size(),
+			)
+
+			return nil
+		}
+
+		switch {
+		case d.IsDir():
+			we, err := fs.ReadDir(want, name)
+			if err != nil {
+				return err
+			}
+
+			ge, err := fs.ReadDir(got, name)
+			if err != nil {
+				t.Errorf("%s: the copy's ReadDir: %v", name, err)
+
+				return nil
+			}
+
+			if len(we) != len(ge) {
+				t.Errorf("%s: the copy lists %d entries, the source %d", name, len(ge), len(we))
+
+				return nil
+			}
+
+			for i := range we {
+				if we[i].Name() != ge[i].Name() || we[i].Type() != ge[i].Type() {
+					t.Errorf(
+						"%s: entry %d is %s %v in the copy, %s %v in the source",
+						name,
+						i,
+						ge[i].Name(),
+						ge[i].Type(),
+						we[i].Name(),
+						we[i].Type(),
+					)
+
+					return nil
+				}
+			}
+		case d.Type().IsRegular():
+			wd, err := fs.ReadFile(want, name)
+			if err != nil {
+				return err
+			}
+
+			gd, err := fs.ReadFile(got, name)
+			if err != nil {
+				t.Errorf("%s: the copy's ReadFile: %v", name, err)
+
+				return nil
+			}
+
+			if !bytes.Equal(wd, gd) {
+				t.Errorf(
+					"%s: the copy reads %d bytes that differ from the source's %d",
+					name,
+					len(gd),
+					len(wd),
+				)
+
+				return nil
+			}
+		}
+
+		return nil
+	}); err != nil {
+		t.Error(err)
 	}
 }
 
@@ -1314,6 +1423,715 @@ func copyAgrees(src []byte, srcExtra [][]byte, dst []byte, dstExtra [][]byte) st
 	return ""
 }
 
+// TestContractCopyRefusesAShortSourceRead: a generic source whose data
+// reader yields fewer bytes than its declared size is refused, at CopyFrom
+// or at the Close that lays the image out, whether the file would be
+// tail-packed (inline-sized) or laid out in blocks: no image is written
+// with the tail zero-filled.
+func TestContractCopyRefusesAShortSourceRead(t *testing.T) {
+	t.Parallel()
+
+	for _, size := range []int{100, 40000} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			t.Parallel()
+
+			src := fstest.MapFS{"f": &fstest.MapFile{
+				Data: make([]byte, size),
+				Mode: 0o644,
+				Sys:  &builder.Entry{Data: &shortDataReader{data: bytes.Repeat([]byte("A"), 10)}},
+			}}
+
+			// The bytes are read when the image is laid out, so the short
+			// read surfaces at Close when CopyFrom accepted the entry.
+			w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(corpus.BuildTime, 0))
+			if err := w.CopyFrom(src); err == nil {
+				if err := w.Close(); err == nil {
+					t.Fatal("a source short of its declared size was written as an image")
+				}
+			}
+		})
+	}
+}
+
+// shortDataReader declares more than it delivers.
+type shortDataReader struct {
+	data []byte
+	pos  int
+}
+
+func (s *shortDataReader) Read(p []byte) (int, error) {
+	if s.pos >= len(s.data) {
+		return 0, io.EOF
+	}
+
+	n := copy(p, s.data[s.pos:])
+	s.pos += n
+
+	return n, nil
+}
+
+// TestContractGenericDataRangeAtTheSmallestBlockSizeAndReindexed: the
+// DataRange contract at a 512-byte block, where a hole of one block sits
+// inside what a larger chunk would cover (the chunk size follows the block
+// size, not a floor), through Read and through WriteTo; and the image
+// copied metadata-only into another keeps the mapping, the first image
+// and its device becoming the copy's first and second devices.
+func TestContractGenericDataRangeAtTheSmallestBlockSizeAndReindexed(t *testing.T) {
+	t.Parallel()
+
+	const bs = 512
+
+	blob := make([]byte, 64*bs)
+	for i := range blob {
+		blob[i] = byte('a' + i/bs%26)
+	}
+
+	ranges := []erofs.DataRange{
+		{Offset: 0, Size: bs},
+		{Offset: -1, Size: bs},
+		{Offset: 2 * bs, Size: 2 * bs},
+	}
+
+	want := append(append(append([]byte{}, blob[:bs]...), make([]byte, bs)...), blob[2*bs:4*bs]...)
+
+	src := &dataRangerFS{deviceBlocks: 64, file: &dataRangerFileInfo{name: "f", size: 4 * bs, ranges: ranges}}
+	out := &testBuffer{}
+	w := erofs.Create(out, erofs.WithBlockSize(bs), erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if err := errors.Join(w.CopyFrom(src, erofs.MetadataOnly()), w.Close()); err != nil {
+		t.Fatal(err)
+	}
+
+	first := corpus.Image{Name: "ranges-512", Img: out.Bytes(), Blob: blob}
+
+	check := func(t *testing.T, im corpus.Image) {
+		t.Helper()
+
+		fsys := openImage(t, im)
+
+		got, err := fs.ReadFile(fsys, "f")
+		if err != nil || !bytes.Equal(got, want) {
+			t.Errorf("ReadFile: %d bytes, %v; want the data, a block of zeros, the data", len(got), err)
+		}
+
+		f, err := fsys.Open("f")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var through bytes.Buffer
+		if _, cerr := io.Copy(&through, f); cerr != nil || !bytes.Equal(through.Bytes(), want) {
+			t.Errorf("WriteTo: %d bytes, %v; want the data, a block of zeros, the data", through.Len(), cerr)
+		}
+
+		_ = f.Close()
+
+		fi, err := fs.Stat(fsys, "f")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var holes int64
+
+		for _, r := range fi.(interface{ DataRange() []erofs.DataRange }).DataRange() {
+			if r.Offset < 0 {
+				holes += r.Size
+			}
+		}
+
+		if holes != bs {
+			t.Errorf("DataRange holds %d bytes of holes, want one block of %d", holes, bs)
+		}
+
+		if err := corpus.FsckVerdict(t, im); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	check(t, first)
+
+	out2 := &testBuffer{}
+	w2 := erofs.Create(out2, erofs.WithBlockSize(bs), erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if err := errors.Join(w2.CopyFrom(openImage(t, first), erofs.MetadataOnly()), w2.Close()); err != nil {
+		t.Fatal(err)
+	}
+
+	check(t, corpus.Image{Name: "ranges-512-reindexed", Img: out2.Bytes(), Devices: [][]byte{first.Img, blob}})
+}
+
+// TestContractCopyRefusesWhatTheImageCannotHold: the copy's refusals of
+// what the format cannot carry, each as ErrInvalid: a device whose rdev
+// does not fit i_rdev's 32 bits; flat data of more blocks than 32-bit
+// block addresses name (a 2^44-byte file at a 4 KiB block), refused
+// before a byte is written; and a source image whose inode declares a
+// size past int64, refused by the metadata-only copy rather than taken
+// as a negative Size.
+func TestContractCopyRefusesWhatTheImageCannotHold(t *testing.T) {
+	t.Parallel()
+
+	t.Run("wide rdev", func(t *testing.T) {
+		t.Parallel()
+
+		src := fstest.MapFS{"dev": &fstest.MapFile{
+			Mode: fs.ModeDevice | fs.ModeCharDevice | 0o600, Sys: &erofs.Stat{Rdev: 1<<32 | 5},
+		}}
+
+		if err := erofs.Create(&testBuffer{}).CopyFrom(src); !errors.Is(err, erofs.ErrInvalid) {
+			t.Errorf("an rdev of 1<<32|5: %v, want ErrInvalid", err)
+		}
+	})
+
+	t.Run("blocks past 32 bits", func(t *testing.T) {
+		t.Parallel()
+
+		out := &testBuffer{}
+		w := erofs.Create(out, erofs.WithBlockSize(4096))
+
+		err := w.CopyFrom(hugeSourceFileFS{size: 1 << 44})
+		if err == nil {
+			err = w.Close()
+		}
+
+		if !errors.Is(err, erofs.ErrInvalid) {
+			t.Errorf("a %d byte file at a 4 KiB block: %v, want ErrInvalid", int64(1<<44), err)
+		}
+
+		if n := len(out.Bytes()); n != 0 {
+			t.Errorf("%d bytes written before the refusal, want none", n)
+		}
+	})
+
+	t.Run("xattr name the API refuses", func(t *testing.T) {
+		t.Parallel()
+
+		src := fstest.MapFS{
+			"f": &fstest.MapFile{
+				Data: []byte("f"),
+				Mode: 0o644,
+				Sys:  &builder.Entry{Xattrs: map[string]string{"user.": "v"}},
+			},
+		}
+
+		w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(corpus.BuildTime, 0))
+		if err := w.CopyFrom(src); !errors.Is(err, erofs.ErrInvalid) {
+			t.Errorf("a bare-prefix xattr name through CopyFrom: %v, want ErrInvalid", err)
+		}
+	})
+
+	t.Run("block size the source contradicts", func(t *testing.T) {
+		t.Parallel()
+
+		src := blockSizedSource{
+			dataRangerFS: &dataRangerFS{
+				deviceBlocks: 16,
+				file: &dataRangerFileInfo{
+					name:   "f",
+					size:   4096,
+					ranges: []erofs.DataRange{{Offset: 0, Size: 4096}},
+				},
+			},
+			bs: 4096,
+		}
+
+		w := erofs.Create(&testBuffer{}, erofs.WithBlockSize(512), erofs.WithBuildTime(corpus.BuildTime, 0))
+		if err := w.CopyFrom(src, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrInvalid) {
+			t.Errorf("a source declaring a 4096-byte block into a 512-byte-block writer: %v, want ErrInvalid", err)
+		}
+	})
+
+	t.Run("size past int64", func(t *testing.T) {
+		t.Parallel()
+
+		// An mtime off the build time gets f an extended inode, whose
+		// i_size is 64 bits wide.
+		at := time.Unix(corpus.BuildTime+1000, 0)
+		img := writeImage(
+			t,
+			[]corpus.Node{{Path: "f", Type: tar.TypeReg, Mode: 0o644, Data: []byte("hello"), Sec: at.Unix()}},
+		)
+		ref := parseImage(t, corpus.Image{Name: "wide-size", Img: img})
+
+		in, err := ref.Resolve("f", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !in.Extended {
+			t.Fatal("f got a compact inode; the case needs an extended one")
+		}
+
+		loc := int64(ref.Super.MetaBlkAddr)<<ref.Super.BlockBits + int64(in.Nid)*32
+		binary.LittleEndian.PutUint64(img[loc+8:], 1<<63)
+
+		src, err := erofs.Open(bytes.NewReader(img))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		dst := erofs.Create(&testBuffer{})
+		if err := dst.CopyFrom(src, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrInvalid) {
+			fi, serr := dst.Stat("f")
+			t.Errorf("an i_size of 1<<63: CopyFrom %v, want ErrInvalid (Stat: %v, %v)", err, fi, serr)
+		}
+	})
+}
+
+type hugeSourceFileFS struct{ size int64 }
+
+func (h hugeSourceFileFS) Open(name string) (fs.File, error) {
+	switch name {
+	case ".":
+		return hugeSourceFile{hugeSourceFileInfo{name: ".", mode: fs.ModeDir | 0o755}}, nil
+	case "huge":
+		return hugeSourceFile{h.file()}, nil
+	}
+
+	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+}
+
+func (h hugeSourceFileFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	if name != "." {
+		return nil, &fs.PathError{Op: "readdir", Path: name, Err: fs.ErrNotExist}
+	}
+
+	return []fs.DirEntry{fs.FileInfoToDirEntry(h.file())}, nil
+}
+
+func (h hugeSourceFileFS) file() hugeSourceFileInfo {
+	return hugeSourceFileInfo{name: "huge", size: h.size, mode: 0o644}
+}
+
+type hugeSourceFile struct{ info hugeSourceFileInfo }
+
+func (f hugeSourceFile) Stat() (fs.FileInfo, error) { return f.info, nil }
+func (hugeSourceFile) Read([]byte) (int, error)     { return 0, io.EOF }
+func (hugeSourceFile) Close() error                 { return nil }
+
+type hugeSourceFileInfo struct {
+	name string
+	size int64
+	mode fs.FileMode
+}
+
+func (i hugeSourceFileInfo) Name() string      { return i.name }
+func (i hugeSourceFileInfo) Size() int64       { return i.size }
+func (i hugeSourceFileInfo) Mode() fs.FileMode { return i.mode }
+func (hugeSourceFileInfo) ModTime() time.Time  { return time.Unix(0, 0) }
+func (i hugeSourceFileInfo) IsDir() bool       { return i.mode.IsDir() }
+func (hugeSourceFileInfo) Sys() any            { return nil }
+
+// TestContractGenericEmptyDataRangeIsAllHoles: a generic source whose
+// DataRange() returns no ranges is a file with no mapping, stored as the
+// all-hole chunk-based inode a source without DataRange() gets ("files
+// without DataRange() ... all holes"), under the chunked-file feature:
+// zeros through the reference and the package, holes summing to its size,
+// never a refusal for ranges that do not add up.
+func TestContractGenericEmptyDataRangeIsAllHoles(t *testing.T) {
+	t.Parallel()
+
+	const size = 3*4096 + 100
+
+	src := &dataRangerFS{
+		deviceBlocks: 16,
+		file:         &dataRangerFileInfo{name: "f", size: size, ranges: []erofs.DataRange{}},
+	}
+	out := &testBuffer{}
+	w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if err := errors.Join(w.CopyFrom(src, erofs.MetadataOnly()), w.Close()); err != nil {
+		t.Fatalf("a source with an empty DataRange: %v", err)
+	}
+
+	im := corpus.Image{Name: "empty-ranges", Img: out.Bytes(), Blob: make([]byte, 16*4096)}
+	ref := parseImage(t, im)
+
+	if ref.Super.FeatureIncompat&disk.FeatureIncompatChunkedFile == 0 {
+		t.Errorf("feature_incompat %#x lacks the chunked-file bit", ref.Super.FeatureIncompat)
+	}
+
+	in, err := ref.Resolve("f", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if in.Layout != erofsspec.LayoutChunkBased {
+		t.Errorf("layout %d, want chunk-based", in.Layout)
+	}
+
+	fsys := openImage(t, im)
+
+	got, err := fs.ReadFile(fsys, "f")
+	if err != nil || !bytes.Equal(got, make([]byte, size)) {
+		t.Errorf("ReadFile: %d bytes, %v; want %d zeros", len(got), err, size)
+	}
+
+	fi, err := fs.Stat(fsys, "f")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var holes int64
+
+	for _, r := range fi.(interface{ DataRange() []erofs.DataRange }).DataRange() {
+		if r.Offset >= 0 {
+			t.Errorf("DataRange maps %+v for a file with no ranges", r)
+		}
+
+		holes += r.Size
+	}
+
+	if holes != size {
+		t.Errorf("holes sum to %d, want %d", holes, size)
+	}
+
+	if err := corpus.FsckVerdict(t, im); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestContractMetadataOnlyCopyOfAChunkOnTheSourceImageItself: a source
+// whose chunk names device 0, the source image's own blocks, copied
+// metadata-only into a writer with its own data file: the copy's devices
+// are the writer's data file, the source image and the source's device,
+// in that order, and the copied file reads the source image's block, not
+// the data file's block at the same address. The source image's slot in
+// the copy has mapped address 0, which a device-0 address is never
+// matched against (erofs_map_dev skips a slot without uniaddr), so the
+// writer's own file keeps its bytes.
+func TestContractMetadataOnlyCopyOfAChunkOnTheSourceImageItself(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	srcDF, err := os.Create(filepath.Join(dir, "src.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, werr := srcDF.Write(bytes.Repeat([]byte{0x11}, 4096)); werr != nil {
+		t.Fatal(werr)
+	}
+
+	srcOut := &testBuffer{}
+	sw := erofs.Create(srcOut, erofs.WithDataFile(srcDF), erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	src := chunkMapSourceFS{name: "target", chunks: []builder.Chunk{{PhysicalBlock: 0, Count: 1, DeviceID: 0}}}
+	if cerr := errors.Join(sw.CopyFrom(src, erofs.MetadataOnly()), sw.Close(), srcDF.Close()); cerr != nil {
+		t.Fatal(cerr)
+	}
+
+	srcBlob, err := os.ReadFile(filepath.Join(dir, "src.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	source := openImage(t, corpus.Image{Name: "chunk-on-image", Img: srcOut.Bytes(), Blob: srcBlob})
+
+	dstDF, err := os.Create(filepath.Join(dir, "dst.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dstOut := &testBuffer{}
+	dw := erofs.Create(dstOut, erofs.WithDataFile(dstDF), erofs.WithBuildTime(corpus.BuildTime, 0))
+	mustCreate(t, dw, "other", bytes.Repeat([]byte{0xEE}, 4096))
+
+	if cerr := errors.Join(dw.CopyFrom(source, erofs.MetadataOnly()), dw.Close(), dstDF.Close()); cerr != nil {
+		t.Fatal(cerr)
+	}
+
+	dstBlob, err := os.ReadFile(filepath.Join(dir, "dst.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	copied := corpus.Image{
+		Name:    "chunk-on-image-copy",
+		Img:     dstOut.Bytes(),
+		Devices: [][]byte{dstBlob, srcOut.Bytes(), srcBlob},
+	}
+
+	var sb disk.SuperBlock
+
+	sb.Unmarshal(copied.Img[disk.SuperBlockOffset:])
+
+	zero := false
+
+	for i := range int(sb.ExtraDevices) {
+		var slot disk.DeviceSlot
+
+		slot.Unmarshal(copied.Img[int(sb.DevtSlotOff)*disk.SizeDeviceSlot+i*disk.SizeDeviceSlot:])
+		zero = zero || slot.MappedBlkAddr == 0
+	}
+
+	if !zero {
+		t.Fatal("no slot of the copy has mapped address 0: the shape this case holds is gone")
+	}
+
+	parseImage(t, copied)
+	fsys := openImage(t, copied)
+
+	if got, err := fs.ReadFile(fsys, "target"); err != nil || !bytes.Equal(got, srcOut.Bytes()[:4096]) {
+		t.Errorf("target: %d bytes, %v; want the source image's first block", len(got), err)
+	}
+
+	if got, err := fs.ReadFile(fsys, "other"); err != nil || !bytes.Equal(got, bytes.Repeat([]byte{0xEE}, 4096)) {
+		t.Errorf("other: %d bytes, %v; want its own 0xEE block", len(got), err)
+	}
+}
+
+// chunkMapSourceFS is a source of one 4096-byte regular file whose chunk map
+// is supplied verbatim, for a mapping the public API would not build.
+type chunkMapSourceFS struct {
+	name   string
+	chunks []builder.Chunk
+}
+
+type chunkMapSourceInfo struct {
+	name   string
+	dir    bool
+	chunks []builder.Chunk
+}
+
+func (i chunkMapSourceInfo) Name() string { return i.name }
+func (chunkMapSourceInfo) Size() int64    { return 4096 }
+
+func (i chunkMapSourceInfo) Mode() fs.FileMode {
+	if i.dir {
+		return fs.ModeDir | 0o755
+	}
+
+	return 0o644
+}
+
+func (chunkMapSourceInfo) ModTime() time.Time { return time.Unix(0, 0) }
+func (i chunkMapSourceInfo) IsDir() bool      { return i.dir }
+
+func (i chunkMapSourceInfo) Sys() any {
+	if i.dir {
+		return &builder.Entry{Nlink: 2}
+	}
+
+	return &builder.Entry{Chunks: i.chunks}
+}
+
+type chunkMapSourceDirent struct{ info chunkMapSourceInfo }
+
+func (d chunkMapSourceDirent) Name() string               { return d.info.name }
+func (d chunkMapSourceDirent) IsDir() bool                { return d.info.dir }
+func (d chunkMapSourceDirent) Type() fs.FileMode          { return d.info.Mode().Type() }
+func (d chunkMapSourceDirent) Info() (fs.FileInfo, error) { return d.info, nil }
+
+type chunkMapSourceDir struct{ fsys chunkMapSourceFS }
+
+func (chunkMapSourceDir) Close() error             { return nil }
+func (chunkMapSourceDir) Read([]byte) (int, error) { return 0, fs.ErrInvalid }
+
+func (chunkMapSourceDir) Stat() (fs.FileInfo, error) {
+	return chunkMapSourceInfo{name: ".", dir: true}, nil
+}
+
+func (d chunkMapSourceDir) ReadDir(int) ([]fs.DirEntry, error) {
+	return []fs.DirEntry{chunkMapSourceDirent{chunkMapSourceInfo{name: d.fsys.name, chunks: d.fsys.chunks}}}, nil
+}
+
+func (fsys chunkMapSourceFS) Open(name string) (fs.File, error) {
+	if name == "." {
+		return chunkMapSourceDir{fsys}, nil
+	}
+
+	return nil, fs.ErrNotExist
+}
+
+// TestContractMetadataOnlyCopyRefusesWhatStatRefuses: the metadata-only
+// copy reads the source's inodes itself and refuses what the reader's Stat
+// refuses, in its class: a dirent whose file type disagrees with its
+// inode's type (a regular file the dirent calls a directory), an inode
+// whose type bits name no type beside a dirent of type zero, and a compact
+// flat-inline inode at the null address, each ErrCorrupt, as the kernel's
+// iget ("bogus i_mode"), the reader's lookup and erofs_map_blocks refuse
+// them.
+func TestContractMetadataOnlyCopyRefusesWhatStatRefuses(t *testing.T) {
+	t.Parallel()
+
+	img := writeImage(t, []corpus.Node{{Path: "a", Type: tar.TypeReg, Mode: 0o644, Data: []byte("a")}})
+
+	// The root's dirents sit beside its inode: ".", ".." then "a", twelve
+	// bytes each, the file type at byte ten.
+	ref := parseImage(t, corpus.Image{Name: "typed", Img: img})
+
+	root, err := ref.Inode(ref.Super.RootNid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rootSize := disk.SizeInodeCompact
+	if root.Extended {
+		rootSize = disk.SizeInodeExtended
+	}
+
+	at := inodeOffset(t, img, ".") + rootSize + 2*disk.SizeDirent + 10
+	if img[at] != disk.FileTypeReg {
+		t.Fatalf("a's dirent file type is %d, want %d", img[at], disk.FileTypeReg)
+	}
+
+	disagree := bytes.Clone(img)
+	disagree[at] = disk.FileTypeDir
+
+	noType := bytes.Clone(img)
+	noType[at] = 0
+	ino := inodeOffset(t, noType, "a")
+	binary.LittleEndian.PutUint16(noType[ino+4:], binary.LittleEndian.Uint16(noType[ino+4:])&^disk.StatTypeMask)
+
+	// A flat-inline file's whole blocks are read at its start block whatever
+	// it holds (erofs_map_blocks maps a hole for the null address on a
+	// flat-plain inode only), so a compact flat-inline inode at the null
+	// address is refused where every address past the devices is, and the
+	// copy refuses with it rather than writing a hole. No tool writes one:
+	// it is small-b512's "multi", five blocks and a tail, rewritten as a
+	// compact inode at the null address.
+	var nullInline []byte
+
+	for _, src := range corpus.Committed(t) {
+		if src.Name != "small-b512" {
+			continue
+		}
+
+		nullInline = bytes.Clone(src.Img)
+		at := inodeOffset(t, nullInline, "multi")
+
+		format, size := nullInline[at], binary.LittleEndian.Uint64(nullInline[at+8:])
+		if format != disk.InodeFormatExtended|disk.LayoutFlatInline<<1 || size != 3000 {
+			t.Fatalf("multi's inode reads i_format %#x, i_size %d; want an extended flat-inline inode of 3000 bytes",
+				format, size)
+		}
+
+		ino := nullInline[at : at+disk.SizeInodeCompact]
+		clear(ino)
+		ino[0] = disk.LayoutFlatInline << 1
+		binary.LittleEndian.PutUint16(ino[4:], 0o100644)
+		binary.LittleEndian.PutUint16(ino[6:], 1)
+		binary.LittleEndian.PutUint32(ino[8:], 3000)
+		binary.LittleEndian.PutUint32(ino[16:], disk.NullAddr)
+	}
+
+	if nullInline == nil {
+		t.Fatal("small-b512 is not among the committed images")
+	}
+
+	shapes := map[string][]byte{
+		"dirent says directory":           disagree,
+		"no type at all":                  noType,
+		"inline file at the null address": nullInline,
+	}
+
+	for name, edited := range shapes {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			source, err := erofs.Open(bytes.NewReader(edited))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			entry := "a"
+			if name == "inline file at the null address" {
+				entry = "multi"
+			}
+
+			if _, err := fs.Lstat(source, entry); !errors.Is(err, erofs.ErrCorrupt) {
+				t.Fatalf("Lstat %s: %v, want ErrCorrupt (the premise)", entry, err)
+			}
+
+			w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(corpus.BuildTime, 0))
+			if err := w.CopyFrom(source, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrCorrupt) {
+				t.Errorf("CopyFrom(MetadataOnly): %v, want ErrCorrupt", err)
+			}
+		})
+	}
+}
+
+// TestContractMetadataOnlyCopyRefusesWhatStatRefusesAsNotImplemented: the
+// metadata-only copy refuses, in Stat's class, an inode the reader does
+// not implement: a chunk format word with a bit outside
+// EROFS_CHUNK_FORMAT_ALL (the kernel's "unsupported chunk format",
+// EOPNOTSUPP at iget), whether the fuzzer's (small-blobdev-512's d/c, a
+// character device whose i_u 0x501 becomes a chunk format when its
+// i_format names the chunk-based layout) or a copy's own chunk-based
+// inode with one reserved bit set; each ErrNotImplemented from Lstat and
+// from CopyFrom(MetadataOnly), never copied into an image nothing mounts.
+func TestContractMetadataOnlyCopyRefusesWhatStatRefusesAsNotImplemented(t *testing.T) {
+	t.Parallel()
+
+	var fuzzed corpus.Image
+
+	for _, src := range corpus.Committed(t) {
+		if src.Name == "small-blobdev-512" {
+			fuzzed = corpus.Image{Name: "reserved-chunk-format", Img: bytes.Clone(src.Img), Blob: src.Blob}
+		}
+	}
+
+	if fuzzed.Img == nil {
+		t.Fatal("small-blobdev-512 is not among the committed images")
+	}
+
+	fuzzed.Img[1632] = 0x19
+	fuzzed.Img[1610] = 0x37
+
+	out := &testBuffer{}
+	w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	chunked := openImage(t, corpus.Image{
+		Name: "own-chunk",
+		Img:  assembledFile(t, 12, true, false, []byte("data")),
+	})
+	if err := errors.Join(w.CopyFrom(chunked, erofs.MetadataOnly()), w.Close()); err != nil {
+		t.Fatal(err)
+	}
+
+	own := out.Bytes()
+	at := inodeOffset(t, own, "f")
+
+	if layout := (own[at] & disk.InodeFormatLayoutMask) >> 1; layout != disk.LayoutChunkBased {
+		t.Fatalf("the copy's f has layout %d, want chunk-based", layout)
+	}
+
+	own[at+17] |= 0x01
+
+	for _, c := range []struct {
+		name  string
+		im    corpus.Image
+		entry string
+	}{
+		{"the fuzzer's device turned chunk-based", fuzzed, "d/c"},
+		{"a copy's own chunk inode with a reserved bit", corpus.Image{Name: "own-chunk-reserved", Img: own}, "f"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			var opts []erofs.OpenOpt
+			for _, d := range c.im.Extra() {
+				opts = append(opts, erofs.WithExtraDevices(bytes.NewReader(d)))
+			}
+
+			source, err := erofs.Open(bytes.NewReader(c.im.Img), opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := fs.Lstat(source, c.entry); !errors.Is(err, erofs.ErrNotImplemented) {
+				t.Fatalf("Lstat %s: %v, want ErrNotImplemented (the premise)", c.entry, err)
+			}
+
+			w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(corpus.BuildTime, 0))
+			if err := w.CopyFrom(source, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrNotImplemented) {
+				t.Errorf("CopyFrom(MetadataOnly): %v, want ErrNotImplemented", err)
+			}
+		})
+	}
+}
+
 // The generic sources with a DataRange, for the DataRange contract.
 
 // dataRangerFileInfo is a test fs.FileInfo whose DataRange() returns
@@ -1345,6 +2163,16 @@ type dataRangerFS struct {
 }
 
 func (f *dataRangerFS) DeviceBlocks() uint64 { return f.deviceBlocks }
+
+// blockSizedSource is a generic source that declares a block size, as an
+// image source does.
+type blockSizedSource struct {
+	*dataRangerFS
+
+	bs uint32
+}
+
+func (b blockSizedSource) BlockSize() uint32 { return b.bs }
 
 func (f *dataRangerFS) Open(name string) (fs.File, error) {
 	if name == "." {

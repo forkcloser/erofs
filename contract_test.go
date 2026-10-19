@@ -88,8 +88,8 @@ func openImage(tb testing.TB, im corpus.Image) fs.FS {
 	tb.Helper()
 
 	var opts []erofs.OpenOpt
-	if im.Blob != nil {
-		opts = append(opts, erofs.WithExtraDevices(bytes.NewReader(im.Blob)))
+	for _, d := range im.Extra() {
+		opts = append(opts, erofs.WithExtraDevices(bytes.NewReader(d)))
 	}
 
 	fsys, err := erofs.Open(bytes.NewReader(im.Img), opts...)
@@ -2097,6 +2097,66 @@ func TestContractReaderRefusesWhatLiesPastAnUnsizedReadersEnd(t *testing.T) {
 				judge(t, "ReadDir "+fsName(name), spans[name].read, found(name), cut, err, len(ents) == n)
 			}
 		})
+	}
+}
+
+// countingReaderAt counts the ReadAt calls an image receives.
+type countingReaderAt struct {
+	r     io.ReaderAt
+	calls int
+}
+
+func (c *countingReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	c.calls++
+
+	return c.r.ReadAt(p, off)
+}
+
+// TestContractReaderLargeReadIsNotFannedOut: one Read of a whole flat file
+// of many blocks reaches the ReaderAt a small constant number of times,
+// never once per block: the I/O a consumer pays for a large buffer is the
+// buffer's, not the block size's.
+func TestContractReaderLargeReadIsNotFannedOut(t *testing.T) {
+	t.Parallel()
+
+	const size = 8 << 20
+
+	img := writeImage(
+		t,
+		[]corpus.Node{{Path: "big", Type: tar.TypeReg, Mode: 0o644, Data: bytes.Repeat([]byte("x"), size)}},
+	)
+	c := &countingReaderAt{r: bytes.NewReader(img)}
+
+	fsys, err := erofs.Open(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := fsys.Open("big")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c.calls = 0
+	dst := make([]byte, size)
+
+	n, err := f.Read(dst)
+	if err != nil && !errors.Is(err, io.EOF) {
+		t.Fatal(err)
+	}
+
+	_ = f.Close()
+
+	if n != size || !bytes.Equal(dst, bytes.Repeat([]byte("x"), size)) {
+		t.Errorf("one Read returned %d bytes of %d", n, size)
+	}
+
+	if c.calls > 4 {
+		t.Errorf(
+			"one Read of a %d byte file took %d ReadAt calls; want a small constant, not one per block",
+			size,
+			c.calls,
+		)
 	}
 }
 

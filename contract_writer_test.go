@@ -19,6 +19,7 @@ import (
 
 	"github.com/forkcloser/erofs"
 	"github.com/forkcloser/erofs/internal/corpus"
+	"github.com/forkcloser/erofs/internal/disk"
 	"github.com/forkcloser/erofs/internal/erofsspec"
 )
 
@@ -581,6 +582,45 @@ func TestContractWriterChown(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestContractWriterChownRefusedLeavesTheIds: a Chown refused as
+// fs.ErrInvalid changes nothing: the ids set before it stand in the image.
+func TestContractWriterChownRefusedLeavesTheIds(t *testing.T) {
+	t.Parallel()
+
+	b := wBuild(t, func(w *erofs.Writer) {
+		f, err := w.Create("f")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := f.Chown(1, 2); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := f.Chown(-1, 0); !errors.Is(err, fs.ErrInvalid) {
+			t.Fatalf("File.Chown(-1, 0): %v, want ErrInvalid", err)
+		}
+
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		for _, ids := range [][2]int{{0, -1}, {math.MaxUint32 + 1, 0}} {
+			if err := w.Chown("f", ids[0], ids[1]); !errors.Is(err, fs.ErrInvalid) {
+				t.Fatalf("Writer.Chown(%d, %d): %v, want ErrInvalid", ids[0], ids[1], err)
+			}
+		}
+	})
+
+	if in := b.inodeOf(t, "f"); in.UID != 1 || in.GID != 2 {
+		t.Errorf("image has %d:%d after the refused chowns, want 1:2", in.UID, in.GID)
+	}
+
+	if _, st := b.statOf(t, "f"); st.UID != 1 || st.GID != 2 {
+		t.Errorf("Lstat has %d:%d after the refused chowns, want 1:2", st.UID, st.GID)
 	}
 }
 
@@ -1228,6 +1268,15 @@ func TestContractWriterHoles(t *testing.T) {
 		info, _ := b.statOf(t, name)
 		checkRanges(t, b.fsys, b.ref, name, info, in)
 	}
+
+	// A chunk-based inode, every chunk a hole or not, is under the
+	// chunked-file feature: the superblock declares it.
+	if b.ref.Super.FeatureIncompat&disk.FeatureIncompatChunkedFile == 0 {
+		t.Errorf(
+			"feature_incompat %#x lacks the chunked-file bit for an image with a chunk-based inode",
+			b.ref.Super.FeatureIncompat,
+		)
+	}
 }
 
 // TestContractWriterBlockSizeOption: "An invalid size causes subsequent
@@ -1358,6 +1407,413 @@ func TestContractWriterRemoveAndLink(t *testing.T) {
 		if _, err := fs.Lstat(b.fsys, gone); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("%s: Lstat %v after Remove, want ErrNotExist", gone, err)
 		}
+	}
+}
+
+// TestContractWriterRemoveAllAndTheNamesOfOneInode: the Remove and
+// RemoveAll docs over what they leave behind: Remove of a symlink takes the
+// name and leaves its target; Remove of every name of one inode takes them
+// all; RemoveAll of a file is Remove; RemoveAll of a directory takes the
+// subtree and nothing beside it, and a name outside the subtree of an
+// inode linked inside it stands with a count of one; neither touches the
+// file open for writing until its Close ("close it before you remove").
+func TestContractWriterRemoveAllAndTheNamesOfOneInode(t *testing.T) {
+	t.Parallel()
+
+	var open, openAll, closed error
+
+	b := wBuild(t, func(w *erofs.Writer) {
+		mustCreate(t, w, "target", []byte("t"))
+
+		if err := errors.Join(w.Symlink("target", "link"), w.Remove("link")); err != nil {
+			t.Fatal(err)
+		}
+
+		mustCreate(t, w, "orig", []byte("o"))
+
+		if err := errors.Join(w.Link("orig", "alias"), w.Remove("orig"), w.Remove("alias")); err != nil {
+			t.Fatal(err)
+		}
+
+		mustCreate(t, w, "drop", []byte("d"))
+		mustCreate(t, w, "keep", []byte("k"))
+
+		if err := w.RemoveAll("drop"); err != nil {
+			t.Fatal(err)
+		}
+
+		for _, d := range []string{"scratch", "scratch/sub", "beside"} {
+			if err := w.Mkdir(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		mustCreate(t, w, "scratch/sub/deep", []byte("x"))
+		mustCreate(t, w, "scratch/top", []byte("y"))
+		mustCreate(t, w, "beside/kept", []byte("z"))
+
+		if err := errors.Join(w.Link("beside/kept", "scratch/alias"), w.Link("scratch/top", "beside/in")); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := w.RemoveAll("scratch"); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := w.Mkdir("d", 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		f, err := w.Create("d/open")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		open, openAll = w.Remove("d/open"), w.RemoveAll("d")
+
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		closed = w.RemoveAll("d")
+	})
+
+	if open == nil || openAll == nil {
+		t.Errorf("Remove %v and RemoveAll %v over the file open for writing: want both refused", open, openAll)
+	}
+
+	if closed != nil {
+		t.Errorf("RemoveAll after the file's Close: %v", closed)
+	}
+
+	for _, gone := range []string{"link", "orig", "alias", "drop", "scratch", "scratch/sub", "scratch/sub/deep", "scratch/top", "scratch/alias", "d", "d/open"} {
+		if _, err := fs.Lstat(b.fsys, gone); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s: Lstat %v, want ErrNotExist", gone, err)
+		}
+	}
+
+	for name, want := range map[string]string{"target": "t", "keep": "k", "beside/kept": "z", "beside/in": "y"} {
+		if got, err := fs.ReadFile(b.fsys, name); err != nil || string(got) != want {
+			t.Errorf("%s reads %q, %v; want %q", name, got, err, want)
+		}
+	}
+
+	for _, name := range []string{"beside/kept", "beside/in"} {
+		if in := b.inodeOf(t, name); in.Nlink != 1 {
+			t.Errorf("%s nlink %d after its other name went with RemoveAll, want 1", name, in.Nlink)
+		}
+	}
+
+	var names []string
+
+	if err := b.ref.Walk(func(e erofsspec.Entry) error {
+		names = append(names, e.Path)
+
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	slices.Sort(names)
+
+	if want := []string{"beside", "beside/in", "beside/kept", "keep", "target"}; !slices.Equal(names, want) {
+		t.Errorf("the image holds %q, want %q", names, want)
+	}
+}
+
+// TestContractWriterLinkOfSpecialInodes: Link "creates a hard link"
+// whatever the target's type but a directory: a symlink and a device
+// linked share one inode with a count of two, the new name's dirent type
+// is the target's, the alias resolves and reports as the target does; a
+// link of a link is a link to the final inode; metadata set through an
+// alias is the inode's, read back through every name; Link over an
+// existing name and at "/" is refused; and a linked tree built
+// twice is the same bytes, as is one whose original name is removed
+// (the surviving names stand in for it the same way each time).
+func TestContractWriterLinkOfSpecialInodes(t *testing.T) {
+	t.Parallel()
+
+	var over, atRoot error
+
+	b := wBuild(t, func(w *erofs.Writer) {
+		if err := errors.Join(
+			w.Symlink("target", "sym"),
+			w.Link("sym", "sym2"),
+			w.Mknod("null", fs.ModeDevice|fs.ModeCharDevice|0o666, 1<<8|3),
+			w.Link("null", "null2"),
+			w.Mkdir("dir", 0o755),
+		); err != nil {
+			t.Fatal(err)
+		}
+
+		mustCreate(t, w, "file", []byte("f"))
+
+		over, atRoot = w.Link("file", "dir"), w.Link("file", "/")
+	})
+
+	if over == nil || atRoot == nil {
+		t.Errorf("Link over an existing name: %v, at the root: %v; want both refused", over, atRoot)
+	}
+
+	root, err := b.ref.Inode(b.ref.Super.RootNid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ents, err := b.ref.Dirents(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	types := map[string]uint8{}
+	for _, e := range ents {
+		types[string(e.Name)] = e.Type
+	}
+
+	for _, c := range []struct {
+		orig, alias string
+		dtype       uint8
+	}{{"sym", "sym2", erofsspec.TypeSymlink}, {"null", "null2", erofsspec.TypeChar}} {
+		o, a := b.inodeOf(t, c.orig), b.inodeOf(t, c.alias)
+		if o.Nid != a.Nid || a.Nlink != 2 {
+			t.Errorf(
+				"%s/%s: nids %d/%d, nlink %d; want one inode with two names",
+				c.orig,
+				c.alias,
+				o.Nid,
+				a.Nid,
+				a.Nlink,
+			)
+		}
+
+		if types[c.alias] != c.dtype || types[c.orig] != c.dtype {
+			t.Errorf("%s/%s: dirent types %d/%d, want %d", c.orig, c.alias, types[c.orig], types[c.alias], c.dtype)
+		}
+
+		oi, ost := b.statOf(t, c.orig)
+		ai, ast := b.statOf(t, c.alias)
+
+		if oi.Mode() != ai.Mode() || ost.Ino != ast.Ino || ost.Rdev != ast.Rdev || ast.Nlink != 2 {
+			t.Errorf("%s/%s: Lstat mode %v/%v ino %d/%d rdev %d/%d nlink %d", c.orig, c.alias,
+				oi.Mode(), ai.Mode(), ost.Ino, ast.Ino, ost.Rdev, ast.Rdev, ast.Nlink)
+		}
+	}
+
+	// A link of a link is a link to the final inode, no chains: three names,
+	// one nid, a count of three. And a hard-link name is its inode: Chown,
+	// Chmod, Chtimes and Setxattr through an alias land on the one inode
+	// every name reports.
+	at := time.Unix(corpus.BuildTime+777, 0)
+	chain := wBuild(t, func(w *erofs.Writer) {
+		mustCreate(t, w, "data", []byte("shared"))
+
+		if err := errors.Join(
+			w.Link("data", "hard"),
+			w.Link("hard", "hard3"),
+			w.Chown(
+				"hard",
+				7,
+				8,
+			),
+			w.Chmod("hard3", 0o640),
+			w.Chtimes("hard", at, at),
+			w.Setxattr("hard3", "user.k", "v"),
+		); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	for _, name := range []string{"data", "hard", "hard3"} {
+		in := chain.inodeOf(t, name)
+		if in.Nid != chain.inodeOf(t, "data").Nid || in.Nlink != 3 {
+			t.Errorf("%s: nid %d nlink %d, want one inode with three names", name, in.Nid, in.Nlink)
+		}
+
+		if in.UID != 7 || in.GID != 8 || in.Mode&0o777 != 0o640 || in.Mtime != at.Unix() || len(in.Xattrs) != 1 {
+			t.Errorf("%s: %d:%d mode %#o mtime %d xattrs %d; want 7:8 0640 %d 1, set through the aliases",
+				name, in.UID, in.GID, in.Mode&0o777, in.Mtime, len(in.Xattrs), at.Unix())
+		}
+	}
+
+	if got, err := fs.ReadFile(b.fsys, "sym2"); err != nil || string(got) != "t" {
+		// Through the symlink's alias to a file named target: none here,
+		// so the alias resolves to ErrNotExist like the original.
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("sym2 resolves to %q, %v; want the original's ErrNotExist", got, err)
+		}
+	}
+
+	build := func(removeOrig bool) []byte {
+		out := &testBuffer{}
+		w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+		mustCreate(t, w, "orig", []byte("shared"))
+
+		for _, l := range []string{"z", "m", "a", "dir/x"} {
+			if l == "dir/x" {
+				if err := w.Mkdir("dir", 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if err := w.Link("orig", l); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		if removeOrig {
+			if err := w.Remove("orig"); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		return out.Bytes()
+	}
+
+	for _, removeOrig := range []bool{false, true} {
+		if !bytes.Equal(build(removeOrig), build(removeOrig)) {
+			t.Errorf("two builds of the linked tree (original removed: %v) differ", removeOrig)
+		}
+	}
+
+	im := corpus.Image{Name: "promoted", Img: build(true)}
+	ref := parseImage(t, im)
+
+	for _, name := range []string{"z", "m", "a", "dir/x"} {
+		in, err := lookupNoFollow(ref, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if in.Nlink != 4 {
+			t.Errorf("%s nlink %d after the original name was removed, want 4", name, in.Nlink)
+		}
+	}
+}
+
+// TestContractWriterParentMustBeADirectory: an entry beneath a regular
+// file is refused as ErrNotDirectory by every method that creates one
+// (Create, Mkdir, Symlink, Mknod, Link), and the image holds no trace of
+// it: the file is a leaf in the reference's walk.
+func TestContractWriterParentMustBeADirectory(t *testing.T) {
+	t.Parallel()
+
+	errs := map[string]error{}
+
+	b := wBuild(t, func(w *erofs.Writer) {
+		mustCreate(t, w, "f", []byte("f"))
+		mustCreate(t, w, "g", []byte("g"))
+
+		_, errs["Create"] = w.Create("f/child")
+		errs["Mkdir"] = w.Mkdir("f/child", 0o755)
+		errs["Symlink"] = w.Symlink("g", "f/child")
+		errs["Mknod"] = w.Mknod("f/child", fs.ModeNamedPipe|0o644, 0)
+		errs["Link"] = w.Link("g", "f/child")
+	})
+
+	for call, err := range errs {
+		if !errors.Is(err, erofs.ErrNotDirectory) {
+			t.Errorf("%s beneath a file: %v, want ErrNotDirectory", call, err)
+		}
+	}
+
+	var names []string
+
+	if err := b.ref.Walk(func(e erofsspec.Entry) error {
+		names = append(names, e.Path)
+
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	slices.Sort(names)
+
+	if want := []string{"f", "g"}; !slices.Equal(names, want) {
+		t.Errorf("the image holds %q, want %q", names, want)
+	}
+}
+
+// TestContractWriterDataFileThatCannotSeekFailsTheWriter: WithDataFile's
+// file is positioned by a Seek before its first use; a file that refuses
+// it (here one already closed) fails the Create that needs it and the
+// writer's Close after, rather than writing data at one offset and chunk
+// indexes at another.
+func TestContractWriterDataFileThatCannotSeekFailsTheWriter(t *testing.T) {
+	t.Parallel()
+
+	df, err := os.CreateTemp(t.TempDir(), "data-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := df.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	w := erofs.Create(&testBuffer{}, erofs.WithDataFile(df), erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if f, err := w.Create("a"); err == nil {
+		_ = f.Close()
+
+		t.Error("Create with a data file that cannot seek succeeded")
+	}
+
+	if err := w.Close(); err == nil {
+		t.Error("Close with a data file that cannot seek succeeded")
+	}
+}
+
+// TestContractWriterMissingNameIsErrNotExist: every path method given a
+// name the writer does not hold answers fs.ErrNotExist (RemoveAll apart,
+// which is nil for a missing path by its doc), and the image is untouched:
+// one empty root.
+func TestContractWriterMissingNameIsErrNotExist(t *testing.T) {
+	t.Parallel()
+
+	errs := map[string]error{}
+
+	b := wBuild(t, func(w *erofs.Writer) {
+		errs["Chown"] = w.Chown("missing", 1, 1)
+		errs["Chmod"] = w.Chmod("missing", 0o600)
+		errs["Chtimes"] = w.Chtimes("missing", time.Unix(1, 0), time.Unix(1, 0))
+		errs["Setxattr"] = w.Setxattr("missing", "user.k", "v")
+		errs["SetNlink"] = w.SetNlink("missing", 2)
+		errs["Remove"] = w.Remove("missing")
+		errs["Link"] = w.Link("missing", "alias")
+
+		fi, serr := w.Stat("missing")
+		errs["Stat"] = serr
+
+		if serr == nil {
+			t.Errorf("Stat of a missing name returned %v", fi)
+		}
+
+		f, oerr := w.Open("missing")
+		errs["Open"] = oerr
+
+		if oerr == nil {
+			_ = f.Close()
+
+			t.Error("Open of a missing name returned a handle")
+		}
+	})
+
+	for call, err := range errs {
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s of a missing name: %v, want fs.ErrNotExist", call, err)
+		}
+	}
+
+	if err := b.ref.Walk(func(e erofsspec.Entry) error {
+		t.Errorf("the image holds %s after calls on a missing name", e.Path)
+
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1570,6 +2026,12 @@ func TestContractWriterOneOpenFile(t *testing.T) {
 
 	if early := w.Close(); early == nil {
 		t.Error("Close with a open succeeded")
+	}
+
+	// CopyFrom appends to the stream a is writing; it is refused while a
+	// is open rather than interleaving its bytes into a's region.
+	if copied := w.CopyFrom(fstest.MapFS{"c": &fstest.MapFile{Data: []byte("c")}}); copied == nil {
+		t.Error("CopyFrom while a is open for writing succeeded")
 	}
 
 	if err = a.Close(); err != nil {

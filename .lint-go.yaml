@@ -16,12 +16,6 @@ golangci:
       - varnamelen
     exclusions:
       rules:
-        # internal/erofstest is test support, compiled into tests only: its
-        # numbers are fixture data (sizes, counts, modes), what mnd already
-        # leaves alone in a _test.go file.
-        - path: ^internal/erofstest/
-          linters:
-            - mnd
         # internal/corpus is the same kind of test support: the described
         # tree's sizes, ids, modes, times, names and option strings are
         # fixture data, what mnd and goconst already leave alone in a
