@@ -3,6 +3,7 @@ package erofs_test
 import (
 	"archive/tar"
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -1451,6 +1452,129 @@ func TestContractGenericDataRangeAtTheSmallestBlockSizeAndReindexed(t *testing.T
 
 	check(t, corpus.Image{Name: "ranges-512-reindexed", Img: out2.Bytes(), Devices: [][]byte{first.Img, blob}})
 }
+
+// TestContractCopyRefusesWhatTheImageCannotHold: the copy's refusals of
+// what the format cannot carry, each as ErrInvalid: a device whose rdev
+// does not fit i_rdev's 32 bits; flat data of more blocks than 32-bit
+// block addresses name (a 2^44-byte file at a 4 KiB block), refused
+// before a byte is written; and a source image whose inode declares a
+// size past int64, refused by the metadata-only copy rather than taken
+// as a negative Size.
+func TestContractCopyRefusesWhatTheImageCannotHold(t *testing.T) {
+	t.Parallel()
+
+	t.Run("wide rdev", func(t *testing.T) {
+		t.Parallel()
+
+		src := fstest.MapFS{"dev": &fstest.MapFile{
+			Mode: fs.ModeDevice | fs.ModeCharDevice | 0o600, Sys: &erofs.Stat{Rdev: 1<<32 | 5},
+		}}
+
+		if err := erofs.Create(&testBuffer{}).CopyFrom(src); !errors.Is(err, erofs.ErrInvalid) {
+			t.Errorf("an rdev of 1<<32|5: %v, want ErrInvalid", err)
+		}
+	})
+
+	t.Run("blocks past 32 bits", func(t *testing.T) {
+		t.Parallel()
+
+		out := &testBuffer{}
+		w := erofs.Create(out, erofs.WithBlockSize(4096))
+
+		err := w.CopyFrom(hugeSourceFileFS{size: 1 << 44})
+		if err == nil {
+			err = w.Close()
+		}
+
+		if !errors.Is(err, erofs.ErrInvalid) {
+			t.Errorf("a %d byte file at a 4 KiB block: %v, want ErrInvalid", int64(1<<44), err)
+		}
+
+		if n := len(out.Bytes()); n != 0 {
+			t.Errorf("%d bytes written before the refusal, want none", n)
+		}
+	})
+
+	t.Run("size past int64", func(t *testing.T) {
+		t.Parallel()
+
+		// An mtime off the build time gets f an extended inode, whose
+		// i_size is 64 bits wide.
+		at := time.Unix(corpus.BuildTime+1000, 0)
+		img := writeImage(
+			t,
+			[]corpus.Node{{Path: "f", Type: tar.TypeReg, Mode: 0o644, Data: []byte("hello"), Sec: at.Unix()}},
+		)
+		ref := parseImage(t, corpus.Image{Name: "wide-size", Img: img})
+
+		in, err := ref.Resolve("f", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !in.Extended {
+			t.Fatal("f got a compact inode; the case needs an extended one")
+		}
+
+		loc := int64(ref.Super.MetaBlkAddr)<<ref.Super.BlockBits + int64(in.Nid)*32
+		binary.LittleEndian.PutUint64(img[loc+8:], 1<<63)
+
+		src, err := erofs.Open(bytes.NewReader(img))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		dst := erofs.Create(&testBuffer{})
+		if err := dst.CopyFrom(src, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrInvalid) {
+			fi, serr := dst.Stat("f")
+			t.Errorf("an i_size of 1<<63: CopyFrom %v, want ErrInvalid (Stat: %v, %v)", err, fi, serr)
+		}
+	})
+}
+
+type hugeSourceFileFS struct{ size int64 }
+
+func (h hugeSourceFileFS) Open(name string) (fs.File, error) {
+	switch name {
+	case ".":
+		return hugeSourceFile{hugeSourceFileInfo{name: ".", mode: fs.ModeDir | 0o755}}, nil
+	case "huge":
+		return hugeSourceFile{h.file()}, nil
+	}
+
+	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+}
+
+func (h hugeSourceFileFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	if name != "." {
+		return nil, &fs.PathError{Op: "readdir", Path: name, Err: fs.ErrNotExist}
+	}
+
+	return []fs.DirEntry{fs.FileInfoToDirEntry(h.file())}, nil
+}
+
+func (h hugeSourceFileFS) file() hugeSourceFileInfo {
+	return hugeSourceFileInfo{name: "huge", size: h.size, mode: 0o644}
+}
+
+type hugeSourceFile struct{ info hugeSourceFileInfo }
+
+func (f hugeSourceFile) Stat() (fs.FileInfo, error) { return f.info, nil }
+func (hugeSourceFile) Read([]byte) (int, error)     { return 0, io.EOF }
+func (hugeSourceFile) Close() error                 { return nil }
+
+type hugeSourceFileInfo struct {
+	name string
+	size int64
+	mode fs.FileMode
+}
+
+func (i hugeSourceFileInfo) Name() string      { return i.name }
+func (i hugeSourceFileInfo) Size() int64       { return i.size }
+func (i hugeSourceFileInfo) Mode() fs.FileMode { return i.mode }
+func (hugeSourceFileInfo) ModTime() time.Time  { return time.Unix(0, 0) }
+func (i hugeSourceFileInfo) IsDir() bool       { return i.mode.IsDir() }
+func (hugeSourceFileInfo) Sys() any            { return nil }
 
 // The generic sources with a DataRange, for the DataRange contract.
 
