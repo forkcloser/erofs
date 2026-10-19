@@ -1947,10 +1947,11 @@ func (fsys chunkMapSourceFS) Open(name string) (fs.File, error) {
 // TestContractMetadataOnlyCopyRefusesWhatStatRefuses: the metadata-only
 // copy reads the source's inodes itself and refuses what the reader's Stat
 // refuses, in its class: a dirent whose file type disagrees with its
-// inode's type (a regular file the dirent calls a directory), and an inode
-// whose type bits name no type beside a dirent of type zero, each
-// ErrCorrupt, as the kernel's iget ("bogus i_mode") and the reader's
-// lookup refuse them.
+// inode's type (a regular file the dirent calls a directory), an inode
+// whose type bits name no type beside a dirent of type zero, and a compact
+// flat-inline inode at the null address, each ErrCorrupt, as the kernel's
+// iget ("bogus i_mode"), the reader's lookup and erofs_map_blocks refuse
+// them.
 func TestContractMetadataOnlyCopyRefusesWhatStatRefuses(t *testing.T) {
 	t.Parallel()
 
@@ -1983,7 +1984,49 @@ func TestContractMetadataOnlyCopyRefusesWhatStatRefuses(t *testing.T) {
 	ino := inodeOffset(t, noType, "a")
 	binary.LittleEndian.PutUint16(noType[ino+4:], binary.LittleEndian.Uint16(noType[ino+4:])&^disk.StatTypeMask)
 
-	for name, edited := range map[string][]byte{"dirent says directory": disagree, "no type at all": noType} {
+	// A flat-inline file's whole blocks are read at its start block whatever
+	// it holds (erofs_map_blocks maps a hole for the null address on a
+	// flat-plain inode only), so a compact flat-inline inode at the null
+	// address is refused where every address past the devices is, and the
+	// copy refuses with it rather than writing a hole. No tool writes one:
+	// it is small-b512's "multi", five blocks and a tail, rewritten as a
+	// compact inode at the null address.
+	var nullInline []byte
+
+	for _, src := range corpus.Committed(t) {
+		if src.Name != "small-b512" {
+			continue
+		}
+
+		nullInline = bytes.Clone(src.Img)
+		at := inodeOffset(t, nullInline, "multi")
+
+		format, size := nullInline[at], binary.LittleEndian.Uint64(nullInline[at+8:])
+		if format != disk.InodeFormatExtended|disk.LayoutFlatInline<<1 || size != 3000 {
+			t.Fatalf("multi's inode reads i_format %#x, i_size %d; want an extended flat-inline inode of 3000 bytes",
+				format, size)
+		}
+
+		ino := nullInline[at : at+disk.SizeInodeCompact]
+		clear(ino)
+		ino[0] = disk.LayoutFlatInline << 1
+		binary.LittleEndian.PutUint16(ino[4:], 0o100644)
+		binary.LittleEndian.PutUint16(ino[6:], 1)
+		binary.LittleEndian.PutUint32(ino[8:], 3000)
+		binary.LittleEndian.PutUint32(ino[16:], disk.NullAddr)
+	}
+
+	if nullInline == nil {
+		t.Fatal("small-b512 is not among the committed images")
+	}
+
+	shapes := map[string][]byte{
+		"dirent says directory":           disagree,
+		"no type at all":                  noType,
+		"inline file at the null address": nullInline,
+	}
+
+	for name, edited := range shapes {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
@@ -1992,13 +2035,98 @@ func TestContractMetadataOnlyCopyRefusesWhatStatRefuses(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if _, err := fs.Lstat(source, "a"); !errors.Is(err, erofs.ErrCorrupt) {
-				t.Fatalf("Lstat: %v, want ErrCorrupt (the premise)", err)
+			entry := "a"
+			if name == "inline file at the null address" {
+				entry = "multi"
+			}
+
+			if _, err := fs.Lstat(source, entry); !errors.Is(err, erofs.ErrCorrupt) {
+				t.Fatalf("Lstat %s: %v, want ErrCorrupt (the premise)", entry, err)
 			}
 
 			w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(corpus.BuildTime, 0))
 			if err := w.CopyFrom(source, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrCorrupt) {
 				t.Errorf("CopyFrom(MetadataOnly): %v, want ErrCorrupt", err)
+			}
+		})
+	}
+}
+
+// TestContractMetadataOnlyCopyRefusesWhatStatRefusesAsNotImplemented: the
+// metadata-only copy refuses, in Stat's class, an inode the reader does
+// not implement: a chunk format word with a bit outside
+// EROFS_CHUNK_FORMAT_ALL (the kernel's "unsupported chunk format",
+// EOPNOTSUPP at iget), whether the fuzzer's (small-blobdev-512's d/c, a
+// character device whose i_u 0x501 becomes a chunk format when its
+// i_format names the chunk-based layout) or a copy's own chunk-based
+// inode with one reserved bit set; each ErrNotImplemented from Lstat and
+// from CopyFrom(MetadataOnly), never copied into an image nothing mounts.
+func TestContractMetadataOnlyCopyRefusesWhatStatRefusesAsNotImplemented(t *testing.T) {
+	t.Parallel()
+
+	var fuzzed corpus.Image
+
+	for _, src := range corpus.Committed(t) {
+		if src.Name == "small-blobdev-512" {
+			fuzzed = corpus.Image{Name: "reserved-chunk-format", Img: bytes.Clone(src.Img), Blob: src.Blob}
+		}
+	}
+
+	if fuzzed.Img == nil {
+		t.Fatal("small-blobdev-512 is not among the committed images")
+	}
+
+	fuzzed.Img[1632] = 0x19
+	fuzzed.Img[1610] = 0x37
+
+	out := &testBuffer{}
+	w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	chunked := openImage(t, corpus.Image{
+		Name: "own-chunk",
+		Img:  assembledFile(t, 12, true, false, []byte("data")),
+	})
+	if err := errors.Join(w.CopyFrom(chunked, erofs.MetadataOnly()), w.Close()); err != nil {
+		t.Fatal(err)
+	}
+
+	own := out.Bytes()
+	at := inodeOffset(t, own, "f")
+
+	if layout := (own[at] & disk.InodeFormatLayoutMask) >> 1; layout != disk.LayoutChunkBased {
+		t.Fatalf("the copy's f has layout %d, want chunk-based", layout)
+	}
+
+	own[at+17] |= 0x01
+
+	for _, c := range []struct {
+		name  string
+		im    corpus.Image
+		entry string
+	}{
+		{"the fuzzer's device turned chunk-based", fuzzed, "d/c"},
+		{"a copy's own chunk inode with a reserved bit", corpus.Image{Name: "own-chunk-reserved", Img: own}, "f"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			var opts []erofs.OpenOpt
+			for _, d := range c.im.Extra() {
+				opts = append(opts, erofs.WithExtraDevices(bytes.NewReader(d)))
+			}
+
+			source, err := erofs.Open(bytes.NewReader(c.im.Img), opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := fs.Lstat(source, c.entry); !errors.Is(err, erofs.ErrNotImplemented) {
+				t.Fatalf("Lstat %s: %v, want ErrNotImplemented (the premise)", c.entry, err)
+			}
+
+			w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(corpus.BuildTime, 0))
+			if err := w.CopyFrom(source, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrNotImplemented) {
+				t.Errorf("CopyFrom(MetadataOnly): %v, want ErrNotImplemented", err)
 			}
 		})
 	}
