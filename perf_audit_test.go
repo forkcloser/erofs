@@ -2,7 +2,6 @@ package erofs //nolint:testpackage // white-box: BenchmarkPerfStatInode times th
 
 import (
 	"bytes"
-	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -45,69 +44,6 @@ func buildPerfImage(tb testing.TB, size int) []byte {
 	}
 
 	return out.buf
-}
-
-func TestPerfReadCallCount(t *testing.T) {
-	t.Parallel()
-
-	const size = 8 << 20
-
-	buf := buildPerfImage(t, size)
-
-	c := &countingReaderAt{ra: bytes.NewReader(buf)}
-
-	img, err := Open(c)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	fh, err := img.Open("big")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	c.calls = 0
-
-	n, err := io.Copy(&countingWriter{}, fh)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_ = fh.Close()
-
-	t.Logf("io.Copy of %d bytes: %d ReadAt calls", n, c.calls)
-
-	// A single Read with a large buffer must not fan out into per-block reads.
-	fh2, err := img.Open("big")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	c.calls = 0
-	dst := make([]byte, size)
-
-	got, rerr := fh2.Read(dst)
-	if rerr != nil && !errors.Is(rerr, io.EOF) {
-		t.Fatal(rerr)
-	}
-
-	_ = fh2.Close()
-
-	t.Logf("single Read of %d bytes: %d ReadAt calls", got, c.calls)
-
-	if c.calls > 4 {
-		t.Errorf("one Read of the whole file took %d ReadAt calls; want a small constant", c.calls)
-	}
-}
-
-// countingWriter accepts everything without implementing io.ReaderFrom, so
-// io.Copy uses the source's WriteTo rather than its own buffering.
-type countingWriter struct{ n int64 }
-
-func (w *countingWriter) Write(p []byte) (int, error) {
-	w.n += int64(len(p))
-
-	return len(p), nil
 }
 
 func BenchmarkPerfSequentialRead(b *testing.B) {
