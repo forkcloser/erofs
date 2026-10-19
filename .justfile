@@ -6,7 +6,7 @@ import '.limen/just/main.just'
 # build-erofs-utils.sh installs mkfs.erofs) in front; the importing file's
 # definition wins. Keep the rest identical to main.just's — no /usr/local, no
 # homebrew.
-export PATH := if os() == 'windows' { justfile_directory() / 'build' / 'erofs-utils' / 'bin' + ';' + aqua_bin + ';' + env_var('PATH') } else { justfile_directory() / 'build' / 'erofs-utils' / 'bin' + ':' + aqua_bin + ':/usr/bin:/bin:/usr/sbin:/sbin' }
+export PATH := if os() == 'windows' { justfile_directory() / 'build' / 'erofs-utils' / 'bin' + ';' + hermetic_bin + ';' + env_var('PATH') } else { justfile_directory() / 'build' / 'erofs-utils' / 'bin' + ':' + hermetic_bin + ':/usr/bin:/bin:/usr/sbin:/sbin' }
 
 # The FIRST recipe defined here becomes `just`'s default.
 lint: do::lint::go::default do::lint::go::deadcode do::lint::default
