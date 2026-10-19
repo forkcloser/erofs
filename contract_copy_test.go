@@ -21,6 +21,7 @@ import (
 	"github.com/forkcloser/erofs"
 	"github.com/forkcloser/erofs/internal/builder"
 	"github.com/forkcloser/erofs/internal/corpus"
+	"github.com/forkcloser/erofs/internal/disk"
 	"github.com/forkcloser/erofs/internal/erofsspec"
 )
 
@@ -1575,6 +1576,75 @@ func (i hugeSourceFileInfo) Mode() fs.FileMode { return i.mode }
 func (hugeSourceFileInfo) ModTime() time.Time  { return time.Unix(0, 0) }
 func (i hugeSourceFileInfo) IsDir() bool       { return i.mode.IsDir() }
 func (hugeSourceFileInfo) Sys() any            { return nil }
+
+// TestContractGenericEmptyDataRangeIsAllHoles: a generic source whose
+// DataRange() returns no ranges is a file with no mapping, stored as the
+// all-hole chunk-based inode a source without DataRange() gets ("files
+// without DataRange() ... all holes"), under the chunked-file feature:
+// zeros through the reference and the package, holes summing to its size,
+// never a refusal for ranges that do not add up.
+func TestContractGenericEmptyDataRangeIsAllHoles(t *testing.T) {
+	t.Parallel()
+
+	const size = 3*4096 + 100
+
+	src := &dataRangerFS{
+		deviceBlocks: 16,
+		file:         &dataRangerFileInfo{name: "f", size: size, ranges: []erofs.DataRange{}},
+	}
+	out := &testBuffer{}
+	w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if err := errors.Join(w.CopyFrom(src, erofs.MetadataOnly()), w.Close()); err != nil {
+		t.Fatalf("a source with an empty DataRange: %v", err)
+	}
+
+	im := corpus.Image{Name: "empty-ranges", Img: out.Bytes(), Blob: make([]byte, 16*4096)}
+	ref := parseImage(t, im)
+
+	if ref.Super.FeatureIncompat&disk.FeatureIncompatChunkedFile == 0 {
+		t.Errorf("feature_incompat %#x lacks the chunked-file bit", ref.Super.FeatureIncompat)
+	}
+
+	in, err := ref.Resolve("f", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if in.Layout != erofsspec.LayoutChunkBased {
+		t.Errorf("layout %d, want chunk-based", in.Layout)
+	}
+
+	fsys := openImage(t, im)
+
+	got, err := fs.ReadFile(fsys, "f")
+	if err != nil || !bytes.Equal(got, make([]byte, size)) {
+		t.Errorf("ReadFile: %d bytes, %v; want %d zeros", len(got), err, size)
+	}
+
+	fi, err := fs.Stat(fsys, "f")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var holes int64
+
+	for _, r := range fi.(interface{ DataRange() []erofs.DataRange }).DataRange() {
+		if r.Offset >= 0 {
+			t.Errorf("DataRange maps %+v for a file with no ranges", r)
+		}
+
+		holes += r.Size
+	}
+
+	if holes != size {
+		t.Errorf("holes sum to %d, want %d", holes, size)
+	}
+
+	if err := corpus.FsckVerdict(t, im); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // The generic sources with a DataRange, for the DataRange contract.
 
