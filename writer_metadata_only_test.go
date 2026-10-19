@@ -421,3 +421,104 @@ func TestWriterMetadataOnlyRefusesBogusMode(t *testing.T) {
 		t.Fatalf("CopyFrom(MetadataOnly) of an image with an inode of no type: %v; want ErrCorrupt", err)
 	}
 }
+
+// TestWriterMetadataOnlyRefusesReservedChunkFormat: a chunk format word
+// with a bit the kernel does not define is refused at iget ("unsupported
+// chunk format", EOPNOTSUPP) and by Stat; the fast path read the inode
+// itself and copied it, a copy nothing mounts. The first input is the
+// fuzzer's: small-blobdev-512 with d/c, a character device whose i_u is
+// its device number 0x501, made a chunk-based file by its i_format.
+func TestWriterMetadataOnlyRefusesReservedChunkFormat(t *testing.T) {
+	t.Parallel()
+
+	for _, src := range corpus.Committed(t) {
+		if src.Name != "small-blobdev-512" {
+			continue
+		}
+
+		edited := bytes.Clone(src.Img)
+		edited[1632] = 0x19
+		edited[1610] = 0x37
+
+		refusedAsNotImplemented(t, openWithDevices(t, edited, src.Blob), "d/c")
+	}
+
+	// A copy's own chunk-based inode, one bit outside EROFS_CHUNK_FORMAT_ALL
+	// put in its format word.
+	var first testBuffer
+
+	source := openWithDevices(t, assembledFile(t, 12, true, false, []byte("data")))
+
+	w := erofs.Create(&first)
+	if err := w.CopyFrom(source, erofs.MetadataOnly()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	img := first.Bytes()
+	at := inodeOffset(t, img, "f")
+
+	if layout := (img[at] & disk.InodeFormatLayoutMask) >> 1; layout != disk.LayoutChunkBased {
+		t.Fatalf("test premise broken: the copy's f has layout %d, want chunk-based", layout)
+	}
+
+	img[at+17] |= 0x01
+
+	refusedAsNotImplemented(t, openWithDevices(t, img), "f")
+}
+
+// refusedAsNotImplemented: Stat of path on source is ErrNotImplemented,
+// and so is a metadata-only copy of source.
+func refusedAsNotImplemented(t *testing.T, source fs.FS, path string) {
+	t.Helper()
+
+	if _, err := fs.Lstat(source, path); !errors.Is(err, erofs.ErrNotImplemented) {
+		t.Fatalf("test premise broken: Lstat of %s: %v", path, err)
+	}
+
+	var buf testBuffer
+
+	w := erofs.Create(&buf)
+	if err := w.CopyFrom(source, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrNotImplemented) {
+		t.Fatalf("CopyFrom(MetadataOnly) with %s refused by Stat: %v; want ErrNotImplemented", path, err)
+	}
+}
+
+// TestWriterMetadataOnlyInlineNullAddress: a flat-inline file's whole
+// blocks are read at its start block whatever it holds (erofs_map_blocks
+// maps a hole for the null address on a flat-plain inode only), so a
+// compact flat-inline inode at the null address is refused by Stat where
+// every address past the devices is, and the copy refuses with it, where
+// it wrote a hole. No tool writes such an inode: it is small-b512's
+// "multi", five blocks and a tail, rewritten as a compact inode at the
+// null address; the tail is then the bytes after the shorter inode.
+func TestWriterMetadataOnlyInlineNullAddress(t *testing.T) {
+	t.Parallel()
+
+	for _, src := range corpus.Committed(t) {
+		if src.Name != "small-b512" {
+			continue
+		}
+
+		img := bytes.Clone(src.Img)
+		at := inodeOffset(t, img, "multi")
+
+		format, size := img[at], binary.LittleEndian.Uint64(img[at+8:])
+		if format != disk.InodeFormatExtended|disk.LayoutFlatInline<<1 || size != 3000 {
+			t.Fatalf("test premise broken: multi's inode reads i_format %#x, i_size %d", format, size)
+		}
+
+		ino := img[at : at+disk.SizeInodeCompact]
+		clear(ino)
+		ino[0] = disk.LayoutFlatInline << 1
+		binary.LittleEndian.PutUint16(ino[4:], 0o100644)
+		binary.LittleEndian.PutUint16(ino[6:], 1)
+		binary.LittleEndian.PutUint32(ino[8:], 3000)
+		binary.LittleEndian.PutUint32(ino[16:], disk.NullAddr)
+
+		refusedByBoth(t, img, "multi")
+	}
+}

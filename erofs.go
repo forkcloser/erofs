@@ -925,7 +925,7 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 			return nil
 		}
 
-		dev, off, err := img.locateRange(int64(ino.inodeData)<<img.sb.BlkSizeBits, ino.size)
+		dev, off, err := img.locateStart(ino, ino.size)
 		if err != nil {
 			return nil
 		}
@@ -1299,7 +1299,13 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 			return img.holeBlock(blockOffset, blockEnd), nil
 		}
 
-		addr = int64(int(fi.inodeData)+bn) << img.sb.BlkSizeBits
+		// #nosec G115 -- bn is a block index below nblocks, checked above
+		pa, err := img.blockAddr(fi.nid, fi.startBlock()+uint64(bn))
+		if err != nil {
+			return nil, err
+		}
+
+		addr = pa
 		dataBlock = true
 	case disk.LayoutFlatInline:
 		// If on the last block, validate
@@ -1327,7 +1333,13 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 				return nil, fmt.Errorf("inline data cross block boundary for nid %d: %w", fi.nid, ErrCorrupt)
 			}
 		} else {
-			addr = int64(int(fi.inodeData)+bn) << img.sb.BlkSizeBits
+			// #nosec G115 -- bn is a block index below nblocks, checked above
+			pa, err := img.blockAddr(fi.nid, fi.startBlock()+uint64(bn))
+			if err != nil {
+				return nil, err
+			}
+
+			addr = pa
 			blockOffset = int(pos % int64(blockSize))
 			dataBlock = true
 		}
@@ -2027,8 +2039,7 @@ func (b *file) readInfo() (ino *inode, err error) {
 	var xcnt uint16
 
 	format := binary.LittleEndian.Uint16(buf[:2])
-	// i_mode sits at the same offset in both inode sizes.
-	if err = checkInodeFormat(b.nid, format, binary.LittleEndian.Uint16(buf[4:6])); err != nil {
+	if err = checkInodeFormat(b.nid, format); err != nil {
 		return nil, err
 	}
 
@@ -2087,14 +2098,8 @@ func (b *file) finishInfo(buf []byte, xcnt uint16) error {
 		ino.xsize = xsize
 	}
 
-	// A chunk format word with a bit the kernel does not define is a format
-	// it lacks, judged with the inode at iget (inode.c, "unsupported chunk
-	// format"), so no Stat, ReadDir or Open serves the inode.
-	if ino.inodeLayout == disk.LayoutChunkBased {
-		// #nosec G115 -- the chunk format is the low 16 bits of i_u, as the kernel's __le16 c.format reads it
-		if chunkFmt := uint16(ino.inodeData); chunkFmt&^disk.LayoutChunkFormatAll != 0 {
-			return fmt.Errorf("unsupported chunk format %#x of nid %d: %w", chunkFmt, b.nid, ErrNotImplemented)
-		}
+	if err := checkChunkFormat(b.nid, ino.inodeLayout, ino.inodeData); err != nil {
+		return err
 	}
 
 	if ino.mode&fs.ModeSymlink == 0 || ino.inodeLayout != disk.LayoutFlatInline || ino.size < 0 {
@@ -2121,7 +2126,7 @@ func (b *file) decodeInode(buf []byte, format uint16) (*inode, uint16, error) {
 		var di disk.InodeCompact
 		di.Unmarshal(buf)
 
-		return &inode{
+		ino := &inode{
 			name:        b.name,
 			nid:         b.nid,
 			icsize:      disk.SizeInodeCompact,
@@ -2132,13 +2137,25 @@ func (b *file) decodeInode(buf []byte, format uint16) (*inode, uint16, error) {
 			rawMode:     di.Mode,
 			uid:         uint32(di.UID),
 			gid:         uint32(di.GID),
-			nlink:       int(di.Nlink),
+			nlink:       int(di.NB),
 			// A compact inode's time is the superblock's epoch plus its
 			// 32-bit i_mtime, with the superblock's fixed nanoseconds
 			// (inode.c: erofs_read_inode).
 			mtime:   b.img.sb.BuildTime + uint64(di.Mtime),
 			mtimeNs: b.img.sb.BuildTimeNs,
-		}, di.XattrCount, nil
+		}
+
+		// On a compact non-directory with the nlink-1 bit the link count is
+		// one and i_nb is the start block's high 16 bits; otherwise i_nb is
+		// the link count and the start block is 32 bits wide (inode.c:
+		// erofs_read_inode, addrmask).
+		if di.Mode&disk.StatTypeMask != disk.StatTypeDir && format&disk.InodeFormatNlink1 != 0 {
+			ino.nlink = 1
+			ino.startHi = di.NB
+			ino.addr48 = true
+		}
+
+		return ino, di.XattrCount, nil
 	}
 
 	if len(buf) < disk.SizeInodeExtended {
@@ -2148,16 +2165,18 @@ func (b *file) decodeInode(buf []byte, format uint16) (*inode, uint16, error) {
 	var di disk.InodeExtended
 	di.Unmarshal(buf)
 
-	if err := checkHighBlockBits(b.nid, di.Reserved); err != nil {
-		return nil, 0, err
-	}
-
+	// An extended inode's start block is 48 bits wide, i_nb its high 16
+	// (inode.c: erofs_read_inode), whatever the superblock's features;
+	// the kernel judges the address where it reads a block by it, never
+	// the field at iget.
 	return &inode{
 		name:        b.name,
 		nid:         b.nid,
 		icsize:      disk.SizeInodeExtended,
 		inodeLayout: layout,
 		inodeData:   di.InodeData,
+		startHi:     di.NB,
+		addr48:      true,
 		size:        int64(di.Size), // #nosec G115 -- a size past 1<<63 wraps negative, rejected by the caller
 		mode:        disk.EroFSModeToGoFileMode(di.Mode),
 		rawMode:     di.Mode,
@@ -2169,13 +2188,18 @@ func (b *file) decodeInode(buf []byte, format uint16) (*inode, uint16, error) {
 	}, di.XattrCount, nil
 }
 
-// checkHighBlockBits refuses a nonzero i_nb on an extended inode: the start
-// block's (or block count's) high 16 bits, which the kernel always reads
-// there, a 48-bit address this reader does not implement and would
-// otherwise read at its low 32 bits.
-func checkHighBlockBits(nid uint64, inb uint16) error {
-	if inb != 0 {
-		return fmt.Errorf("inode %d: i_nb %#x (48-bit layout): %w", nid, inb, ErrNotImplemented)
+// checkChunkFormat refuses a chunk-based inode whose format word carries a
+// bit the kernel does not define: a format it lacks, judged with the inode
+// at iget (inode.c, "unsupported chunk format"), so no Stat, ReadDir, Open
+// or copy serves the inode.
+func checkChunkFormat(nid uint64, layout uint8, inodeData uint32) error {
+	if layout != disk.LayoutChunkBased {
+		return nil
+	}
+
+	// #nosec G115 -- the chunk format is the low 16 bits of i_u, as the kernel's __le16 c.format reads it
+	if chunkFmt := uint16(inodeData); chunkFmt&^disk.LayoutChunkFormatAll != 0 {
+		return fmt.Errorf("unsupported chunk format %#x of nid %d: %w", chunkFmt, nid, ErrNotImplemented)
 	}
 
 	return nil
@@ -2197,10 +2221,9 @@ func xattrBodySize(nid uint64, xcnt uint16) (int, error) {
 // the kernel does not define is a format it refuses (EOPNOTSUPP). Bit 4 is
 // judged by the inode: on a directory it omits the "." dirent, which this
 // reader never relies on; on a compact non-directory inode it is nlink-1,
-// the 48-bit layout's start block high bits in the nlink field, not
-// implemented here and misread if taken as clear; on an extended
-// non-directory inode the kernel ignores it, and so does this.
-func checkInodeFormat(nid uint64, format, mode uint16) error {
+// read with the inode (decodeInode); on an extended non-directory inode
+// the kernel ignores it, and so does this.
+func checkInodeFormat(nid uint64, format uint16) error {
 	if format&^disk.InodeFormatAll != 0 {
 		return fmt.Errorf("inode %d: i_format %#x: %w", nid, format, ErrNotImplemented)
 	}
@@ -2211,13 +2234,6 @@ func checkInodeFormat(nid uint64, format, mode uint16) error {
 	layout := (format & disk.InodeFormatLayoutMask) >> 1
 	if layout >= disk.LayoutMax || layout == disk.LayoutCompressedFull || layout == disk.LayoutCompressedCompact {
 		return fmt.Errorf("inode %d: datalayout %d: %w", nid, layout, ErrNotImplemented)
-	}
-
-	compact := format&disk.InodeFormatExtended == 0
-	directory := mode&disk.StatTypeMask == disk.StatTypeDir
-
-	if compact && !directory && format&disk.InodeFormatNlink1 != 0 {
-		return fmt.Errorf("inode %d: i_format %#x nlink-1 (48-bit layout): %w", nid, format, ErrNotImplemented)
 	}
 
 	return nil
@@ -2299,7 +2315,7 @@ func (b *file) flatPlainRange(ino *inode, dst []DataRange) ([]DataRange, error) 
 		return append(dst, DataRange{Offset: holeOffset, Size: ino.size}), nil
 	}
 
-	dev, off, err := b.img.locateRange(int64(ino.inodeData)<<b.img.sb.BlkSizeBits, ino.size)
+	dev, off, err := b.img.locateStart(ino, ino.size)
 	if err != nil {
 		return nil, err
 	}
@@ -2333,12 +2349,12 @@ func (b *file) buildDataRanges(ino *inode, dst []DataRange) ([]DataRange, error)
 		}
 		// Multi-block inline: earlier full blocks at dataBlkAddr, last block inline.
 		// headSize is the number of complete blocks before the inline tail, in bytes.
-		// ino.inodeData is the starting block address, not a block count.
+		// The start block is an address, not a block count.
 		headSize := ((ino.size - 1) / blockSize) * blockSize
 
 		tailSize := ino.size - headSize
 		if headSize > 0 {
-			dev, off, err := b.img.locateRange(int64(ino.inodeData)<<b.img.sb.BlkSizeBits, headSize)
+			dev, off, err := b.img.locateStart(ino, headSize)
 			if err != nil {
 				return nil, err
 			}
@@ -2915,14 +2931,21 @@ type inode struct {
 	xsize       int
 	inodeLayout uint8
 	inodeData   uint32
-	size        int64
-	mode        fs.FileMode
-	rawMode     uint16
-	uid         uint32
-	gid         uint32
-	nlink       int
-	mtime       uint64
-	mtimeNs     uint32
+	// startHi is the start block's high 16 bits, i_nb as the kernel reads
+	// it on an extended inode and on a compact non-directory with the
+	// nlink-1 bit; zero where i_nb is the link count.
+	startHi uint16
+	// addr48 says the start block is 48 bits wide (inode.c: addrmask), so
+	// the null address is all 48 bits set; otherwise the low 32.
+	addr48  bool
+	size    int64
+	mode    fs.FileMode
+	rawMode uint16
+	uid     uint32
+	gid     uint32
+	nlink   int
+	mtime   uint64
+	mtimeNs uint32
 }
 
 func (ino *inode) flatDataOffset() int64 {
@@ -2930,13 +2953,58 @@ func (ino *inode) flatDataOffset() int64 {
 	return int64(ino.icsize) + int64(ino.xsize)
 }
 
-// nullAddress is a flat-plain inode with no data: i_u the null address on a
-// compact inode, where the kernel's start block is 32 bits wide. An extended
-// inode's is 48 bits (startblk_lo with i_nb above it, inode.c), so the same
-// low word there is block 0xffffffff, past any device this reader opens,
-// and is refused where every address past the device is.
+// startBlock is a flat inode's first data block: i_u, with i_nb above it
+// where the kernel reads it so (inode.c: startblk_lo | startblk_hi << 32).
+func (ino *inode) startBlock() uint64 {
+	return uint64(ino.inodeData) | uint64(ino.startHi)<<startBlockBits32
+}
+
+// nullAddress is a flat-plain inode with no data: the start block every
+// one of its bits set, 48 of them on an extended inode and on a compact
+// one with the nlink-1 bit, 32 otherwise (inode.c: EROFS_NULL_ADDR under
+// addrmask). A flat-inline inode's blocks are read at the address whatever
+// it holds, the null address past every device.
 func (ino *inode) nullAddress() bool {
-	return ino.icsize == disk.SizeInodeCompact && ino.inodeData == disk.NullAddr
+	return ino.inodeLayout == disk.LayoutFlatPlain && nullStartBlock(ino.startBlock(), ino.addr48)
+}
+
+// The widths of a start block (inode.c: addrmask).
+const (
+	startBlockBits32 = 32
+	startBlockBits48 = 48
+)
+
+// nullStartBlock: start is the null address under a 48- or a 32-bit mask.
+func nullStartBlock(start uint64, addr48 bool) bool {
+	mask := uint64(1)<<startBlockBits32 - 1
+	if addr48 {
+		mask = uint64(1)<<startBlockBits48 - 1
+	}
+
+	return start&mask == mask
+}
+
+// locateStart places n bytes of a flat inode's data from its start block:
+// the block's address (blockAddr) on the device locateRange names.
+func (img *image) locateStart(ino *inode, n int64) (uint16, int64, error) {
+	pa, err := img.blockAddr(ino.nid, ino.startBlock())
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return img.locateRange(pa, n)
+}
+
+// blockAddr is the byte address of block blk, a flat inode's start block
+// or one of the blocks after it. A 48-bit block number shifted by a 64 KiB
+// block's bits does not fit the address, so a block that large is refused
+// here as every address past the devices is, in the same class.
+func (img *image) blockAddr(nid, blk uint64) (int64, error) {
+	if blk > uint64(math.MaxInt64)>>img.sb.BlkSizeBits {
+		return 0, fmt.Errorf("block %#x of nid %d is past every device: %w", blk, nid, ErrCorrupt)
+	}
+
+	return int64(blk) << img.sb.BlkSizeBits, nil // #nosec G115 -- bounded just above
 }
 
 // fileInfo implements [fs.FileInfo] and provides extended metadata
