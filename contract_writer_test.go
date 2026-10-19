@@ -1524,8 +1524,10 @@ func TestContractWriterRemoveAllAndTheNamesOfOneInode(t *testing.T) {
 // TestContractWriterLinkOfSpecialInodes: Link "creates a hard link"
 // whatever the target's type but a directory: a symlink and a device
 // linked share one inode with a count of two, the new name's dirent type
-// is the target's, the alias resolves and reports as the target does; Link
-// over an existing name and at "/" is refused; and a linked tree built
+// is the target's, the alias resolves and reports as the target does; a
+// link of a link is a link to the final inode; metadata set through an
+// alias is the inode's, read back through every name; Link over an
+// existing name and at "/" is refused; and a linked tree built
 // twice is the same bytes, as is one whose original name is removed
 // (the surviving names stand in for it the same way each time).
 func TestContractWriterLinkOfSpecialInodes(t *testing.T) {
@@ -1594,6 +1596,42 @@ func TestContractWriterLinkOfSpecialInodes(t *testing.T) {
 		if oi.Mode() != ai.Mode() || ost.Ino != ast.Ino || ost.Rdev != ast.Rdev || ast.Nlink != 2 {
 			t.Errorf("%s/%s: Lstat mode %v/%v ino %d/%d rdev %d/%d nlink %d", c.orig, c.alias,
 				oi.Mode(), ai.Mode(), ost.Ino, ast.Ino, ost.Rdev, ast.Rdev, ast.Nlink)
+		}
+	}
+
+	// A link of a link is a link to the final inode, no chains: three names,
+	// one nid, a count of three. And a hard-link name is its inode: Chown,
+	// Chmod, Chtimes and Setxattr through an alias land on the one inode
+	// every name reports.
+	at := time.Unix(corpus.BuildTime+777, 0)
+	chain := wBuild(t, func(w *erofs.Writer) {
+		mustCreate(t, w, "data", []byte("shared"))
+
+		if err := errors.Join(
+			w.Link("data", "hard"),
+			w.Link("hard", "hard3"),
+			w.Chown(
+				"hard",
+				7,
+				8,
+			),
+			w.Chmod("hard3", 0o640),
+			w.Chtimes("hard", at, at),
+			w.Setxattr("hard3", "user.k", "v"),
+		); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	for _, name := range []string{"data", "hard", "hard3"} {
+		in := chain.inodeOf(t, name)
+		if in.Nid != chain.inodeOf(t, "data").Nid || in.Nlink != 3 {
+			t.Errorf("%s: nid %d nlink %d, want one inode with three names", name, in.Nid, in.Nlink)
+		}
+
+		if in.UID != 7 || in.GID != 8 || in.Mode&0o777 != 0o640 || in.Mtime != at.Unix() || len(in.Xattrs) != 1 {
+			t.Errorf("%s: %d:%d mode %#o mtime %d xattrs %d; want 7:8 0640 %d 1, set through the aliases",
+				name, in.UID, in.GID, in.Mode&0o777, in.Mtime, len(in.Xattrs), at.Unix())
 		}
 	}
 
@@ -1726,6 +1764,56 @@ func TestContractWriterDataFileThatCannotSeekFailsTheWriter(t *testing.T) {
 
 	if err := w.Close(); err == nil {
 		t.Error("Close with a data file that cannot seek succeeded")
+	}
+}
+
+// TestContractWriterMissingNameIsErrNotExist: every path method given a
+// name the writer does not hold answers fs.ErrNotExist (RemoveAll apart,
+// which is nil for a missing path by its doc), and the image is untouched:
+// one empty root.
+func TestContractWriterMissingNameIsErrNotExist(t *testing.T) {
+	t.Parallel()
+
+	errs := map[string]error{}
+
+	b := wBuild(t, func(w *erofs.Writer) {
+		errs["Chown"] = w.Chown("missing", 1, 1)
+		errs["Chmod"] = w.Chmod("missing", 0o600)
+		errs["Chtimes"] = w.Chtimes("missing", time.Unix(1, 0), time.Unix(1, 0))
+		errs["Setxattr"] = w.Setxattr("missing", "user.k", "v")
+		errs["SetNlink"] = w.SetNlink("missing", 2)
+		errs["Remove"] = w.Remove("missing")
+		errs["Link"] = w.Link("missing", "alias")
+
+		fi, serr := w.Stat("missing")
+		errs["Stat"] = serr
+
+		if serr == nil {
+			t.Errorf("Stat of a missing name returned %v", fi)
+		}
+
+		f, oerr := w.Open("missing")
+		errs["Open"] = oerr
+
+		if oerr == nil {
+			_ = f.Close()
+
+			t.Error("Open of a missing name returned a handle")
+		}
+	})
+
+	for call, err := range errs {
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s of a missing name: %v, want fs.ErrNotExist", call, err)
+		}
+	}
+
+	if err := b.ref.Walk(func(e erofsspec.Entry) error {
+		t.Errorf("the image holds %s after calls on a missing name", e.Path)
+
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
