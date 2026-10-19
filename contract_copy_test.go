@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"os"
 	"path"
 	"slices"
 	"strings"
@@ -688,6 +689,312 @@ func TestContractCopyHardLinkScopeIsOneCall(t *testing.T) {
 	corpus.Check(t, im, parseImage(t, im), want, true)
 }
 
+// TestContractMetadataOnlyCopyAfterTheCopysOwnDevice: the source image is
+// registered "after the copy's earlier devices": a writer with its own data
+// file (device 1) that copies an image metadata-only places the image at
+// device 2 and the image's own devices after it, and the result reads the
+// writer's own file from its data file and the source's files from the
+// source, each at its own slot.
+func TestContractMetadataOnlyCopyAfterTheCopysOwnDevice(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"small-b512", "small-blobdev-512"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			src := committed(t, name)
+
+			df, derr := os.CreateTemp(t.TempDir(), "data")
+			if derr != nil {
+				t.Fatal(derr)
+			}
+
+			defer func() { _ = df.Close() }()
+
+			out := &testBuffer{}
+			w := erofs.Create(
+				out,
+				erofs.WithBuildTime(corpus.BuildTime, 0),
+				erofs.WithBlockSize(512),
+				erofs.WithDataFile(df),
+			)
+
+			at := time.Unix(corpus.BuildTime, 0)
+			if err := errors.Join(
+				w.Mkdir("/", corpus.RootMode),
+				w.Chown("/", 0, 0),
+				w.Chtimes("/", at, at),
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			own := corpus.Node{
+				Path: "own",
+				Type: tar.TypeReg,
+				Mode: 0o644,
+				Data: bytes.Repeat([]byte("o"), 5000),
+				Sec:  corpus.BuildTime,
+			}
+			writeNode(t, w, own)
+
+			if err := errors.Join(w.CopyFrom(openImage(t, src), erofs.MetadataOnly()), w.Close()); err != nil {
+				t.Fatal(err)
+			}
+
+			blob, err := os.ReadFile(df.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			want := append([]corpus.Node{own}, src.Tree...)
+			im := corpus.Image{Name: name + "-after-own-device", Img: out.Bytes(), Tree: want}
+			im.Devices = append([][]byte{blob, src.Img}, src.Extra()...)
+
+			ref := parseImage(t, im)
+			if got := len(ref.Devices); got != len(im.Devices) {
+				t.Fatalf("%d device slots, want %d (the data file, the image, its devices)", got, len(im.Devices))
+			}
+
+			corpus.Check(t, im, ref, want, true)
+			fsckUnlessPlatformLimit(t, im)
+		})
+	}
+}
+
+// TestContractGenericSourceTimesAndOwnership: "a source with neither still
+// contributes mode, size and ModTime": a generic source's entries keep
+// their ModTime, a symlink's included; an entry with no ModTime is at the
+// epoch, not the build time; a Sys() *builder.Entry contributes ownership
+// and, when its Mtime is set, the time over the FileInfo's; Lstat on the
+// image answers each, and the reference reads the same.
+func TestContractGenericSourceTimesAndOwnership(t *testing.T) {
+	t.Parallel()
+
+	when := time.Date(2024, time.March, 4, 5, 6, 7, 890, time.UTC)
+
+	src := fstest.MapFS{
+		"dir":   &fstest.MapFile{Mode: fs.ModeDir | 0o755, ModTime: when},
+		"dir/f": &fstest.MapFile{Data: []byte("x"), Mode: 0o644, ModTime: when.Add(time.Hour)},
+		"link": &fstest.MapFile{
+			Data:    []byte("dir/f"),
+			Mode:    fs.ModeSymlink | 0o777,
+			ModTime: when.Add(2 * time.Hour),
+		},
+		"untimed": &fstest.MapFile{Data: []byte("y"), Mode: 0o644},
+		"withsys": &fstest.MapFile{
+			Data:    []byte("z"),
+			Mode:    0o644,
+			ModTime: when,
+			Sys:     &builder.Entry{UID: 7, GID: 8},
+		},
+		"stampedsys": &fstest.MapFile{
+			Data:    []byte("w"),
+			Mode:    0o644,
+			ModTime: when,
+			Sys:     &builder.Entry{Mtime: 1234, MtimeNs: 5},
+		},
+	}
+
+	out := &testBuffer{}
+	w := erofs.Create(out, erofs.WithBuildTime(99, 0))
+
+	if err := errors.Join(w.CopyFrom(src), w.Close()); err != nil {
+		t.Fatal(err)
+	}
+
+	im := corpus.Image{Name: "generic-times", Img: out.Bytes()}
+	fsys, ref := openImage(t, im), parseImage(t, im)
+
+	for name, want := range map[string]time.Time{
+		"dir":        when,
+		"dir/f":      when.Add(time.Hour),
+		"link":       when.Add(2 * time.Hour),
+		"untimed":    time.Unix(0, 0),
+		"withsys":    when,
+		"stampedsys": time.Unix(1234, 5),
+	} {
+		fi, err := fs.Lstat(fsys, name)
+		if err != nil {
+			t.Fatalf("Lstat %s: %v", name, err)
+		}
+
+		if got := fi.ModTime(); !got.Equal(want) {
+			t.Errorf("%s: mtime %v, want %v", name, got, want)
+		}
+
+		in, err := lookupNoFollow(ref, name)
+		if err != nil {
+			t.Fatalf("reference %s: %v", name, err)
+		}
+
+		if in.Mtime != want.Unix() || int64(in.MtimeNs) != int64(want.Nanosecond()) {
+			t.Errorf("%s: the reference reads %d.%09d, want %v", name, in.Mtime, in.MtimeNs, want)
+		}
+	}
+
+	st, err := fs.Lstat(fsys, "withsys")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if sys, ok := st.Sys().(*erofs.Stat); !ok || sys.UID != 7 || sys.GID != 8 {
+		t.Errorf("withsys: %+v, want uid 7 gid 8 from the source's Sys()", st.Sys())
+	}
+}
+
+// coalesced joins adjacent DataRange entries that continue each other, a
+// hole after a hole or data at the offset the previous entry ends.
+func coalesced(ranges []erofs.DataRange) []erofs.DataRange {
+	out := make([]erofs.DataRange, 0, len(ranges))
+
+	for _, r := range ranges {
+		if n := len(out); n > 0 {
+			last := &out[n-1]
+			if last.Offset < 0 && r.Offset < 0 ||
+				last.Offset >= 0 && r.Offset >= 0 && last.Device == r.Device && last.Offset+last.Size == r.Offset {
+				last.Size += r.Size
+
+				continue
+			}
+		}
+
+		out = append(out, r)
+	}
+
+	return out
+}
+
+// TestContractGenericDataRangeIsStoredAsChunks: a generic source whose
+// FileInfo provides DataRange() is, metadata-only, "stored as chunk-based
+// inodes" on the device CopyFrom assigns the source (its DeviceBlocks),
+// each data entry at its offset there, each hole entry a hole; the copy's
+// DataRange answers the same slice with that device, the reference's
+// extents agree, and nothing of the data is in the image. A slice that
+// does not cover the file "from logical byte 0 to Size-1 in order, with no
+// gaps or overlaps" is refused as ErrInvalid: a negative or unaligned
+// offset, a zero or negative size, a device the source does not own, a sum
+// short of or past the size.
+func TestContractGenericDataRangeIsStoredAsChunks(t *testing.T) {
+	t.Parallel()
+
+	const bs = 4096
+
+	copyRanges := func(t *testing.T, size int64, ranges []erofs.DataRange) (corpus.Image, error) {
+		t.Helper()
+
+		src := &dataRangerFS{deviceBlocks: 1024, file: &dataRangerFileInfo{name: "f.bin", size: size, ranges: ranges}}
+		out := &testBuffer{}
+		w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+		if err := errors.Join(w.CopyFrom(src, erofs.MetadataOnly()), w.Close()); err != nil {
+			return corpus.Image{}, err
+		}
+
+		return corpus.Image{Name: "ranges", Img: out.Bytes(), Blob: make([]byte, 1024*bs)}, nil
+	}
+
+	for _, c := range []struct {
+		name   string
+		size   int64
+		ranges []erofs.DataRange
+	}{
+		{"one range", 2 * bs, []erofs.DataRange{{Offset: 10 * bs, Size: 2 * bs}}},
+		{"two ranges", 4 * bs, []erofs.DataRange{{Offset: 5 * bs, Size: bs}, {Offset: 20 * bs, Size: 3 * bs}}},
+		{"a hole after data", 4 * bs, []erofs.DataRange{{Offset: 2 * bs, Size: bs}, {Offset: -1, Size: 3 * bs}}},
+		{"a partial last block", 3*bs + 512, []erofs.DataRange{{Offset: 0, Size: 3 * bs}, {Offset: 3 * bs, Size: 512}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			im, err := copyRanges(t, c.size, c.ranges)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			fsys := openImage(t, im)
+
+			fi, err := fs.Stat(fsys, "f.bin")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got := fi.(interface{ DataRange() []erofs.DataRange }).DataRange()
+
+			var want []erofs.DataRange
+
+			for _, r := range c.ranges {
+				if r.Offset >= 0 {
+					r.Device = 1
+				}
+
+				want = append(want, r)
+			}
+
+			// The copy may join entries that are contiguous on the device,
+			// as the reference's extents do; the mapping is what is held.
+			if !slices.Equal(coalesced(got), coalesced(want)) {
+				t.Errorf("DataRange = %+v, want %+v (the source's, on device 1)", got, want)
+			}
+
+			ref := parseImage(t, im)
+
+			in, err := ref.Resolve("f.bin", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			exts, err := ref.Extents(in)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var pos int64
+			for i, x := range exts {
+				if x.Logical != pos {
+					t.Errorf("extent %d at logical %d, want %d", i, x.Logical, pos)
+				}
+
+				pos += x.Length
+			}
+
+			if pos != c.size {
+				t.Errorf("extents cover %d bytes, want %d", pos, c.size)
+			}
+
+			for _, x := range exts {
+				if !x.Hole && x.Device != 1 {
+					t.Errorf("extent %+v on device %d, want 1", x, x.Device)
+				}
+			}
+
+			fsckUnlessPlatformLimit(t, im)
+		})
+	}
+
+	for _, c := range []struct {
+		name   string
+		size   int64
+		ranges []erofs.DataRange
+	}{
+		{"negative offset", 4 * bs, []erofs.DataRange{{Offset: -bs, Size: 4 * bs}}},
+		{"zero size", 4 * bs, []erofs.DataRange{{Offset: 0, Size: 0}, {Offset: 0, Size: 4 * bs}}},
+		{"negative size", 4 * bs, []erofs.DataRange{{Offset: 0, Size: -1}}},
+		{"unaligned offset", 4 * bs, []erofs.DataRange{{Offset: 100, Size: 4 * bs}}},
+		{"another device", 4 * bs, []erofs.DataRange{{Device: 1, Offset: bs, Size: 4 * bs}}},
+		{"a sum short of the size", 4 * bs, []erofs.DataRange{{Offset: 0, Size: bs}}},
+		{"a sum past the size", 4 * bs, []erofs.DataRange{{Offset: 0, Size: 5 * bs}}},
+		{"an unaligned middle", 4 * bs, []erofs.DataRange{{Offset: 0, Size: 100}, {Offset: bs, Size: 4*bs - 100}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+
+			if _, err := copyRanges(t, c.size, c.ranges); !errors.Is(err, fs.ErrInvalid) {
+				t.Fatalf("%v, want ErrInvalid", err)
+			}
+		})
+	}
+}
+
 // TestContractMergeWhiteoutOfHardlinkedName: a whiteout on one name of a
 // hard-linked pair leaves the other with the inode, "as unlink(2) does".
 func TestContractMergeWhiteoutOfHardlinkedName(t *testing.T) {
@@ -1006,3 +1313,118 @@ func copyAgrees(src []byte, srcExtra [][]byte, dst []byte, dstExtra [][]byte) st
 
 	return ""
 }
+
+// The generic sources with a DataRange, for the DataRange contract.
+
+// dataRangerFileInfo is a test fs.FileInfo whose DataRange() returns
+// caller-supplied ranges, simulating a source (e.g. ext4 or OCI layer
+// reader) that knows where its file bytes live without holding a data reader.
+// content is the data returned by Read(); if nil, Read returns zeros.
+type dataRangerFileInfo struct {
+	name    string
+	size    int64
+	ranges  []erofs.DataRange
+	content []byte // data served by Read(); nil means return zeros
+}
+
+func (fi *dataRangerFileInfo) Name() string                 { return fi.name }
+func (fi *dataRangerFileInfo) Size() int64                  { return fi.size }
+func (*dataRangerFileInfo) Mode() fs.FileMode               { return 0o644 }
+func (*dataRangerFileInfo) ModTime() time.Time              { return time.Time{} }
+func (*dataRangerFileInfo) IsDir() bool                     { return false }
+func (*dataRangerFileInfo) Sys() any                        { return nil }
+func (fi *dataRangerFileInfo) DataRange() []erofs.DataRange { return fi.ranges }
+
+// dataRangerFS is a minimal fs.FS that exposes one regular file whose
+// FileInfo implements DataRange().  It also implements DeviceBlocks() so
+// CopyFrom records the backing-device size.
+type dataRangerFS struct {
+	file *dataRangerFileInfo
+	// deviceBlocks is the declared size (in 4096-byte blocks) of the backing device.
+	deviceBlocks uint64
+}
+
+func (f *dataRangerFS) DeviceBlocks() uint64 { return f.deviceBlocks }
+
+func (f *dataRangerFS) Open(name string) (fs.File, error) {
+	if name == "." {
+		return &dataRangerDir{fs: f}, nil
+	}
+
+	if name == f.file.name {
+		return &dataRangerFile{info: f.file}, nil
+	}
+
+	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+}
+
+type dataRangerDir struct {
+	fs      *dataRangerFS
+	didRead bool
+}
+
+func (*dataRangerDir) Stat() (fs.FileInfo, error) {
+	return &dataRangerDirInfo{}, nil
+}
+
+func (*dataRangerDir) Read([]byte) (int, error) {
+	//nolint:err113 // a fake's failure fixture
+	return 0, &fs.PathError{Op: "read", Path: ".", Err: errors.New("is a directory")}
+}
+func (*dataRangerDir) Close() error { return nil }
+func (d *dataRangerDir) ReadDir(int) ([]fs.DirEntry, error) {
+	if d.didRead {
+		return nil, io.EOF
+	}
+
+	d.didRead = true
+
+	return []fs.DirEntry{&dataRangerEntry{info: d.fs.file}}, nil
+}
+
+type dataRangerDirInfo struct{}
+
+func (*dataRangerDirInfo) Name() string       { return "." }
+func (*dataRangerDirInfo) Size() int64        { return 0 }
+func (*dataRangerDirInfo) Mode() fs.FileMode  { return fs.ModeDir | 0o755 }
+func (*dataRangerDirInfo) ModTime() time.Time { return time.Time{} }
+func (*dataRangerDirInfo) IsDir() bool        { return true }
+func (*dataRangerDirInfo) Sys() any           { return nil }
+
+type dataRangerEntry struct{ info *dataRangerFileInfo }
+
+func (e *dataRangerEntry) Name() string               { return e.info.name }
+func (*dataRangerEntry) IsDir() bool                  { return false }
+func (*dataRangerEntry) Type() fs.FileMode            { return 0 }
+func (e *dataRangerEntry) Info() (fs.FileInfo, error) { return e.info, nil }
+
+type dataRangerFile struct {
+	info   *dataRangerFileInfo
+	offset int64
+}
+
+func (f *dataRangerFile) Stat() (fs.FileInfo, error) { return f.info, nil }
+func (f *dataRangerFile) Read(p []byte) (int, error) {
+	if f.offset >= f.info.size {
+		return 0, io.EOF
+	}
+
+	var n int
+	if f.info.content != nil {
+		// Serve actual content so leak-detection tests can catch accidental reads.
+		n = copy(p, f.info.content[f.offset:])
+	} else {
+		// No content supplied: return zeros up to size.
+		end := min(int64(len(p)), f.info.size-f.offset)
+		for i := range p[:end] {
+			p[i] = 0
+		}
+
+		n = int(end)
+	}
+
+	f.offset += int64(n)
+
+	return n, nil
+}
+func (*dataRangerFile) Close() error { return nil }

@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"math"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -1357,6 +1358,196 @@ func TestContractWriterRemoveAndLink(t *testing.T) {
 		if _, err := fs.Lstat(b.fsys, gone); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("%s: Lstat %v after Remove, want ErrNotExist", gone, err)
 		}
+	}
+}
+
+// TestContractWriterLifecycle: what a closed writer or file refuses, as
+// fs.ErrClosed ("FS already closed", "write to closed file"): a write or a
+// second Close of a closed file, a second Close of the writer, a Create
+// after it; a second Create of a name already written is refused and the
+// first file stands; the file open for writing is refused at Open until
+// its Close and served after; a directory handle refuses Read.
+func TestContractWriterLifecycle(t *testing.T) {
+	t.Parallel()
+
+	out := &testBuffer{}
+	w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	f, ferr := w.Create("/f")
+	if ferr != nil {
+		t.Fatal(ferr)
+	}
+
+	if _, err := f.Write([]byte("first")); err != nil {
+		t.Fatal(err)
+	}
+
+	// The one file open for writing is not served: Open of it is refused
+	// until its Close, and a PathError names the path.
+	if _, err := w.Open("/f"); err == nil {
+		t.Error("Open of the file still open for writing succeeded")
+	} else if pe := (*fs.PathError)(nil); !errors.As(err, &pe) || pe.Path != "/f" {
+		t.Errorf("Open of the file still open for writing: %v, want a PathError for /f", err)
+	}
+
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if h, err := w.Open("/f"); err != nil {
+		t.Errorf("Open after the file's Close: %v", err)
+	} else if data, rerr := io.ReadAll(h); rerr != nil || string(data) != "first" {
+		t.Errorf("Open after the file's Close reads %q, %v; want \"first\"", data, rerr)
+	} else {
+		_ = h.Close()
+	}
+
+	if _, err := f.Write([]byte("more")); !errors.Is(err, fs.ErrClosed) {
+		t.Errorf("Write after Close: %v, want fs.ErrClosed", err)
+	}
+
+	if err := f.Close(); !errors.Is(err, fs.ErrClosed) {
+		t.Errorf("second Close of a file: %v, want fs.ErrClosed", err)
+	}
+
+	if _, err := w.Create("/f"); err == nil {
+		t.Error("a second Create of a written name succeeded")
+	}
+
+	if err := w.Mkdir("/d", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	d, derr := w.Open("/d")
+	if derr != nil {
+		t.Fatal(derr)
+	}
+
+	if _, err := d.Read(make([]byte, 8)); err == nil {
+		t.Error("Read from a directory handle succeeded")
+	}
+
+	_ = d.Close()
+
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.Close(); !errors.Is(err, fs.ErrClosed) {
+		t.Errorf("second Close of the writer: %v, want fs.ErrClosed", err)
+	}
+
+	if _, err := w.Create("/g"); !errors.Is(err, fs.ErrClosed) {
+		t.Errorf("Create after Close: %v, want fs.ErrClosed", err)
+	}
+
+	// An entry never given a time has none: zero, not the build time.
+	want := []corpus.Node{
+		{Path: "f", Type: tar.TypeReg, Mode: 0o644, Data: []byte("first")},
+		{Path: "d", Type: tar.TypeDir, Mode: 0o755},
+	}
+	im := corpus.Image{Name: "lifecycle", Img: out.Bytes(), Tree: want}
+	corpus.CheckTree(t, im, parseImage(t, im), want, true)
+}
+
+// TestContractWriterEmptyImage: a writer closed with nothing added is an
+// image of one empty root, which the reference and fsck.erofs read.
+func TestContractWriterEmptyImage(t *testing.T) {
+	t.Parallel()
+
+	im := corpus.Image{Name: "empty", Img: writeImage(t, nil)}
+	ref := parseImage(t, im)
+
+	root, err := ref.Inode(ref.Super.RootNid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ents, err := ref.Dirents(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, e := range ents {
+		if n := string(e.Name); n != "." && n != ".." {
+			t.Errorf("the empty image's root lists %q", n)
+		}
+	}
+
+	if ents, err := fs.ReadDir(openImage(t, im), "."); err != nil || len(ents) != 0 {
+		t.Errorf("ReadDir(\".\") = %v, %v; want none", ents, err)
+	}
+
+	fsckUnlessPlatformLimit(t, im)
+}
+
+// TestContractWriterTempDirHoldsTheSpool: "WithTempDir (where the spool
+// lives otherwise)": with no data file, a file's bytes are spooled under the
+// given directory, so a directory that does not exist fails the write, and
+// an existing one carries the image to a whole read-back.
+func TestContractWriterTempDirHoldsTheSpool(t *testing.T) {
+	t.Parallel()
+
+	data := corpus.Pattern(200_000)
+	nodes := []corpus.Node{{Path: "big", Type: tar.TypeReg, Mode: 0o644, Data: data, Sec: corpus.BuildTime}}
+
+	t.Run("missing", func(t *testing.T) {
+		t.Parallel()
+
+		w := erofs.Create(&testBuffer{}, erofs.WithTempDir(filepath.Join(t.TempDir(), "missing")))
+
+		f, err := w.Create("/big")
+		if err == nil {
+			_, err = f.Write(data)
+		}
+
+		if err == nil {
+			err = f.Close()
+		}
+
+		if err == nil {
+			err = w.Close()
+		}
+
+		if err == nil {
+			t.Fatal("a writer whose temp dir does not exist wrote a 200 kB file without an error")
+		}
+	})
+
+	t.Run("present", func(t *testing.T) {
+		t.Parallel()
+
+		out := &testBuffer{}
+		w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0), erofs.WithTempDir(t.TempDir()))
+		writeNode(t, w, nodes[0])
+
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		im := corpus.Image{Name: "spooled", Img: out.Bytes(), Tree: nodes}
+		corpus.CheckTree(t, im, parseImage(t, im), nodes, true)
+	})
+}
+
+// TestContractMetadataOnlyWritesNoData: "file data is not copied": a generic
+// source copied metadata-only leaves none of its bytes in the image, which
+// holds the file as holes (the model's rule, read back elsewhere); here the
+// bytes themselves are looked for.
+func TestContractMetadataOnlyWritesNoData(t *testing.T) {
+	t.Parallel()
+
+	marker := bytes.Repeat([]byte("EROFS_DATA_LEAK_CHECK!"), 200)
+	out := &testBuffer{}
+	w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	src := fstest.MapFS{"f": &fstest.MapFile{Data: marker, Mode: 0o644, ModTime: time.Unix(corpus.BuildTime, 0)}}
+	if err := errors.Join(w.CopyFrom(src, erofs.MetadataOnly()), w.Close()); err != nil {
+		t.Fatal(err)
+	}
+
+	if bytes.Contains(out.Bytes(), marker[:64]) {
+		t.Error("the metadata-only image holds the source's bytes")
 	}
 }
 
