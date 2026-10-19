@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -1312,6 +1313,143 @@ func copyAgrees(src []byte, srcExtra [][]byte, dst []byte, dstExtra [][]byte) st
 	}
 
 	return ""
+}
+
+// TestContractCopyRefusesAShortSourceRead: a generic source whose data
+// reader yields fewer bytes than its declared size is refused, at CopyFrom
+// or at the Close that lays the image out, whether the file would be
+// tail-packed (inline-sized) or laid out in blocks: no image is written
+// with the tail zero-filled.
+func TestContractCopyRefusesAShortSourceRead(t *testing.T) {
+	t.Parallel()
+
+	for _, size := range []int{100, 40000} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			t.Parallel()
+
+			src := fstest.MapFS{"f": &fstest.MapFile{
+				Data: make([]byte, size),
+				Mode: 0o644,
+				Sys:  &builder.Entry{Data: &shortDataReader{data: bytes.Repeat([]byte("A"), 10)}},
+			}}
+
+			// The bytes are read when the image is laid out, so the short
+			// read surfaces at Close when CopyFrom accepted the entry.
+			w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(corpus.BuildTime, 0))
+			if err := w.CopyFrom(src); err == nil {
+				if err := w.Close(); err == nil {
+					t.Fatal("a source short of its declared size was written as an image")
+				}
+			}
+		})
+	}
+}
+
+// shortDataReader declares more than it delivers.
+type shortDataReader struct {
+	data []byte
+	pos  int
+}
+
+func (s *shortDataReader) Read(p []byte) (int, error) {
+	if s.pos >= len(s.data) {
+		return 0, io.EOF
+	}
+
+	n := copy(p, s.data[s.pos:])
+	s.pos += n
+
+	return n, nil
+}
+
+// TestContractGenericDataRangeAtTheSmallestBlockSizeAndReindexed: the
+// DataRange contract at a 512-byte block, where a hole of one block sits
+// inside what a larger chunk would cover (the chunk size follows the block
+// size, not a floor), through Read and through WriteTo; and the image
+// copied metadata-only into another keeps the mapping, the first image
+// and its device becoming the copy's first and second devices.
+func TestContractGenericDataRangeAtTheSmallestBlockSizeAndReindexed(t *testing.T) {
+	t.Parallel()
+
+	const bs = 512
+
+	blob := make([]byte, 64*bs)
+	for i := range blob {
+		blob[i] = byte('a' + i/bs%26)
+	}
+
+	ranges := []erofs.DataRange{
+		{Offset: 0, Size: bs},
+		{Offset: -1, Size: bs},
+		{Offset: 2 * bs, Size: 2 * bs},
+	}
+
+	want := append(append(append([]byte{}, blob[:bs]...), make([]byte, bs)...), blob[2*bs:4*bs]...)
+
+	src := &dataRangerFS{deviceBlocks: 64, file: &dataRangerFileInfo{name: "f", size: 4 * bs, ranges: ranges}}
+	out := &testBuffer{}
+	w := erofs.Create(out, erofs.WithBlockSize(bs), erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if err := errors.Join(w.CopyFrom(src, erofs.MetadataOnly()), w.Close()); err != nil {
+		t.Fatal(err)
+	}
+
+	first := corpus.Image{Name: "ranges-512", Img: out.Bytes(), Blob: blob}
+
+	check := func(t *testing.T, im corpus.Image) {
+		t.Helper()
+
+		fsys := openImage(t, im)
+
+		got, err := fs.ReadFile(fsys, "f")
+		if err != nil || !bytes.Equal(got, want) {
+			t.Errorf("ReadFile: %d bytes, %v; want the data, a block of zeros, the data", len(got), err)
+		}
+
+		f, err := fsys.Open("f")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var through bytes.Buffer
+		if _, cerr := io.Copy(&through, f); cerr != nil || !bytes.Equal(through.Bytes(), want) {
+			t.Errorf("WriteTo: %d bytes, %v; want the data, a block of zeros, the data", through.Len(), cerr)
+		}
+
+		_ = f.Close()
+
+		fi, err := fs.Stat(fsys, "f")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var holes int64
+
+		for _, r := range fi.(interface{ DataRange() []erofs.DataRange }).DataRange() {
+			if r.Offset < 0 {
+				holes += r.Size
+			}
+		}
+
+		if holes != bs {
+			t.Errorf("DataRange holds %d bytes of holes, want one block of %d", holes, bs)
+		}
+
+		if err := corpus.FsckVerdict(t, im); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	check(t, first)
+
+	out2 := &testBuffer{}
+	w2 := erofs.Create(out2, erofs.WithBlockSize(bs), erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if err := errors.Join(w2.CopyFrom(openImage(t, first), erofs.MetadataOnly()), w2.Close()); err != nil {
+		t.Fatal(err)
+	}
+
+	check(t, corpus.Image{Name: "ranges-512-reindexed", Img: out2.Bytes(), Devices: [][]byte{first.Img, blob}})
 }
 
 // The generic sources with a DataRange, for the DataRange contract.

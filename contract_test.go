@@ -88,8 +88,8 @@ func openImage(tb testing.TB, im corpus.Image) fs.FS {
 	tb.Helper()
 
 	var opts []erofs.OpenOpt
-	if im.Blob != nil {
-		opts = append(opts, erofs.WithExtraDevices(bytes.NewReader(im.Blob)))
+	for _, d := range im.Extra() {
+		opts = append(opts, erofs.WithExtraDevices(bytes.NewReader(d)))
 	}
 
 	fsys, err := erofs.Open(bytes.NewReader(im.Img), opts...)
