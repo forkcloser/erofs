@@ -284,6 +284,8 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			nlink   uint32
 			size    uint64
 			idata   uint32
+			startHi uint16
+			addr48  bool
 			mtime   uint64
 			mtimeNs uint32
 			xcnt    uint16
@@ -296,7 +298,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			mode = ino.Mode
 			uid = uint32(ino.UID)
 			gid = uint32(ino.GID)
-			nlink = uint32(ino.Nlink)
+			nlink = uint32(ino.NB)
 			size = uint64(ino.Size)
 			idata = ino.InodeData
 			// The superblock's epoch plus i_mtime, as the kernel reads a
@@ -305,6 +307,15 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			mtimeNs = buildTimeNs
 			xcnt = ino.XattrCount
 			icSize = disk.SizeInodeCompact
+
+			// On a compact non-directory with the nlink-1 bit the link count
+			// is one and i_nb is the start block's high 16 bits (inode.c:
+			// erofs_read_inode); otherwise i_nb is the link count.
+			if mode&disk.StatTypeMask != disk.StatTypeDir && format&disk.InodeFormatNlink1 != 0 {
+				nlink = 1
+				startHi = ino.NB
+				addr48 = true
+			}
 		} else {
 			var ino disk.InodeExtended
 			ino.Unmarshal(buf)
@@ -318,15 +329,23 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			mtimeNs = ino.MtimeNs
 			xcnt = ino.XattrCount
 			icSize = disk.SizeInodeExtended
-
-			if err := checkHighBlockBits(cur.nid, ino.Reserved); err != nil {
-				return err
-			}
+			// An extended inode's start block is 48 bits wide, i_nb its
+			// high 16 (inode.c: erofs_read_inode).
+			startHi = ino.NB
+			addr48 = true
 		}
+
+		// The start block as the kernel composes it; judged where a block
+		// is read by it, as Stat judges it.
+		startBlk := uint64(idata) | uint64(startHi)<<startBlockBits32
 
 		// What the reader refuses, the copy refuses, in the reader's class:
 		// a copy of an inode Stat would not serve is no copy of the image.
-		if err := checkInodeFormat(cur.nid, format, mode); err != nil {
+		if err := checkInodeFormat(cur.nid, format); err != nil {
+			return err
+		}
+
+		if err := checkChunkFormat(cur.nid, layout, idata); err != nil {
 			return err
 		}
 
@@ -441,14 +460,24 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		// then the tail beside the inode.
 		inlineData := func(size int64) ([]byte, error) {
 			if layout == disk.LayoutFlatPlain {
-				return img.readFlat(int64(idata)<<blkBits, size)
+				pa, err := img.blockAddr(cur.nid, startBlk)
+				if err != nil {
+					return nil, err
+				}
+
+				return img.readFlat(pa, size)
 			}
 
 			if size == tail {
 				return span(trailingAddr, tail)
 			}
 
-			blocks, err := img.readFlat(int64(idata)<<blkBits, size-tail)
+			pa, err := img.blockAddr(cur.nid, startBlk)
+			if err != nil {
+				return nil, err
+			}
+
+			blocks, err := img.readFlat(pa, size-tail)
 			if err != nil {
 				return nil, err
 			}
@@ -521,22 +550,27 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				whole := uint64((int64(size) - tail + int64(blockSize) - 1) >> blkBits)
 				switch {
 				case whole == 0:
-				case compact && idata == disk.NullAddr:
-					// The kernel maps the null address as a hole on a compact
-					// inode only (an extended inode's start block is 48 bits
-					// wide, so there it is block 0xffffffff, judged below); a
-					// tail after the hole keeps its place only if the hole is
-					// spelled out.
+				case layout == disk.LayoutFlatPlain && nullStartBlock(startBlk, addr48):
+					// The kernel maps a flat-plain file at the null address
+					// as a hole (erofs_map_blocks); a flat-inline file's
+					// whole blocks it reads at the address whatever it is,
+					// the null address past every device. A tail after the
+					// hole keeps its place only if the hole is spelled out.
 					fe.chunks = deviceChunks(builder.NullPhysicalBlock, whole, 0)
 				default:
-					// Bounded as Stat bounds the file's blocks (locateRange),
-					// so the copy refuses what Stat refuses rather than
-					// naming blocks past every device.
-					if _, _, err := img.locateRange(int64(idata)<<blkBits, int64(size)-tail); err != nil {
+					// Bounded as Stat bounds the file's blocks (blockAddr,
+					// locateRange), so the copy refuses what Stat refuses
+					// rather than naming blocks past every device.
+					pa, err := img.blockAddr(cur.nid, startBlk)
+					if err != nil {
 						return fmt.Errorf("nid %d: %w", cur.nid, err)
 					}
 
-					fe.chunks = img.flatChunks(uint64(idata), whole)
+					if _, _, err := img.locateRange(pa, int64(size)-tail); err != nil {
+						return fmt.Errorf("nid %d: %w", cur.nid, err)
+					}
+
+					fe.chunks = img.flatChunks(startBlk, whole)
 					fe.contiguous = tail == 0 && len(fe.chunks) == 1
 
 					if err := fsys.remapChunkDevices(cur.path, fe.chunks); err != nil {

@@ -62,9 +62,9 @@ const (
 	// Bit 4 of i_format has two names in the format. On a directory it is
 	// EROFS_I_DOT_OMITTED_BIT: the "." dirent is left out and the kernel
 	// synthesises it. On a compact non-directory inode it is
-	// EROFS_I_NLINK_1_BIT: nlink is one and the nlink field holds the start
-	// block's high bits, part of the 48-bit layout not implemented here. On
-	// an extended non-directory inode the kernel ignores it.
+	// EROFS_I_NLINK_1_BIT: nlink is one and i_nb holds the start block's
+	// high 16 bits. On an extended non-directory inode the kernel ignores
+	// it.
 	InodeFormatDotOmitted = 0x0010
 	InodeFormatNlink1     = 0x0010
 	// InodeFormatAll is every i_format bit the kernel defines (EROFS_I_ALL);
@@ -125,7 +125,7 @@ type InodeCompact struct {
 	Format     uint16 // i_format
 	XattrCount uint16 // i_xattr_icount
 	Mode       uint16 // i_mode
-	Nlink      uint16 // i_nlink
+	NB         uint16 // i_nb: the link count, or with the nlink-1 format bit the start block's high 16 bits
 	Size       uint32 // i_size
 	Mtime      uint32 // i_mtime, seconds added to the superblock's epoch
 	InodeData  uint32 // i_u (i_raw_blkaddr, i_rdev, etc.)
@@ -140,7 +140,7 @@ type InodeExtended struct {
 	Format     uint16 // i_format
 	XattrCount uint16 // i_xattr_icount
 	Mode       uint16 // i_mode
-	Reserved   uint16 // i_reserved
+	NB         uint16 // i_nb: the start block's high 16 bits
 	Size       uint64 // i_size
 	InodeData  uint32 // i_u (i_raw_blkaddr, i_rdev, etc.)
 	Inode      uint32 // i_ino
@@ -234,7 +234,7 @@ func (i *InodeCompact) Unmarshal(b []byte) {
 	i.Format = binary.LittleEndian.Uint16(b[0:2])
 	i.XattrCount = binary.LittleEndian.Uint16(b[2:4])
 	i.Mode = binary.LittleEndian.Uint16(b[4:6])
-	i.Nlink = binary.LittleEndian.Uint16(b[6:8])
+	i.NB = binary.LittleEndian.Uint16(b[6:8])
 	i.Size = binary.LittleEndian.Uint32(b[8:12])
 	i.Mtime = binary.LittleEndian.Uint32(b[12:16])
 	i.InodeData = binary.LittleEndian.Uint32(b[16:20])
@@ -251,7 +251,7 @@ func (i *InodeExtended) Unmarshal(b []byte) {
 	i.Format = binary.LittleEndian.Uint16(b[0:2])
 	i.XattrCount = binary.LittleEndian.Uint16(b[2:4])
 	i.Mode = binary.LittleEndian.Uint16(b[4:6])
-	i.Reserved = binary.LittleEndian.Uint16(b[6:8])
+	i.NB = binary.LittleEndian.Uint16(b[6:8])
 	i.Size = binary.LittleEndian.Uint64(b[8:16])
 	i.InodeData = binary.LittleEndian.Uint32(b[16:20])
 	i.Inode = binary.LittleEndian.Uint32(b[20:24])

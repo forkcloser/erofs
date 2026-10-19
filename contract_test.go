@@ -2202,13 +2202,11 @@ func referenceVerdict(img, blob []byte) verdict {
 			return nil
 		}
 
-		// The 48-bit layout's marks on an inode, which the package names
-		// as not implemented: a 48-bit chunk map, a start block's high half
-		// in i_nb on an extended inode, the nlink-is-1 bit on a compact
-		// non-directory (where i_nb is the high half too).
-		if in.Layout == erofsspec.LayoutChunkBased && in.ChunkFormat&erofsspec.ChunkFormat48Bit != 0 ||
-			in.Extended && in.NB != 0 ||
-			!in.Extended && !in.IsDir() && in.Format&0x10 != 0 {
+		// The 48-bit layout's mark on an inode which the package names as
+		// not implemented: a 48-bit chunk map. A start block's high half
+		// in i_nb (an extended inode's, or a compact non-directory's with
+		// the nlink-is-1 bit) it reads as the kernel does.
+		if in.Layout == erofsspec.LayoutChunkBased && in.ChunkFormat&erofsspec.ChunkFormat48Bit != 0 {
 			v.notImplemented = true
 		}
 

@@ -225,9 +225,9 @@ func compactHole(img []byte, at int, size uint32) {
 
 // TestReaderInodeFormatBits: a bit the kernel does not define is
 // ErrNotImplemented on any inode. Bit 4 is dot-omitted on a directory,
-// which lists as before; nlink-1 on a compact non-directory inode, refused
-// as the 48-bit layout is; ignored on an extended non-directory inode, as
-// the kernel ignores it.
+// which lists as before; nlink-1 on a compact non-directory inode, whose
+// link count is then one and whose i_nb is the start block's high half;
+// ignored on an extended non-directory inode, as the kernel ignores it.
 func TestReaderInodeFormatBits(t *testing.T) {
 	t.Parallel()
 
@@ -280,8 +280,12 @@ func TestReaderInodeFormatBits(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, lerr := fs.Lstat(fsys, "a"); !errors.Is(lerr, erofs.ErrNotImplemented) {
-		t.Fatalf("nlink-1 on a compact file: %v; want ErrNotImplemented", lerr)
+	// a's i_nb, its link count of one, is then the start block's high
+	// half: block 0x1ffffffff, past the image, refused where every such
+	// address is (inode.c composes it; TestReaderStartBlockHighBits has the
+	// rule whole).
+	if _, lerr := fs.Lstat(fsys, "a"); !errors.Is(lerr, erofs.ErrCorrupt) {
+		t.Fatalf("nlink-1 on a compact file: %v; want ErrCorrupt, its start block 0x1ffffffff", lerr)
 	}
 
 	fsys, err = erofs.Open(bytes.NewReader(withBit(img, extendedAt, disk.InodeFormatNlink1)))
@@ -305,32 +309,6 @@ func TestReaderInodeFormatBits(t *testing.T) {
 
 	if got, rerr := fs.ReadFile(fsys, "d/x"); rerr != nil || string(got) != "x" {
 		t.Fatalf("a file under a dot-omitted directory: %q, %v", got, rerr)
-	}
-}
-
-// TestReaderExtendedInodeHighBlockBits: i_nb on an extended inode is the
-// start block's high 16 bits, which the kernel always reads; a nonzero
-// value is a 48-bit address this reader does not implement, and is refused
-// rather than read at the low 32 bits.
-func TestReaderExtendedInodeHighBlockBits(t *testing.T) {
-	t.Parallel()
-
-	img := buildImage(t, func(w *erofs.Writer) { writeFile(t, w, "/big", bytes.Repeat([]byte("b"), 3000)) })
-
-	at := inodeOffset(t, img, "big")
-	if binary.LittleEndian.Uint16(img[at:])&disk.InodeFormatExtended == 0 {
-		t.Fatal("the Writer made big a compact inode; the test wants an extended one")
-	}
-
-	img[at+6] = 0x01
-
-	fsys, err := erofs.Open(bytes.NewReader(img))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err = fs.ReadFile(fsys, "big"); !errors.Is(err, erofs.ErrNotImplemented) {
-		t.Fatalf("i_nb set on an extended inode: %v; want ErrNotImplemented", err)
 	}
 }
 
@@ -1661,4 +1639,142 @@ func sameEntry(t *testing.T, want, got fs.FS, name string) {
 			t.Errorf("%s: target %q, %v; want %q", name, gl, err, wl)
 		}
 	}
+}
+
+// TestReaderStartBlockHighBits: i_nb is the start block's high 16 bits, as
+// erofs_read_inode composes it on an extended inode, and on a compact
+// non-directory with the nlink-1 format bit, whose link count is then one.
+// The kernel never judges the field at iget, only the address it makes
+// where a block is read by it: an inode with inline data is served whole
+// whatever i_nb holds, a file whose blocks it moves past every device is
+// refused where every address past the devices is, and all 48 bits set on
+// a flat-plain extended inode is the null address, a file of zeros, where
+// the low 32 alone are block 0xffffffff. The first input is the fuzzer's:
+// small-b4096-extended with the root's i_nb set to 0x9200, which the reader
+// refused at Open.
+func TestReaderStartBlockHighBits(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "small-b4096-extended" {
+			continue
+		}
+
+		// The root's slot lies in the superblock's checksummed block.
+		edited := bytes.Clone(im.Img)
+		edited[1159] = 0x92
+		stampChecksum(edited)
+
+		want, err := erofs.Open(bytes.NewReader(im.Img))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatalf("Open with the root's i_nb set: %v", err)
+		}
+
+		sameTree(t, want, got)
+	}
+
+	for _, extended := range []bool{false, true} {
+		kind := "compact"
+		if extended {
+			kind = "extended"
+		}
+
+		// Inline data: i_nb is never read as an address.
+		img := assembledFile(t, 12, extended, false, []byte("inline"))
+		setStartHi(t, img, 0x9200)
+
+		fsys := openWithDevices(t, img)
+
+		st, err := fs.Lstat(fsys, "f")
+		if err != nil {
+			t.Fatalf("%s inline file with i_nb set: Lstat %v", kind, err)
+		}
+
+		if n := st.Sys().(*erofs.Stat).Nlink; n != 1 {
+			t.Errorf("%s inline file with i_nb set: nlink %d; want 1", kind, n)
+		}
+
+		if data, err := fs.ReadFile(fsys, "f"); err != nil || string(data) != "inline" {
+			t.Errorf("%s inline file with i_nb set: %q, %v; want \"inline\"", kind, data, err)
+		}
+
+		var buf testBuffer
+
+		w := erofs.Create(&buf)
+		if err := w.CopyFrom(fsys, erofs.MetadataOnly()); err != nil {
+			t.Errorf("%s inline file with i_nb set: CopyFrom(MetadataOnly): %v", kind, err)
+		}
+
+		// Data blocks: the high half moves them past every device.
+		img = assembledFile(t, 12, extended, true, bytes.Repeat([]byte("p"), 5000))
+		setStartHi(t, img, 1)
+		refusedByBoth(t, img, "f")
+	}
+
+	// The null address is every bit of the start block set, 48 of them on
+	// an extended inode (addrmask); the low 32 alone are a block past the
+	// image.
+	img := assembledFile(t, 12, true, true, bytes.Repeat([]byte("p"), 5000))
+	at := inodeOffset(t, img, "f")
+	binary.LittleEndian.PutUint32(img[at+16:], disk.NullAddr)
+	refusedByBoth(t, bytes.Clone(img), "f")
+
+	binary.LittleEndian.PutUint16(img[at+6:], 0xffff)
+
+	fsys := openWithDevices(t, img)
+
+	data, err := fs.ReadFile(fsys, "f")
+	if err != nil || len(data) != 5000 || bytes.Count(data, []byte{0}) != 5000 {
+		t.Fatalf("extended flat-plain file at the 48-bit null address: %d bytes, %v; want 5000 zeros", len(data), err)
+	}
+
+	var buf testBuffer
+
+	w := erofs.Create(&buf)
+	if err := w.CopyFrom(fsys, erofs.MetadataOnly()); err != nil {
+		t.Fatalf("CopyFrom(MetadataOnly) of a file at the 48-bit null address: %v", err)
+	}
+
+	// A start block the address cannot hold: 64 KiB blocks and the high
+	// half full, refused in the class of every address past the devices.
+	img = assembledFile(t, 16, true, true, []byte("p"))
+	setStartHi(t, img, 0xffff)
+	refusedByBoth(t, img, "f")
+}
+
+// assembledFile assembles a root holding one regular file, "f", compact or
+// extended, its data inline or in data blocks.
+func assembledFile(t *testing.T, blockBits uint8, extended, plain bool, data []byte) []byte {
+	t.Helper()
+
+	return corpus.Assemble(corpus.Layout{
+		BlockBits: blockBits,
+		Extended:  extended,
+		Entries: []corpus.AEntry{{
+			Name:  "f",
+			Mode:  0o100644,
+			Nlink: 1,
+			Mtime: corpus.AssembledBuildTime,
+			Data:  data,
+			Plain: plain,
+		}},
+	})
+}
+
+// setStartHi puts hi in f's i_nb; a compact inode gets the nlink-1 bit
+// with it, without which i_nb is its link count.
+func setStartHi(t *testing.T, img []byte, hi uint16) {
+	t.Helper()
+
+	at := inodeOffset(t, img, "f")
+	if img[at]&disk.InodeFormatExtended == 0 {
+		img[at] |= disk.InodeFormatNlink1
+	}
+
+	binary.LittleEndian.PutUint16(img[at+6:], hi)
 }
