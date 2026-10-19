@@ -584,6 +584,45 @@ func TestContractWriterChown(t *testing.T) {
 	}
 }
 
+// TestContractWriterChownRefusedLeavesTheIds: a Chown refused as
+// fs.ErrInvalid changes nothing: the ids set before it stand in the image.
+func TestContractWriterChownRefusedLeavesTheIds(t *testing.T) {
+	t.Parallel()
+
+	b := wBuild(t, func(w *erofs.Writer) {
+		f, err := w.Create("f")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := f.Chown(1, 2); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := f.Chown(-1, 0); !errors.Is(err, fs.ErrInvalid) {
+			t.Fatalf("File.Chown(-1, 0): %v, want ErrInvalid", err)
+		}
+
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		for _, ids := range [][2]int{{0, -1}, {math.MaxUint32 + 1, 0}} {
+			if err := w.Chown("f", ids[0], ids[1]); !errors.Is(err, fs.ErrInvalid) {
+				t.Fatalf("Writer.Chown(%d, %d): %v, want ErrInvalid", ids[0], ids[1], err)
+			}
+		}
+	})
+
+	if in := b.inodeOf(t, "f"); in.UID != 1 || in.GID != 2 {
+		t.Errorf("image has %d:%d after the refused chowns, want 1:2", in.UID, in.GID)
+	}
+
+	if _, st := b.statOf(t, "f"); st.UID != 1 || st.GID != 2 {
+		t.Errorf("Lstat has %d:%d after the refused chowns, want 1:2", st.UID, st.GID)
+	}
+}
+
 // chownVia creates f and chowns it through the writer or the open file.
 func chownVia(tb testing.TB, w *erofs.Writer, via string, uid, gid int) error {
 	tb.Helper()
