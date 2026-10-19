@@ -80,14 +80,6 @@ func writeFile(t *testing.T, w *erofs.Writer, name string, data []byte) {
 	}
 }
 
-func firstByte(b []byte) byte {
-	if len(b) == 0 {
-		return 0
-	}
-
-	return b[0]
-}
-
 // openWithDevices opens img over its extra devices.
 func openWithDevices(t *testing.T, img []byte, devices ...[]byte) fs.FS {
 	t.Helper()
