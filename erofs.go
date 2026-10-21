@@ -338,8 +338,11 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 				device = o.extraDevices[idx]
 			}
 
+			size, _ := imageSize(device)
+
 			i.devices[idx] = deviceInfo{
 				device:        device,
+				size:          size,
 				mappedBlkAddr: slot.MappedBlkAddr,
 				blocks:        slot.Blocks,
 			}
@@ -425,6 +428,7 @@ func roundupPowerOfTwo(v uint32) uint32 {
 // deviceInfo holds the parsed mapped address range for a device table entry.
 type deviceInfo struct {
 	device        io.ReaderAt
+	size          int64  // the device's readable length, or 0 when unknown
 	mappedBlkAddr uint32 // starting mapped block address
 	blocks        uint32 // total block count for this device
 }
@@ -855,8 +859,13 @@ func (img *image) flatWindow(r io.ReaderAt, mappedBlkAddr uint32) io.ReaderAt {
 
 // blockSize returns the filesystem block size.
 // boundOnDevice refuses a range that runs past its device: the image's
-// extent for device 0, the slot's block count for an extra device; a slot
-// of zero blocks declares nothing to bound by.
+// extent for device 0, and for an extra device its reader's length, the
+// extent a block device answers the kernel with (erofs_map_dev consults
+// the slot's block count for the primary device's mapped ranges only, never
+// for a chunk naming its device). A device that cannot report its length
+// is bounded by the slot's count, the only extent the image states for it,
+// as the image itself is by its superblock's; a slot of zero blocks then
+// declares nothing to bound by.
 func (img *image) boundOnDevice(dev uint16, off, n int64) error {
 	if dev == 0 {
 		return img.checkImageRange(off, n)
@@ -866,12 +875,25 @@ func (img *image) boundOnDevice(dev uint16, off, n int64) error {
 		return fmt.Errorf("invalid device id %d: %w", dev, ErrCorrupt)
 	}
 
+	if off < 0 || n < 0 || off > math.MaxInt64-n {
+		return fmt.Errorf("data range [%d, +%d) on device %d is out of range: %w", off, n, dev, ErrCorrupt)
+	}
+
+	if extent := img.devices[dev-1].size; extent > 0 {
+		if off+n > extent {
+			return fmt.Errorf("data range [%d, +%d) runs past the end of device %d's %d bytes: %w",
+				off, n, dev, extent, ErrCorrupt)
+		}
+
+		return nil
+	}
+
 	blocks := int64(img.devices[dev-1].blocks)
 	if blocks == 0 {
 		return nil
 	}
 
-	if off < 0 || n < 0 || off > math.MaxInt64-n || off+n > blocks<<img.sb.BlkSizeBits {
+	if off+n > blocks<<img.sb.BlkSizeBits {
 		return fmt.Errorf("data range [%d, +%d) runs past the end of device %d's %d blocks: %w",
 			off, n, dev, blocks, ErrCorrupt)
 	}
