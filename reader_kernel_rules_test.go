@@ -1778,3 +1778,54 @@ func setStartHi(t *testing.T, img []byte, hi uint16) {
 
 	binary.LittleEndian.PutUint16(img[at+6:], hi)
 }
+
+// TestReaderDeviceExtentIsTheReaders: a chunk naming its device is bounded
+// by that device's extent, its reader's length, as erofs_map_dev hands the
+// read to the device and the device answers; the slot's block count is
+// consulted for the primary device's mapped ranges only. The first input
+// is the fuzzer's: small-blobdev-512 with the blob's slot declaring 2
+// blocks over a 47-block blob, which the kernel reads whole and the reader
+// refused as past the device. A count above the extent changes nothing, a
+// chunk past the blob stays refused; a device that cannot report its
+// length is bounded by the slot's count, the only extent stated for it.
+func TestReaderDeviceExtentIsTheReaders(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name != "small-blobdev-512" {
+			continue
+		}
+
+		// The slot's blocks field is the four bytes after its 64-byte tag,
+		// inside the superblock's checksummed block.
+		short := bytes.Clone(im.Img)
+		short[1216] = 0x02
+		stampChecksum(short)
+
+		sameTree(t, openWithDevices(t, im.Img, im.Blob), openWithDevices(t, short, im.Blob))
+
+		long := bytes.Clone(im.Img)
+		long[1216] = 0x64 // 100 blocks declared over 47
+		long[3110] = 0x5a // d/sub/e08's chunk at block 90: within the count, past the blob
+		stampChecksum(long)
+
+		if _, err := fs.Stat(openWithDevices(t, long, im.Blob), "d/sub/e08"); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("Stat of a chunk past the blob under a longer count: %v; want ErrCorrupt", err)
+		}
+
+		if _, err := fs.ReadFile(openWithDevices(t, long, im.Blob), "d/f"); err != nil {
+			t.Fatalf("ReadFile of a chunk within the blob under a longer count: %v", err)
+		}
+
+		blob := readAtOnly{bytes.NewReader(im.Blob)}
+
+		unsized, err := erofs.Open(bytes.NewReader(short), erofs.WithExtraDevices(blob))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := fs.Stat(unsized, "d/f"); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("Stat over an unsized device declared shorter: %v; want ErrCorrupt by the slot's count", err)
+		}
+	}
+}
