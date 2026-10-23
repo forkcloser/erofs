@@ -47,6 +47,27 @@ die() {
     exit 1
 }
 
+# apt is the one input the script cannot pin, and the one that has stalled: a
+# silent twenty minutes under -qq, the job's whole budget, with nothing in the
+# log to say whether the index refresh or the mingw download was the part not
+# moving. So each call is bounded and talks: a line names the phase before it
+# runs, -q keeps the Get: lines that show a download progressing, Acquire's
+# retries and per-connection timeout turn a dead mirror into a quick failure,
+# and timeout(1) caps each call at five minutes, ten for the two together
+# under the job's twenty, with a kill thirty seconds after the term for an
+# apt-get deaf to it, so a stall fails here, with the phase in the log,
+# rather than as a cancelled job. The frontend is pinned so no package can
+# wait on a question nobody is there to answer.
+apt_get() {
+    echo "build-erofs-utils: apt-get $1" >&2
+    sudo timeout --kill-after=30 300 env DEBIAN_FRONTEND=noninteractive apt-get -q \
+        -o Acquire::Retries=3 \
+        -o Acquire::http::Timeout=30 \
+        -o Acquire::https::Timeout=30 \
+        -o Dpkg::Use-Pty=0 \
+        "$@" || die "apt-get $1 failed or stalled past five minutes (exit $?)"
+}
+
 # fetch <url> <sha256> <dest>: download and verify, or fail closed. The
 # download is the org's canonical curl shape: https only, TLS 1.2 floor,
 # retries on transient failures; the sha256 below is the real guard.
@@ -81,8 +102,8 @@ build_native() {
     if [ -z "${SKIP_DEPS:-}" ]; then
         case "$(uname -s)" in
             Linux)
-                sudo apt-get update -qq
-                sudo apt-get install -y -qq autoconf automake libtool pkg-config libz-dev liblz4-dev uuid-dev
+                apt_get update
+                apt_get install -y autoconf automake libtool pkg-config libz-dev liblz4-dev uuid-dev
                 ;;
             Darwin)
                 brew install autoconf automake libtool pkg-config lz4
@@ -110,8 +131,8 @@ build_native() {
 build_windows() {
     [ "$(uname -s)" = "Linux" ] || die "the windows cross-build needs a linux host"
     if [ -z "${SKIP_DEPS:-}" ]; then
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq autoconf automake libtool pkg-config mingw-w64
+        apt_get update
+        apt_get install -y autoconf automake libtool pkg-config mingw-w64
     fi
     mkdir -p "$work"
 
