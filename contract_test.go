@@ -2177,7 +2177,7 @@ func TestContractReaderRefusesCompressedImages(t *testing.T) {
 
 	tarball := corpus.Tar(t, corpus.Small())
 
-	for _, args := range [][]string{{"-zlz4"}, {"-zlz4", "-b512"}, {"-zlz4", "-Ededupe"}} {
+	for _, args := range [][]string{{"-zlz4", "-b4096"}, {"-zlz4", "-b512"}, {"-zlz4", "-b4096", "-Ededupe"}} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			t.Parallel()
 
