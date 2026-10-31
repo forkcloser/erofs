@@ -1484,17 +1484,20 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 		}
 
 		b := img.getBlock()
-		if n, err := img.deviceReader(dev).ReadAt(b.buf[blockOffset:blockEnd], addr+int64(blockOffset)); err != nil {
+		// The count before the error: an io.ReaderAt may answer a full read
+		// that ends at its last byte with io.EOF, and that read is the block.
+		n, readErr := img.deviceReader(dev).ReadAt(b.buf[blockOffset:blockEnd], addr+int64(blockOffset))
+
+		switch {
+		case n == blockEnd-blockOffset:
+		case readErr != nil && !errors.Is(readErr, io.EOF):
 			img.putBlock(b)
 
-			if errors.Is(err, io.EOF) {
-				return nil, fmt.Errorf("the device ends inside a block of nid %d: %w", fi.nid, ErrCorrupt)
-			}
-
-			return nil, fmt.Errorf("failed to read block for nid %d: %w", fi.nid, err)
-		} else if n != (blockEnd - blockOffset) {
+			return nil, fmt.Errorf("failed to read block for nid %d: %w", fi.nid, readErr)
+		default:
 			img.putBlock(b)
-			return nil, fmt.Errorf("failed to read full block for nid %d: %w", fi.nid, ErrCorrupt)
+
+			return nil, fmt.Errorf("the device ends inside a block of nid %d: %w", fi.nid, ErrCorrupt)
 		}
 
 		b.offset = int32(blockOffset) // #nosec G115 -- checked above: in [0, blockSize), at most 1<<16
@@ -1530,7 +1533,17 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 	b.offset = int32(blockOffset) // #nosec G115 -- checked above: in [0, blockSize), at most 1<<16
 
 	b.end = int32(blockEnd) // #nosec G115 -- checked above: at most blockSize, at most 1<<16
-	if n, err := reader.ReadAt(b.bytes(), start); err != nil {
+	// The count before the error: an io.ReaderAt may answer a full read that
+	// ends at its last byte with io.EOF, and that read is the block.
+	n, err := reader.ReadAt(b.bytes(), start)
+
+	switch {
+	case n == blockEnd-blockOffset:
+	case err != nil && !errors.Is(err, io.EOF):
+		img.putBlock(b)
+
+		return nil, fmt.Errorf("failed to read block for nid %d: %w", fi.nid, err)
+	default:
 		img.putBlock(b)
 		// The block lies inside the image's declared extent (checked above,
 		// by the image's size or the device's blocks), so a reader that
@@ -1539,16 +1552,8 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 		// the reader's end of file. A bare io.EOF here read as "no more
 		// blocks" to ReadDir and the lookup, which listed an empty
 		// directory and said ErrNotExist for every name in the block.
-		if errors.Is(err, io.EOF) {
-			return nil, fmt.Errorf("the image ends inside a block of nid %d: %w", fi.nid, ErrCorrupt)
-		}
-
-		return nil, fmt.Errorf("failed to read block for nid %d: %w", fi.nid, err)
-	} else if n != blockEnd-blockOffset {
-		img.putBlock(b)
-
 		return nil, fmt.Errorf(
-			"failed to read full block for nid %d: %w, expected %d, actual %d",
+			"the image ends inside a block of nid %d: %w, expected %d, actual %d",
 			fi.nid,
 			ErrCorrupt,
 			blockEnd-blockOffset,

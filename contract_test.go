@@ -57,6 +57,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -2737,5 +2738,95 @@ func readerClass(err error) string {
 		return "eof"
 	default:
 		return "other"
+	}
+}
+
+// eofReaderAt is an io.ReaderAt that answers a full read ending at its last
+// byte with (len(p), io.EOF), as the interface allows; it counts those reads
+// so the test knows the case was met.
+type eofReaderAt struct {
+	data  []byte
+	atEnd *atomic.Int64
+}
+
+func (r eofReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if off >= int64(len(r.data)) {
+		return 0, io.EOF
+	}
+
+	n := copy(p, r.data[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+
+	if off+int64(n) == int64(len(r.data)) {
+		r.atEnd.Add(1)
+
+		return n, io.EOF
+	}
+
+	return n, nil
+}
+
+// TestContractReaderAcceptsEOFOnFullRead: a block read that ends exactly at
+// the image's last byte may come back as (len(p), io.EOF), and the file is
+// served, not refused as corrupt. mkfs.erofs lays file data after the
+// metadata, so the committed images end in a data block; every regular file
+// of every image is read through such a reader and compared with the plain
+// one, and at least one read must have ended at an image's last byte.
+func TestContractReaderAcceptsEOFOnFullRead(t *testing.T) {
+	t.Parallel()
+
+	var atEnd atomic.Int64
+
+	t.Cleanup(func() {
+		if !t.Failed() && atEnd.Load() == 0 {
+			t.Error("no read ended at an image's last byte; the case was not met")
+		}
+	})
+
+	for _, im := range corpus.Committed(t) {
+		if im.Tree == nil || im.Blob != nil {
+			continue
+		}
+
+		t.Run(im.Name, func(t *testing.T) {
+			t.Parallel()
+
+			plain := openImage(t, im)
+			if plain == nil {
+				t.Skip("a 48-bit image: the package does not open it")
+			}
+
+			fsys, err := erofs.Open(eofReaderAt{data: im.Img, atEnd: &atEnd})
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+
+			err = fs.WalkDir(plain, ".", func(name string, d fs.DirEntry, err error) error {
+				if err != nil || !d.Type().IsRegular() {
+					return err
+				}
+
+				want, err := fs.ReadFile(plain, name)
+				if err != nil {
+					return fmt.Errorf("%s through the plain reader: %w", name, err)
+				}
+
+				got, err := fs.ReadFile(fsys, name)
+				if err != nil {
+					return fmt.Errorf("%s: %w", name, err)
+				}
+
+				if !bytes.Equal(got, want) {
+					t.Errorf("%s: %d bytes, want %d", name, len(got), len(want))
+				}
+
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
