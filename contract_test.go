@@ -1212,7 +1212,7 @@ func judge(ref, got verdict) string {
 			// inode's and as invalid where it is a path's, a bound it
 			// states, kept as a documented divergence.
 			return ""
-		case got.class == "corrupt" && (ref.dupXattr || ref.undefinedXattr || ref.badTarget || ref.extentsOut || ref.direntType || ref.nidHigh || !ref.complete):
+		case got.class == "corrupt" && (ref.dupXattr || ref.undefinedXattr || ref.badTarget || ref.extentsOut || ref.direntType || ref.nidHigh || ref.nidOut || !ref.complete):
 			return ""
 		case (got.class == "corrupt" || got.class == "invalid") && ref.sharedOut:
 			return ""
@@ -1273,6 +1273,7 @@ type verdict struct {
 	unsortedDir    bool // a directory block out of name order: what a lookup finds there is the search's, not the format's
 	direntType     bool // a dirent whose type disagrees with its inode's mode: the kernel serves both, the reader refuses
 	nidHigh        bool // a dirent nid with bits 59-63 set: erofs_iloc's shift drops them, the reader refuses a nid that names no inode
+	nidOut         bool // an entry the reference's search missed names an inode past the image: a search that finds it refuses it
 	extentsOut     bool // a file whose map runs past its device, which the package refuses at Stat and the kernel at the read
 	complete       bool // the image holds every block its superblock declares: a structure past its end points outside it
 }
@@ -2259,6 +2260,15 @@ func referenceVerdict(img, blob []byte) verdict {
 		if in == nil {
 			fmt.Fprintf(h, "%s|unreachable\n", e.Path)
 
+			// On a directory block out of order, which search finds the
+			// name is the search's; the reference's missed it, the
+			// reader's may find it, and then reads the dirent's inode.
+			// One past the image is what the kernel's lookup would fail
+			// on with an I/O error, and the reader refuses as corrupt.
+			if direntNidOut(ref, e.Dir.Nid, len(img)) {
+				v.nidOut = true
+			}
+
 			return nil
 		}
 
@@ -2356,6 +2366,46 @@ func referenceVerdict(img, blob []byte) verdict {
 	v.tree = h.String()
 
 	return v
+}
+
+// direntNidOut reports whether a dirent's nid names an inode slot no byte of
+// which lies in the image. The slot fits when (nid+1)*32 <= size-base, with
+// base the metadata area's start; written without the product, so a nid up
+// to 2^64-1 (bits 59-63 set among them) answers true instead of wrapping.
+func direntNidOut(ref *erofsspec.Image, nid uint64, size int) bool {
+	base := uint64(ref.Super.MetaBlkAddr) * uint64(ref.Super.BlockSize)
+	if base >= uint64(size) {
+		return true
+	}
+
+	return nid >= (uint64(size)-base)/erofsspec.SlotSize
+}
+
+// TestDirentNidOut: the slot arithmetic at its edges, with the metadata area
+// one 4096-byte block in: the last slot that fits, the first that does not,
+// a nid that would wrap a sum, the metabox bit, and a metadata start past
+// the image.
+func TestDirentNidOut(t *testing.T) {
+	t.Parallel()
+
+	ref := &erofsspec.Image{Super: erofsspec.Super{MetaBlkAddr: 1, BlockSize: 4096}}
+
+	for _, tc := range []struct {
+		nid  uint64
+		size int
+		out  bool
+	}{
+		{0x9200000326, 50176, true}, // the seed unsorted-dirent-nid-past-image
+		{1 << 63, 8192, true},
+		{127, 8192, false},
+		{128, 8192, true},
+		{1<<59 - 1, 8192, true},
+		{0, 2048, true},
+	} {
+		if got := direntNidOut(ref, tc.nid, tc.size); got != tc.out {
+			t.Errorf("nid %#x in %d bytes: %v, want %v", tc.nid, tc.size, got, tc.out)
+		}
+	}
 }
 
 // referenceWalk visits the tree as a consumer of the package sees it:
