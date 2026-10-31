@@ -30,9 +30,8 @@ import (
 // superblock checksum mkfs.erofs writes by default: the SB_CHKSUM feature
 // set, the stored value the kernel's CRC-32C over the span from the byte
 // after the checksum to the end of the superblock's block, so a reader
-// verifying it
-// opens the image and a flipped byte anywhere in that span, the padding and
-// the device slots included, is corruption.
+// verifying it opens the image and a flipped byte anywhere in that span, the
+// padding and the device slots included, is corruption.
 func TestWriterSuperblockChecksum(t *testing.T) {
 	t.Parallel()
 
