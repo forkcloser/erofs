@@ -1204,7 +1204,10 @@ func judge(ref, got verdict) string {
 			return ""
 		case got.class == "ok":
 			return "the reader serves a different tree from a sound image"
-		case got.class == "unsupported" && ref.notImplemented:
+		case got.class == "unsupported" && (ref.notImplemented || ref.nidOut):
+			// nidOut: a search that finds the entry reads a slot of
+			// garbage, whose i_format the reader may name unsupported
+			// before any field it would call corrupt.
 			return ""
 		case (got.class == "invalid" || got.class == "corrupt") && ref.longSymlink:
 			// The kernel has no bound on a symlink's size at fill time
@@ -1274,7 +1277,7 @@ type verdict struct {
 	unsortedDir    bool // a directory block out of name order: what a lookup finds there is the search's, not the format's
 	direntType     bool // a dirent whose type disagrees with its inode's mode: the kernel serves both, the reader refuses
 	nidHigh        bool // a dirent nid with bits 59-63 set: erofs_iloc's shift drops them, the reader refuses a nid that names no inode
-	nidOut         bool // an entry the reference's search missed names an inode past the image: a search that finds it refuses it
+	nidOut         bool // an entry whose reachability is the search's (a block out of name order) names an inode a search that finds it refuses: past the image, unreadable, or of another type
 	extentsOut     bool // a file whose map runs past its device, which the package refuses at Stat and the kernel at the read
 	complete       bool // the image holds every block its superblock declares: a structure past its end points outside it
 }
@@ -2262,11 +2265,15 @@ func referenceVerdict(img, blob []byte) verdict {
 			fmt.Fprintf(h, "%s|unreachable\n", e.Path)
 
 			// On a directory block out of order, which search finds the
-			// name is the search's; the reference's missed it, the
-			// reader's may find it, and then reads the dirent's inode.
-			// One past the image is what the kernel's lookup would fail
-			// on with an I/O error, and the reader refuses as corrupt.
+			// name is the search's; the reference's missed it, or found
+			// it on an inode past the image, and the reader's may find
+			// it, and then reads the dirent's inode. One past the image is
+			// what the kernel's lookup would fail on with an I/O error; one
+			// the kernel's iget refuses, or whose type the dirent's
+			// contradicts, the reader refuses as corrupt all the same.
 			if direntNidOut(ref, e.Dir.Nid, len(img)) {
+				v.nidOut = true
+			} else if found, ierr := ref.Inode(e.Dir.Nid); ierr != nil || e.Dir.Type != direntTypeOf(found) {
 				v.nidOut = true
 			}
 
@@ -2436,6 +2443,9 @@ type refWalker struct {
 	fn       func(erofsspec.Entry) error
 	seen     map[uint64]bool
 	unsorted bool // a directory's stored names were not strictly increasing
+	// dirUnsorted is unsorted for the directory whose entries are being
+	// visited: there, which names a search finds is the search's own.
+	dirUnsorted bool
 }
 
 func (w *refWalker) walk(dir *erofsspec.Inode, prefix string) error {
@@ -2444,11 +2454,15 @@ func (w *refWalker) walk(dir *erofsspec.Inode, prefix string) error {
 		return err
 	}
 
+	dirUnsorted := false
+
 	for i := 1; i < len(dirents); i++ {
 		if bytes.Compare(dirents[i-1].Name, dirents[i].Name) >= 0 {
-			w.unsorted = true
+			dirUnsorted = true
 		}
 	}
+
+	w.unsorted = w.unsorted || dirUnsorted
 
 	dirents = slices.DeleteFunc(dirents, func(de erofsspec.Dirent) bool {
 		return string(de.Name) == "." || string(de.Name) == ".."
@@ -2456,6 +2470,8 @@ func (w *refWalker) walk(dir *erofsspec.Inode, prefix string) error {
 	slices.SortFunc(dirents, func(a, b erofsspec.Dirent) int { return bytes.Compare(a.Name, b.Name) })
 
 	for _, de := range dirents {
+		// Set per entry: entering a subdirectory below sets its own.
+		w.dirUnsorted = dirUnsorted
 		if err := w.entry(dir, de, prefix); err != nil {
 			return err
 		}
@@ -2477,6 +2493,14 @@ func (w *refWalker) entry(dir *erofsspec.Inode, de erofsspec.Dirent, prefix stri
 
 	in, err := w.ref.Inode(de.Nid)
 	if err != nil {
+		// In a block out of name order the reference's search found a name
+		// another search may miss: an inode past the image there is what
+		// a search that finds it refuses (nidOut), not a verdict on the
+		// image, and the entry is unreachable as one the search missed.
+		if w.dirUnsorted && errors.Is(err, erofsspec.ErrTruncated) {
+			return w.fn(e)
+		}
+
 		return err
 	}
 

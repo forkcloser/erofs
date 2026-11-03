@@ -707,8 +707,11 @@ func (*Writer) parseDirBlock(data []byte, dirSize, blockSize int, parentPath str
 		// error, not an entry to step over — the reader would refuse it.
 		firstNameOff := int(binary.LittleEndian.Uint16(blk[8:10]))
 
+		// Zero, past the block, or off a dirent boundary: the kernel's
+		// readdir refuses each (dir.c, "invalid de[0].nameoff"), and so
+		// does the reader's ReadDir.
 		nEntries := firstNameOff / disk.SizeDirent
-		if nEntries == 0 || firstNameOff > len(blk) {
+		if nEntries == 0 || firstNameOff > len(blk) || firstNameOff%disk.SizeDirent != 0 {
 			return fmt.Errorf("in %s: invalid dirent name offset %d (block size %d): %w",
 				parentPath, firstNameOff, len(blk), ErrCorrupt)
 		}
