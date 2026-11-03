@@ -362,6 +362,14 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			return fmt.Errorf("nid %d: bogus i_mode %#o: %w", cur.nid, mode, ErrCorrupt)
 		}
 
+		// The root has no dirent to agree with: the kernel refuses a root
+		// inode that is not a directory at mount (super.c, "rootino(nid %llu)
+		// is not a directory").
+		if cur.path == "/" && modeToFileType(mode) != disk.FileTypeDir {
+			return fmt.Errorf("root inode %d has type %#o, not a directory: %w",
+				cur.nid, mode&disk.StatTypeMask, ErrCorrupt)
+		}
+
 		if cur.path != "/" && cur.ftype != modeToFileType(mode) {
 			return fmt.Errorf("inode %d has type %#o but its dirent says file type %d: %w",
 				cur.nid, mode&disk.StatTypeMask, cur.ftype, ErrCorrupt)
