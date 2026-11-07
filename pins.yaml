@@ -16,7 +16,7 @@ pins:
   - name: lz4
     renovate: github-tags lz4/lz4
     extract-version: ^v(?<version>[0-9]+\.[0-9]+\.[0-9]+)$
-    version: 1.10.0
+    version: 1.11.0
     url: https://github.com/lz4/lz4/archive/refs/tags/v${version}.tar.gz
     verify: download
     digest:
