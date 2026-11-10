@@ -2494,10 +2494,11 @@ func (w *refWalker) entry(dir *erofsspec.Inode, de erofsspec.Dirent, prefix stri
 	in, err := w.ref.Inode(de.Nid)
 	if err != nil {
 		// In a block out of name order the reference's search found a name
-		// another search may miss: an inode past the image there is what
-		// a search that finds it refuses (nidOut), not a verdict on the
-		// image, and the entry is unreachable as one the search missed.
-		if w.dirUnsorted && errors.Is(err, erofsspec.ErrTruncated) {
+		// another search may miss: an inode there that cannot be read, past
+		// the image or of a format refused, is what a search that finds it
+		// refuses (nidOut), not a verdict on the image, and the entry is
+		// unreachable as one the search missed.
+		if w.dirUnsorted {
 			return w.fn(e)
 		}
 
