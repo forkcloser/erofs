@@ -366,7 +366,9 @@ func TestUntrustedDirectoryCycleTerminates(t *testing.T) {
 // copied in full-image mode. That path does not use copyFromImage at all: it
 // walks the source through fs.WalkDir, which has no cycle detection, so the
 // visited set that bounds the metadata-only path does not help. What stops it
-// is the path length bound, since a cycle yields ever-deeper paths.
+// is the writer's own record of the directories it placed, which refuses the
+// cycle's first return to one; the path length bound stands behind it for a
+// source with no inode identity.
 //
 //nolint:paralleltest // measures the process's heap in use against a budget; a parallel test's live heap would count against it
 func TestUntrustedDirectoryCycleFullImageTerminates(t *testing.T) {

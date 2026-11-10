@@ -2256,3 +2256,63 @@ func (f *dataRangerFile) Read(p []byte) (int, error) {
 	return n, nil
 }
 func (*dataRangerFile) Close() error { return nil }
+
+// A source that names one directory twice is not a tree, and a copy of it
+// would hold the subtree once per name: the tree at 512 with root's "sizes"
+// dirent retargeted at "many"'s inode (its nid's low byte, the checksum
+// feature off so the edited superblock is accepted) is refused by CopyFrom
+// in both modes with ErrCorrupt, after the reader has opened it and shown
+// the two names share an inode.
+func TestCopyFromRefusesADirectoryNamedTwice(t *testing.T) {
+	t.Parallel()
+
+	var im corpus.Image
+
+	for _, c := range corpus.Committed(t) {
+		if c.Name == "b512" {
+			im = c
+		}
+	}
+
+	if im.Img == nil {
+		t.Fatal("the committed b512 image is missing")
+	}
+
+	img := bytes.Clone(im.Img)
+	img[1032] &^= 0x01 // EROFS_FEATURE_COMPAT_SB_CHKSUM off
+	img[1244] -= 8     // the "sizes" dirent's nid, 55, becomes "many"'s, 47
+
+	source, err := erofs.Open(bytes.NewReader(img))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	many, err := fs.Stat(source, "many")
+	if err != nil {
+		t.Fatalf("Stat many: %v", err)
+	}
+
+	sizes, err := fs.Stat(source, "sizes")
+	if err != nil {
+		t.Fatalf("Stat sizes: %v", err)
+	}
+
+	manyIno, sizesIno := many.Sys().(*erofs.Stat).Ino, sizes.Sys().(*erofs.Stat).Ino
+	if manyIno != sizesIno {
+		t.Fatalf("the premise: many is nid %d and sizes nid %d, want one inode", manyIno, sizesIno)
+	}
+
+	for _, metadataOnly := range []bool{false, true} {
+		var opts []erofs.CopyOpt
+		if metadataOnly {
+			opts = append(opts, erofs.MetadataOnly())
+		}
+
+		w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+		err := w.CopyFrom(source, opts...)
+		if !errors.Is(err, erofs.ErrCorrupt) || !errors.Is(err, fs.ErrInvalid) {
+			t.Errorf("CopyFrom%s: %v, want ErrCorrupt (and ErrInvalid through it)", copyMode(metadataOnly), err)
+		}
+	}
+}
