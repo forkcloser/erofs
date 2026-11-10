@@ -132,7 +132,14 @@ build_windows() {
     [ "$(uname -s)" = "Linux" ] || die "the windows cross-build needs a linux host"
     if [ -z "${SKIP_DEPS:-}" ]; then
         apt_get update
-        apt_get install -y autoconf automake libtool pkg-config mingw-w64
+        # Not the mingw-w64 metapackage: it pulls both targets (i686 and
+        # x86_64), both thread models (posix and win32) and g++, 277 MB in 25
+        # packages, which the mirror has served at a package a minute, past
+        # the guard, on three runs out of three. The cross build is C on one
+        # target with one thread model: the compiler, its binutils and the
+        # headers for x86_64 alone, a quarter of that.
+        apt_get install -y --no-install-recommends autoconf automake libtool pkg-config \
+            binutils-mingw-w64-x86-64 gcc-mingw-w64-x86-64-posix mingw-w64-x86-64-dev
     fi
     mkdir -p "$work"
 
