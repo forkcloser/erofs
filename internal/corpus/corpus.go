@@ -654,6 +654,12 @@ func Mkfs(tb testing.TB, name string, args []string, tarball []byte) Image {
 func Fsck(tb testing.TB, im Image) {
 	tb.Helper()
 
+	if _, err := exec.LookPath("fsck.erofs"); err != nil {
+		tb.Logf("%s: fsck.erofs is not on PATH; no verdict", im.Name)
+
+		return
+	}
+
 	if err := FsckVerdict(tb, im); err != nil {
 		tb.Fatalf("%s: fsck.erofs refuses the image: %v", im.Name, err)
 	}
@@ -670,6 +676,13 @@ func FsckRefuses(tb testing.TB, im Image) {
 	// verdict on what it should refuse is not taken there.
 	if runtime.GOOS == "windows" {
 		tb.Logf("%s: fsck.erofs's refusal is not taken on windows", im.Name)
+
+		return
+	}
+
+	// Without the tool there is no verdict either way, not an acceptance.
+	if _, err := exec.LookPath("fsck.erofs"); err != nil {
+		tb.Logf("%s: fsck.erofs is not on PATH; no verdict", im.Name)
 
 		return
 	}

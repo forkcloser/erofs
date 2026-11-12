@@ -1,24 +1,51 @@
-# The two source tarballs .github/scripts/build-erofs-utils.sh compiles, pinned by
-# digest; the script reads them back with `limen pins get` (book/tooling.md, "Pinned
-# artifacts beyond aqua"). GitHub publishes no digest for an archive tarball, so the
-# method is the download itself: TLS is the guarantee at refresh time, the digest is the
-# guard at every fetch after.
+# The mkfs.erofs the image-backed tests run: forkcloser/testbin's build of
+# erofs-utils, one archive per platform the tests run on, verified against
+# testbin's release attestation (limen's book, tooling.md, "Pinned artifacts
+# beyond aqua"). The `mkfs-erofs` recipe fetches this host's and puts it on
+# the tests' PATH. The archive name carries erofs-utils' own version, so a
+# testbin release that moves to a newer erofs-utils changes it: Renovate's
+# bump of `version:` then fails the digest refresh, and the five urls move by
+# hand with it. The attestation is verified at the owner's scope: the pinned
+# limen passes a `owner/repo` argument as `--owner`, which gh refuses, so the
+# repository scope waits for a limen that passes it as `--repo`.
 pins:
-  - name: erofs-utils
-    renovate: github-tags erofs/erofs-utils
-    extract-version: ^v(?<version>[0-9]+\.[0-9]+\.[0-9]+)$
-    version: 1.9.4
-    url: https://github.com/erofs/erofs-utils/archive/refs/tags/v${version}.tar.gz
-    verify: download
+  - name: mkfs-erofs-linux-amd64
+    renovate: github-releases forkcloser/testbin
+    version: 0.2.0
+    url: https://github.com/forkcloser/testbin/releases/download/v${version}/erofs-1.9.4-linux-amd64.tar.gz
+    verify: github-attestation forkcloser
     digest:
-      version: 1.9.4
-      sha256: 7d135aa2550326a5acf20f53c518aea5a8900015ce50700044e40f818c31dd80
-  - name: lz4
-    renovate: github-tags lz4/lz4
-    extract-version: ^v(?<version>[0-9]+\.[0-9]+\.[0-9]+)$
-    version: 1.11.0
-    url: https://github.com/lz4/lz4/archive/refs/tags/v${version}.tar.gz
-    verify: download
+      version: 0.2.0
+      sha256: e5c0c9d0e4870f51187f564556e8fcc47ecdc5321ca4460fa086eaf19c03f1f7
+  - name: mkfs-erofs-linux-arm64
+    renovate: github-releases forkcloser/testbin
+    version: 0.2.0
+    url: https://github.com/forkcloser/testbin/releases/download/v${version}/erofs-1.9.4-linux-arm64.tar.gz
+    verify: github-attestation forkcloser
     digest:
-      version: 1.11.0
-      sha256: 247e5fa64da5f7b75ee3dd3bed484076396c9ebe8254d9ccf693eb62800c5e26
+      version: 0.2.0
+      sha256: f3aa8f5f3af8ae567705f98e44c2b7914d0bb08f7997330b84c96536725c09bc
+  - name: mkfs-erofs-darwin-arm64
+    renovate: github-releases forkcloser/testbin
+    version: 0.2.0
+    url: https://github.com/forkcloser/testbin/releases/download/v${version}/erofs-1.9.4-darwin-arm64.tar.gz
+    verify: github-attestation forkcloser
+    digest:
+      version: 0.2.0
+      sha256: 2995fb046f0b72e6984629479c4968e0db69e759213dd9d1ae13f928777262ce
+  - name: mkfs-erofs-windows-amd64
+    renovate: github-releases forkcloser/testbin
+    version: 0.2.0
+    url: https://github.com/forkcloser/testbin/releases/download/v${version}/erofs-1.9.4-windows-amd64.tar.gz
+    verify: github-attestation forkcloser
+    digest:
+      version: 0.2.0
+      sha256: 476b81ca55d04d0ccd0b3015c50dc5ad1252fe1e906f09c80be7216f18375e84
+  - name: mkfs-erofs-windows-arm64
+    renovate: github-releases forkcloser/testbin
+    version: 0.2.0
+    url: https://github.com/forkcloser/testbin/releases/download/v${version}/erofs-1.9.4-windows-arm64.tar.gz
+    verify: github-attestation forkcloser
+    digest:
+      version: 0.2.0
+      sha256: 0490694f81ba4fa0f631c0a7ea320d669c5694781b10803e04e1f8ca9a4a5df6
