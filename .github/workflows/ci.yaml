@@ -3,13 +3,11 @@
 # limen-verify.yaml, content-pinned and kept current by `limen fix`; this file
 # calls them, adds the project's own jobs, and gates on all of them.
 #
-# The shared lanes have no mkfs.erofs, so their image-backed tests and fuzz
-# targets skip themselves (`just mkfs-info` says so). The jobs below are the
-# legs WITH it, INTERIM until .github/scripts/build-erofs-utils.sh retires:
-# verify-image rebuilds erofs-utils natively on each posix runner,
-# mkfs-windows cross-compiles it for verify-windows-image, and fuzz-image
-# fuzzes with it. Each sets EROFS_REQUIRE_MKFS=1, so a missing binary fails
-# the leg instead of skipping.
+# `just test` fetches the pinned mkfs.erofs (the mkfs-erofs recipe), so the
+# shared verify lanes run the image-backed tests on every platform. The one
+# project job is the fuzz lane with that binary, since the shared fuzz lane
+# runs the fuzz recipe alone and the targets that round-trip through
+# mkfs.erofs skip themselves without it.
 #
 # Minimal glue: GitHub's own actions pinned by SHA, hermetic at .hermetic/hermetic.yaml's
 # pins, `just` running the recipes a laptop runs. No third-party actions,
@@ -43,143 +41,9 @@ jobs:
     permissions:
       contents: read
 
-  # INTERIM: `just test` with mkfs.erofs on PATH, on every posix runner the
-  # shared verify lane covers. Lint is the shared lane's; this is the test
-  # pass the image-backed tests cannot skip. Not windows (no native build):
-  # verify-windows-image below is the windows leg with an image.
-  verify-image:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      # The script reads its tarball pins through `limen pins get`, so the
-      # pinned limen must be on PATH here as in every other job that runs it.
-      - name: Install hermetic (pinned, verified)
-        uses: ./.github/actions/setup-hermetic
-
-      # The shared verify legs' hermetic store and Go caches, same keys: this is
-      # the same runner again, with an image.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ env.HERMETIC_ROOT_DIR }}/store/pkgs
-          key: aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.hermetic/hermetic.yaml', '.hermetic/aqua-checksums.json', '.limen/hermetic-registry.yaml') }}
-          restore-keys: |
-            aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-
-
-      - id: gocache
-        run: |
-          echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
-          echo "mod=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
-          echo "version=$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ${{ steps.gocache.outputs.build }}
-            ${{ steps.gocache.outputs.mod }}
-            build/cache
-          key: go-${{ runner.os }}-${{ runner.arch }}-${{ steps.gocache.outputs.version }}-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            go-${{ runner.os }}-${{ runner.arch }}-${{ steps.gocache.outputs.version }}-
-            go-${{ runner.os }}-${{ runner.arch }}-
-
-      - name: Build erofs-utils (interim)
-        run: .github/scripts/build-erofs-utils.sh native
-
-      - name: Test
-        env:
-          EROFS_REQUIRE_MKFS: "1"
-        run: just test
-
-  # INTERIM: cross-compile a static mkfs.erofs.exe so the windows leg below
-  # can run the image-backed tests. Artifact upload/download are GitHub's own
-  # actions, SHA-pinned — the same trust class as checkout.
-  mkfs-windows:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install hermetic (pinned, verified)
-        uses: ./.github/actions/setup-hermetic
-
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ env.HERMETIC_ROOT_DIR }}/store/pkgs
-          key: aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.hermetic/hermetic.yaml', '.hermetic/aqua-checksums.json', '.limen/hermetic-registry.yaml') }}
-          restore-keys: |
-            aqua-pkgs-${{ runner.os }}-${{ runner.arch }}-
-
-      - name: Cross-compile mkfs.erofs for windows
-        run: .github/scripts/build-erofs-utils.sh windows
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: mkfs-erofs-windows
-          path: build/erofs-utils/bin/mkfs.erofs.exe
-          if-no-files-found: error
-
-  # INTERIM: the windows-2025 leg with mkfs.erofs on PATH, so the image tests
-  # run. No windows-arm counterpart: the cross build is x86_64 only.
-  verify-windows-image:
-    needs: [mkfs-windows]
-    runs-on: windows-2025
-    timeout-minutes: 45
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      # Into the same project-local tool dir the native builds use: the root
-      # .justfile's PATH addition finds it, no GITHUB_PATH plumbing needed.
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: mkfs-erofs-windows
-          path: build/erofs-utils/bin
-
-      # The shared verify lane's windows cache image, same prefix and hash:
-      # this is the windows-2025 leg again, with an image. Before setup-hermetic,
-      # which takes the HERMETIC_ROOT_DIR it sets.
-      - id: image
-        uses: ./.github/actions/windows-cache-image
-        with:
-          mode: attach
-          prefix: win-image-${{ runner.os }}-${{ runner.arch }}-
-          hash: ${{ hashFiles('.hermetic/hermetic.yaml', '.hermetic/aqua-checksums.json', '.limen/hermetic.yaml', '.limen/hermetic-registry.yaml', '**/go.sum') }}
-
-      - name: Install hermetic (pinned, verified)
-        uses: ./.github/actions/setup-hermetic
-
-      - name: Test
-        env:
-          EROFS_REQUIRE_MKFS: "1"
-          # mkfs.erofs uses TMPDIR for its temporaries; windows does not set it.
-          TMPDIR: ${{ runner.temp }}
-        run: just test
-
-      - if: steps.image.outputs.cache-hit != 'true'
-        uses: ./.github/actions/windows-cache-image
-        with:
-          mode: save
-          key: ${{ steps.image.outputs.key }}
-
-  # INTERIM: the fuzz lane with mkfs.erofs, so the targets that round-trip
-  # through it run. Its own corpus key: the shared lane's corpus was explored
-  # without an image.
+  # The fuzz lane with mkfs.erofs, so the targets that round-trip through it
+  # run. Its own corpus key: the shared lane's corpus was explored without an
+  # image.
   fuzz-image:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -193,8 +57,8 @@ jobs:
       - name: Install hermetic (pinned, verified)
         uses: ./.github/actions/setup-hermetic
 
-      - name: Build erofs-utils (interim)
-        run: .github/scripts/build-erofs-utils.sh native
+      - name: Fetch the pinned mkfs.erofs
+        run: just mkfs-erofs
 
       - id: fuzzdir
         run: echo "dir=$(go env GOCACHE)/fuzz" >> "$GITHUB_OUTPUT"
@@ -206,11 +70,7 @@ jobs:
             fuzz-image-corpus-${{ runner.os }}-
 
       - name: Fuzz
-        env:
-          EROFS_REQUIRE_MKFS: "1"
-        run: |
-          just mkfs-info
-          just do test go fuzz
+        run: just do test go fuzz
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
@@ -224,14 +84,13 @@ jobs:
   # runner list into every ruleset; this job collapses them to one stable
   # name. A project job joins `needs` and the assertion below.
   gate:
-    needs: [limen, verify-image, verify-windows-image, fuzz-image]
+    needs: [limen, fuzz-image]
     # always(), and the result asserted explicitly. Without always() a failed
     # or cancelled dependency SKIPS this job instead of failing it, and a
     # skipped required check does not block a merge — branch protection that
     # quietly stops protecting. `needs.limen.result` is success only when
-    # every lane it ran succeeded: each verify leg, fuzz and tools. The image
-    # legs are asserted alongside (a failed mkfs-windows skips
-    # verify-windows-image, which is not success either).
+    # every lane it ran succeeded: each verify leg, fuzz and tools. The fuzz
+    # lane with the image is asserted alongside.
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -242,13 +101,8 @@ jobs:
           # Via env, never interpolated into the script: the shell sees data,
           # not something the expression layer can rewrite into code.
           LIMEN: ${{ needs.limen.result }}
-          VERIFY_IMAGE: ${{ needs.verify-image.result }}
-          VERIFY_WINDOWS_IMAGE: ${{ needs.verify-windows-image.result }}
           FUZZ_IMAGE: ${{ needs.fuzz-image.result }}
         run: |
           printf 'limen: %s\n' "$LIMEN"
-          printf 'verify-image: %s\n' "$VERIFY_IMAGE"
-          printf 'verify-windows-image: %s\n' "$VERIFY_WINDOWS_IMAGE"
           printf 'fuzz-image: %s\n' "$FUZZ_IMAGE"
-          [ "$LIMEN" = "success" ] && [ "$VERIFY_IMAGE" = "success" ] \
-            && [ "$VERIFY_WINDOWS_IMAGE" = "success" ] && [ "$FUZZ_IMAGE" = "success" ]
+          [ "$LIMEN" = "success" ] && [ "$FUZZ_IMAGE" = "success" ]
