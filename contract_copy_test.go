@@ -1177,6 +1177,10 @@ func TestContractCopyFromEditedImage(t *testing.T) {
 	}
 }
 
+// maxEditedCopyBytes is the most a copy of an edited image is let to write
+// in a test: every committed image is a few thousand times smaller.
+const maxEditedCopyBytes = 64 << 20
+
 // checkEditedCopy copies one edited image, with its data and metadata-only;
 // it returns 1 when the package opened the source and the copies were
 // judged.
@@ -1209,8 +1213,27 @@ func checkEditedCopy(t *testing.T, im corpus.Image, img []byte, label string) in
 	// differential's own rule for the reader; what a copy holds of such a
 	// directory is the search's, and the copy is not compared.
 	unsorted := false
+
+	// An edit can make a file of a few bytes a hole of gigabytes: the copy
+	// with its data writes it out as zeros, the metadata-only one indexes
+	// it block by block, both into memory here, a fuzzer's worker beside
+	// seventeen others. A source whose files declare more than the copy's
+	// buffer holds is opened and not copied; the buffer's own limit is for
+	// the source the reference does not read.
+	declared := int64(0)
+
 	if ref, perr := erofsspec.Parse(img, im.Extra()); perr == nil {
-		unsorted, _ = referenceWalk(ref, func(erofsspec.Entry) error { return nil })
+		unsorted, _ = referenceWalk(ref, func(e erofsspec.Entry) error {
+			if e.Inode != nil && e.Inode.IsRegular() && e.Inode.Size > 0 {
+				declared += min(e.Inode.Size, maxEditedCopyBytes+1)
+			}
+
+			return nil
+		})
+	}
+
+	if declared > maxEditedCopyBytes {
+		return 0
 	}
 
 	for _, metadataOnly := range []bool{false, true} {
@@ -1220,6 +1243,8 @@ func checkEditedCopy(t *testing.T, im corpus.Image, img []byte, label string) in
 		switch {
 		case errors.Is(cerr, errPanic):
 			t.Fatalf("%s %s: %v", im.Name, mode, cerr)
+		case errors.Is(cerr, errTestBufferFull):
+			continue
 		case cerr != nil && (errors.Is(cerr, io.ErrUnexpectedEOF) || errors.Is(cerr, io.EOF)) && short:
 			continue
 		case cerr != nil && !errors.Is(cerr, fs.ErrInvalid) && !errors.Is(cerr, erofs.ErrNotImplemented) && !errors.Is(cerr, fs.ErrNotExist):
@@ -1266,7 +1291,7 @@ func copyOpened(fsys fs.FS, metadataOnly bool, src []byte, srcExtra [][]byte) (i
 		opts = append(opts, erofs.MetadataOnly())
 	}
 
-	out := &testBuffer{}
+	out := &testBuffer{limit: maxEditedCopyBytes}
 	w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
 
 	if err := w.CopyFrom(fsys, opts...); err != nil {
