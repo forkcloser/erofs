@@ -1,0 +1,7 @@
+go test fuzz v1
+byte('\x00')
+uint32(2219)
+byte('±')
+uint32(2208)
+byte('\x00')
+uint32(0)

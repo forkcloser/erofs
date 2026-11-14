@@ -15,6 +15,7 @@
 package erofs_test
 
 import (
+	"archive/tar"
 	"bytes"
 	"encoding/binary"
 	"errors"
@@ -1836,6 +1837,91 @@ func TestReaderDeviceExtentIsTheReaders(t *testing.T) {
 
 		if _, err := fs.Stat(unsized, "d/f"); !errors.Is(err, erofs.ErrCorrupt) {
 			t.Fatalf("Stat over an unsized device declared shorter: %v; want ErrCorrupt by the slot's count", err)
+		}
+	}
+}
+
+// TestReaderDirentNameLength: a dirent's name is at most EROFS_NAME_LEN
+// bytes, 255. The kernel's readdir refuses the block that holds a longer
+// one (dir.c, erofs_fill_dentries: "bogus dirent", EFSCORRUPTED), and so
+// does the reader, as ErrCorrupt. A name's length is the next dirent's
+// nameoff less its own, so the root's two names of 200 bytes, "a…" then
+// "b…", become one of 255 or of 256 by moving the second's nameoff into
+// its own name.
+func TestReaderDirentNameLength(t *testing.T) {
+	t.Parallel()
+
+	a, b := strings.Repeat("a", 200), strings.Repeat("b", 200)
+
+	img := writeImage(t, []corpus.Node{
+		{Path: a, Type: tar.TypeReg, Mode: 0o644, Data: []byte("a")},
+		{Path: b, Type: tar.TypeReg, Mode: 0o644, Data: []byte("b")},
+	})
+
+	ref := parseImage(t, corpus.Image{Name: "names", Img: img})
+
+	root, err := ref.Inode(ref.Super.RootNid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rootSize := disk.SizeInodeCompact
+	if root.Extended {
+		rootSize = disk.SizeInodeExtended
+	}
+
+	// The root's dirents sit beside its inode: ".", "..", a, b, twelve
+	// bytes each, the nameoff at byte eight; the names follow them.
+	dirents := inodeOffset(t, img, ".") + rootSize
+	first := 4 * disk.SizeDirent
+	nameA := first + len(".") + len("..")
+	at := dirents + 3*disk.SizeDirent + 8
+
+	if got := int(binary.LittleEndian.Uint16(img[at:])); got != nameA+len(a) {
+		t.Fatalf(
+			"b's nameoff reads %d, want %d: the root's dirents are not where the test edits them",
+			got,
+			nameA+len(a),
+		)
+	}
+
+	// The edit may sit in the superblock's block, which its checksum covers.
+	img[disk.SuperBlockOffset+8] &^= disk.FeatureCompatSBChksum
+
+	for _, tc := range []struct {
+		length int
+		want   error
+	}{
+		{disk.MaxNameLen, nil},
+		{disk.MaxNameLen + 1, erofs.ErrCorrupt},
+	} {
+		edited := bytes.Clone(img)
+		binary.LittleEndian.PutUint16(edited[at:], uint16(nameA+tc.length))
+
+		source, err := erofs.Open(bytes.NewReader(edited))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		entries, err := fs.ReadDir(source, ".")
+		if !errors.Is(err, tc.want) {
+			t.Errorf("ReadDir with a name of %d bytes: %v, want %v", tc.length, err, tc.want)
+
+			continue
+		}
+
+		if tc.want != nil {
+			continue
+		}
+
+		if len(entries) != 2 {
+			t.Errorf("ReadDir with a name of %d bytes lists %d entries, want 2", tc.length, len(entries))
+
+			continue
+		}
+
+		if got := len(entries[0].Name()); got != tc.length {
+			t.Errorf("ReadDir lists a first name of %d bytes, want %d", got, tc.length)
 		}
 	}
 }

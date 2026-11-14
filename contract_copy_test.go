@@ -1177,6 +1177,10 @@ func TestContractCopyFromEditedImage(t *testing.T) {
 	}
 }
 
+// maxEditedCopyBytes is the most a copy of an edited image is let to write
+// in a test: every committed image is a few thousand times smaller.
+const maxEditedCopyBytes = 64 << 20
+
 // checkEditedCopy copies one edited image, with its data and metadata-only;
 // it returns 1 when the package opened the source and the copies were
 // judged.
@@ -1209,8 +1213,27 @@ func checkEditedCopy(t *testing.T, im corpus.Image, img []byte, label string) in
 	// differential's own rule for the reader; what a copy holds of such a
 	// directory is the search's, and the copy is not compared.
 	unsorted := false
+
+	// An edit can make a file of a few bytes a hole of gigabytes: the copy
+	// with its data writes it out as zeros, the metadata-only one indexes
+	// it block by block, both into memory here, a fuzzer's worker beside
+	// seventeen others. A source whose files declare more than the copy's
+	// buffer holds is opened and not copied; the buffer's own limit is for
+	// the source the reference does not read.
+	declared := int64(0)
+
 	if ref, perr := erofsspec.Parse(img, im.Extra()); perr == nil {
-		unsorted, _ = referenceWalk(ref, func(erofsspec.Entry) error { return nil })
+		unsorted, _ = referenceWalk(ref, func(e erofsspec.Entry) error {
+			if e.Inode != nil && e.Inode.IsRegular() && e.Inode.Size > 0 {
+				declared += min(e.Inode.Size, maxEditedCopyBytes+1)
+			}
+
+			return nil
+		})
+	}
+
+	if declared > maxEditedCopyBytes {
+		return 0
 	}
 
 	for _, metadataOnly := range []bool{false, true} {
@@ -1220,6 +1243,8 @@ func checkEditedCopy(t *testing.T, im corpus.Image, img []byte, label string) in
 		switch {
 		case errors.Is(cerr, errPanic):
 			t.Fatalf("%s %s: %v", im.Name, mode, cerr)
+		case errors.Is(cerr, errTestBufferFull):
+			continue
 		case cerr != nil && (errors.Is(cerr, io.ErrUnexpectedEOF) || errors.Is(cerr, io.EOF)) && short:
 			continue
 		case cerr != nil && !errors.Is(cerr, fs.ErrInvalid) && !errors.Is(cerr, erofs.ErrNotImplemented) && !errors.Is(cerr, fs.ErrNotExist):
@@ -1266,7 +1291,7 @@ func copyOpened(fsys fs.FS, metadataOnly bool, src []byte, srcExtra [][]byte) (i
 		opts = append(opts, erofs.MetadataOnly())
 	}
 
-	out := &testBuffer{}
+	out := &testBuffer{limit: maxEditedCopyBytes}
 	w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
 
 	if err := w.CopyFrom(fsys, opts...); err != nil {
@@ -2052,6 +2077,308 @@ func TestContractMetadataOnlyCopyRefusesWhatStatRefuses(t *testing.T) {
 	}
 }
 
+// TestContractMetadataOnlyCopyRefusesASourceDeclaringNoBlocks: the
+// metadata-only copy walks the source inside the extent its superblock
+// declares and refuses what lies outside it as ErrCorrupt. A superblock
+// declaring zero blocks leaves the metadata itself outside, and that copy
+// is refused like the others, never made as an empty image. The reader
+// opens such a source, bounded by its length, and the copy with its data
+// is the source.
+func TestContractMetadataOnlyCopyRefusesASourceDeclaringNoBlocks(t *testing.T) {
+	t.Parallel()
+
+	img := writeImage(t, []corpus.Node{{Path: "a", Type: tar.TypeReg, Mode: 0o644, Data: []byte("a")}})
+
+	// The block count is the superblock's u32 at offset 36; its checksum is
+	// switched off so the count is what is judged.
+	binary.LittleEndian.PutUint32(img[disk.SuperBlockOffset+36:], 0)
+	img[disk.SuperBlockOffset+8] &^= disk.FeatureCompatSBChksum
+
+	source, err := erofs.Open(bytes.NewReader(img))
+	if err != nil {
+		t.Fatalf("Open: %v (the premise: the reader opens it)", err)
+	}
+
+	b, err := fs.ReadFile(source, "a")
+	if err != nil || string(b) != "a" {
+		t.Fatalf("ReadFile a: %q, %v (the premise: the reader reads it)", b, err)
+	}
+
+	w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	err = w.CopyFrom(source, erofs.MetadataOnly())
+	if !errors.Is(err, erofs.ErrCorrupt) {
+		t.Errorf("CopyFrom(MetadataOnly): %v, want ErrCorrupt", err)
+	}
+
+	got, err := copyOpened(source, false, img, nil)
+	if err != nil {
+		t.Fatalf("CopyFrom with its data: %v", err)
+	}
+
+	if d := copyAgrees(img, nil, got.Img, got.Extra()); d != "" {
+		t.Errorf("the copy with its data is not the source: %s", d)
+	}
+}
+
+// TestContractCopyOfADirectoryInChunks: a directory in the chunk-based
+// layout holds its entries where its chunk map says, and i_u is its chunk
+// format, not a block. No tool writes one; the reader and the reference
+// read it through the map. A copy, with its data or metadata-only, is that
+// directory when the map is inside the image, and is refused as
+// ErrCorrupt, as ReadDir is, when the map points past it. The source is
+// small-chunk-512's d/sub, a flat-inline directory of one whole block and
+// a tail, rewritten as one chunk of that block.
+func TestContractCopyOfADirectoryInChunks(t *testing.T) {
+	t.Parallel()
+
+	var src []byte
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name == "small-chunk-512" {
+			src = im.Img
+		}
+	}
+
+	if src == nil {
+		t.Fatal("small-chunk-512 is not among the committed images")
+	}
+
+	const blockSize = 512
+
+	at := inodeOffset(t, src, "d/sub")
+
+	format, xattrs := binary.LittleEndian.Uint16(src[at:]), binary.LittleEndian.Uint16(src[at+2:])
+	size, start := binary.LittleEndian.Uint64(src[at+8:]), binary.LittleEndian.Uint32(src[at+16:])
+
+	if format != disk.InodeFormatExtended|disk.LayoutFlatInline<<1 || xattrs != 0 || size <= blockSize ||
+		size >= 2*blockSize {
+		t.Fatalf("d/sub reads i_format %#x, i_xattr_icount %d, i_size %d; want an extended flat-inline inode "+
+			"without xattrs, one block and a tail", format, xattrs, size)
+	}
+
+	// chunked is d/sub as one chunk of a block, at the given address: the
+	// chunk format zero (a chunk is a block, a four-byte address each), the
+	// map right after the inode, where the tail was.
+	chunked := func(addr uint32) []byte {
+		img := bytes.Clone(src)
+		binary.LittleEndian.PutUint16(img[at:], disk.InodeFormatExtended|disk.LayoutChunkBased<<1)
+		binary.LittleEndian.PutUint64(img[at+8:], blockSize)
+		binary.LittleEndian.PutUint32(img[at+16:], 0)
+		binary.LittleEndian.PutUint32(img[at+disk.SizeInodeExtended:], addr)
+
+		return img
+	}
+
+	t.Run("inside the image", func(t *testing.T) {
+		t.Parallel()
+
+		img := chunked(start)
+
+		source, err := erofs.Open(bytes.NewReader(img))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		entries, err := fs.ReadDir(source, "d/sub")
+		if err != nil || len(entries) == 0 {
+			t.Fatalf("ReadDir d/sub: %d entries, %v (the premise: the reader reads it)", len(entries), err)
+		}
+
+		for _, metadataOnly := range []bool{false, true} {
+			got, err := copyOpened(source, metadataOnly, img, nil)
+			if err != nil {
+				t.Errorf("CopyFrom%s: %v", copyMode(metadataOnly), err)
+
+				continue
+			}
+
+			if d := copyAgrees(img, nil, got.Img, got.Extra()); d != "" {
+				t.Errorf("CopyFrom%s: the copy is not the source: %s", copyMode(metadataOnly), d)
+			}
+		}
+	})
+
+	t.Run("past the image", func(t *testing.T) {
+		t.Parallel()
+
+		img := chunked(uint32(len(src)/blockSize) + 100)
+
+		source, err := erofs.Open(bytes.NewReader(img))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := fs.ReadDir(source, "d/sub"); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("ReadDir d/sub: %v, want ErrCorrupt (the premise)", err)
+		}
+
+		for _, metadataOnly := range []bool{false, true} {
+			if _, err := copyOpened(source, metadataOnly, img, nil); !errors.Is(err, erofs.ErrCorrupt) {
+				t.Errorf("CopyFrom%s: %v, want ErrCorrupt", copyMode(metadataOnly), err)
+			}
+		}
+	})
+}
+
+// TestContractCopyOfASymlinkInChunks: a symlink in the chunk-based layout
+// holds its target where its chunk map says, as a directory holds its
+// entries. No tool writes one; the reader reads the target through the
+// map, and a copy, with its data or metadata-only, is that link. The
+// source is small-chunk-512's d/s, a fast symlink, rewritten as one chunk:
+// its target in a block appended to the image, the map where the target
+// was.
+func TestContractCopyOfASymlinkInChunks(t *testing.T) {
+	t.Parallel()
+
+	var src []byte
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name == "small-chunk-512" {
+			src = im.Img
+		}
+	}
+
+	if src == nil {
+		t.Fatal("small-chunk-512 is not among the committed images")
+	}
+
+	const blockSize = 512
+
+	plain, err := erofs.Open(bytes.NewReader(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	target, err := fs.ReadLink(plain, "d/s")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	at := inodeOffset(t, src, "d/s")
+	format, xattrs := binary.LittleEndian.Uint16(src[at:]), binary.LittleEndian.Uint16(src[at+2:])
+
+	inodeSize := disk.SizeInodeCompact
+	if format&disk.InodeFormatExtended != 0 {
+		inodeSize = disk.SizeInodeExtended
+	}
+
+	if format&disk.InodeFormatLayoutMask != disk.LayoutFlatInline<<1 || xattrs != 0 ||
+		string(src[at+inodeSize:at+inodeSize+len(target)]) != target {
+		t.Fatalf("d/s reads i_format %#x, i_xattr_icount %d; want a flat-inline inode without xattrs, "+
+			"its target %q beside it", format, xattrs, target)
+	}
+
+	// The chunk format zero: a chunk is a block, a four-byte address each.
+	img := append(bytes.Clone(src), make([]byte, blockSize)...)
+	copy(img[len(src):], target)
+	binary.LittleEndian.PutUint16(img[at:], format&^disk.InodeFormatLayoutMask|disk.LayoutChunkBased<<1)
+	binary.LittleEndian.PutUint32(img[at+16:], 0)
+	binary.LittleEndian.PutUint32(img[at+inodeSize:], uint32(len(src)/blockSize))
+
+	source, err := erofs.Open(bytes.NewReader(img))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := fs.ReadLink(source, "d/s")
+	if err != nil || got != target {
+		t.Fatalf("ReadLink d/s: %q, %v; want %q (the premise: the reader reads it)", got, err, target)
+	}
+
+	for _, metadataOnly := range []bool{false, true} {
+		made, err := copyOpened(source, metadataOnly, img, nil)
+		if err != nil {
+			t.Errorf("CopyFrom%s: %v", copyMode(metadataOnly), err)
+
+			continue
+		}
+
+		if d := copyAgrees(img, nil, made.Img, made.Extra()); d != "" {
+			t.Errorf("CopyFrom%s: the copy is not the source: %s", copyMode(metadataOnly), d)
+		}
+	}
+}
+
+// TestContractCopyOfALinkTargetAtItsBounds: a copy, in both modes, holds
+// a symlink target of 4095 bytes, the most Symlink stores; refuses one of
+// 4096, which the reader reads, as ErrInvalid and not as a corrupt source;
+// and refuses one of 4097 as ErrCorrupt, as ReadLink does. The
+// metadata-only copy reads the target itself, into a buffer of the inode's
+// i_size. The source is small-chunk-512's d/s rewritten flat-plain, its
+// target "a…" in blocks appended to the image.
+func TestContractCopyOfALinkTargetAtItsBounds(t *testing.T) {
+	t.Parallel()
+
+	var src []byte
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name == "small-chunk-512" {
+			src = im.Img
+		}
+	}
+
+	if src == nil {
+		t.Fatal("small-chunk-512 is not among the committed images")
+	}
+
+	const blockSize = 512
+
+	at := inodeOffset(t, src, "d/s")
+
+	format := binary.LittleEndian.Uint16(src[at:])
+	if format&disk.InodeFormatLayoutMask != disk.LayoutFlatInline<<1 {
+		t.Fatalf("d/s reads i_format %#x; want a flat-inline inode", format)
+	}
+
+	for _, length := range []uint32{4095, 4096, 4097} {
+		t.Run(strconv.Itoa(int(length)), func(t *testing.T) {
+			t.Parallel()
+
+			img := append(bytes.Clone(src), bytes.Repeat([]byte("a"), 9*blockSize)...)
+			binary.LittleEndian.PutUint16(img[at:], format&^disk.InodeFormatLayoutMask)
+			binary.LittleEndian.PutUint32(img[at+8:], length)
+			binary.LittleEndian.PutUint32(img[at+16:], uint32(len(src)/blockSize))
+
+			source, err := erofs.Open(bytes.NewReader(img))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			target, err := fs.ReadLink(source, "d/s")
+
+			switch {
+			case length > 4096 && !errors.Is(err, erofs.ErrCorrupt):
+				t.Fatalf("ReadLink d/s: %v, want ErrCorrupt (the premise)", err)
+			case length <= 4096 && (err != nil || len(target) != int(length)):
+				t.Fatalf("ReadLink d/s: %d bytes, %v; want %d (the premise: the reader reads it)",
+					len(target), err, length)
+			}
+
+			for _, metadataOnly := range []bool{false, true} {
+				made, err := copyOpened(source, metadataOnly, img, nil)
+
+				switch {
+				case length > 4096:
+					if !errors.Is(err, erofs.ErrCorrupt) {
+						t.Errorf("CopyFrom%s: %v, want ErrCorrupt", copyMode(metadataOnly), err)
+					}
+				case length == 4096:
+					if !errors.Is(err, erofs.ErrInvalid) || errors.Is(err, erofs.ErrCorrupt) {
+						t.Errorf("CopyFrom%s: %v, want ErrInvalid and not ErrCorrupt", copyMode(metadataOnly), err)
+					}
+				case err != nil:
+					t.Errorf("CopyFrom%s: %v", copyMode(metadataOnly), err)
+				default:
+					if d := copyAgrees(img, nil, made.Img, made.Extra()); d != "" {
+						t.Errorf("CopyFrom%s: the copy is not the source: %s", copyMode(metadataOnly), d)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestContractMetadataOnlyCopyRefusesWhatStatRefusesAsNotImplemented: the
 // metadata-only copy refuses, in Stat's class, an inode the reader does
 // not implement: a chunk format word with a bit outside
@@ -2256,6 +2583,89 @@ func (f *dataRangerFile) Read(p []byte) (int, error) {
 	return n, nil
 }
 func (*dataRangerFile) Close() error { return nil }
+
+// A directory that lists a name twice is not a tree either: ReadDir lists
+// both entries, a lookup finds one of them, and a copy made by name would
+// hold one entry's content under the other's metadata, or a directory's
+// entries under a symlink's name. CopyFrom refuses the source in both
+// modes with ErrCorrupt, after the reader has opened it and listed the
+// name twice. Three shapes, each one byte of a committed image, a name
+// shortened or changed into another: a symlink and a directory both named
+// "s"; two regular files both named "513", side by side on disk; and the
+// same two with "512" between them, a directory out of name order, which
+// a comparison of neighbours on disk would miss.
+func TestCopyFromRefusesADirectoryListingANameTwice(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		image, dir, name string
+		at               int
+		was, is          byte
+	}{
+		// d's names end "…ssub": the "u" zeroed ends the last name at "s".
+		{image: "small-chunk-512", dir: "d", name: "s", at: 1385, was: 'u', is: 0},
+		// sizes' names "…511512513…": "512" becomes a second "513".
+		{image: "b512", dir: "sizes", name: "513", at: 1940, was: '2', is: '3'},
+		// "511" becomes one instead: 513, 512, 513 on disk.
+		{image: "b512", dir: "sizes", name: "513", at: 1937, was: '1', is: '3'},
+	} {
+		t.Run(fmt.Sprintf("%s byte %d", tc.image, tc.at), func(t *testing.T) {
+			t.Parallel()
+
+			var img []byte
+
+			for _, c := range corpus.Committed(t) {
+				if c.Name == tc.image {
+					img = bytes.Clone(c.Img)
+				}
+			}
+
+			if img == nil {
+				t.Fatalf("the committed %s image is missing", tc.image)
+			}
+
+			if img[tc.at] != tc.was {
+				t.Fatalf(
+					"byte %d reads %q, want %q: the names are not where the test edits them",
+					tc.at,
+					img[tc.at],
+					tc.was,
+				)
+			}
+
+			img[tc.at] = tc.is
+			img[disk.SuperBlockOffset+8] &^= disk.FeatureCompatSBChksum
+
+			source, err := erofs.Open(bytes.NewReader(img))
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+
+			entries, err := fs.ReadDir(source, tc.dir)
+			if err != nil {
+				t.Fatalf("ReadDir %s: %v", tc.dir, err)
+			}
+
+			listed := 0
+
+			for _, e := range entries {
+				if e.Name() == tc.name {
+					listed++
+				}
+			}
+
+			if listed != 2 {
+				t.Fatalf("the premise: %s lists %q %d times, want twice", tc.dir, tc.name, listed)
+			}
+
+			for _, metadataOnly := range []bool{false, true} {
+				if _, err := copyOpened(source, metadataOnly, img, nil); !errors.Is(err, erofs.ErrCorrupt) {
+					t.Errorf("CopyFrom%s: %v, want ErrCorrupt", copyMode(metadataOnly), err)
+				}
+			}
+		})
+	}
+}
 
 // A source that names one directory twice is not a tree, and a copy of it
 // would hold the subtree once per name: the tree at 512 with root's "sizes"

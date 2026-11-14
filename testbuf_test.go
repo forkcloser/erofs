@@ -2,6 +2,7 @@ package erofs_test
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -11,14 +12,23 @@ import (
 	"github.com/forkcloser/erofs"
 )
 
-// testBuffer is an in-memory io.WriteSeeker for tests.
+// errTestBufferFull is a write past a testBuffer's limit.
+var errTestBufferFull = errors.New("testbuf: write past the buffer's limit")
+
+// testBuffer is an in-memory io.WriteSeeker for tests; with a limit, a
+// write that would end past it is refused.
 type testBuffer struct {
-	buf []byte
-	pos int
+	buf   []byte
+	pos   int
+	limit int
 }
 
 func (b *testBuffer) Write(p []byte) (int, error) {
 	end := b.pos + len(p)
+	if b.limit > 0 && end > b.limit {
+		return 0, errTestBufferFull
+	}
+
 	if end > len(b.buf) {
 		if end > cap(b.buf) {
 			newBuf := make([]byte, end, end*2)

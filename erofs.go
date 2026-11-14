@@ -1676,10 +1676,16 @@ func validPath(name string) bool {
 // "." and "..", the directory's own self and parent entries, are legitimate
 // on disk; callers filter them by name rather than treating them as errors.
 // An empty name is not: no writer emits one, and as a path element it names
-// the directory itself, so a lookup for it would silently succeed.
+// the directory itself, so a lookup for it would silently succeed. Nor is
+// one longer than EROFS_NAME_LEN: the kernel's readdir refuses the block
+// that holds it (dir.c, "bogus dirent").
 func checkDirentName(name []byte) error {
 	if len(name) == 0 {
 		return fmt.Errorf("empty dirent name: %w", ErrCorrupt)
+	}
+
+	if len(name) > disk.MaxNameLen {
+		return fmt.Errorf("dirent name of %d bytes, longer than %d: %w", len(name), disk.MaxNameLen, ErrCorrupt)
 	}
 
 	if bytes.ContainsRune(name, '/') {

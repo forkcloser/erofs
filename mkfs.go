@@ -692,6 +692,33 @@ type hardlinkKey struct {
 	dev, ino uint64
 }
 
+// listedOnce is a source as the walk reads it: its directories are refused,
+// before any of their entries is visited, when they list a name twice. The
+// walk opens what it copies by name, so of two entries under one name it
+// would read one's content for both.
+type listedOnce struct{ fs.FS }
+
+func (l listedOnce) Stat(name string) (fs.FileInfo, error) {
+	return fs.Stat(l.FS, name) //nolint:wrapcheck // the source's own error, as the walk gets it without this wrapper
+}
+
+// ReadDir relies on fs.ReadDir's order: by name, so equal names are
+// neighbours.
+func (l listedOnce) ReadDir(name string) ([]fs.DirEntry, error) {
+	entries, err := fs.ReadDir(l.FS, name)
+	if err != nil {
+		return entries, err //nolint:wrapcheck // the source's own error, as the walk gets it without this wrapper
+	}
+
+	for i := 1; i < len(entries); i++ {
+		if entries[i].Name() == entries[i-1].Name() {
+			return nil, fmt.Errorf("directory %s lists the name %q twice: %w", name, entries[i].Name(), ErrCorrupt)
+		}
+	}
+
+	return entries, nil
+}
+
 // --- Writer bulk copy ---
 
 // CopyFrom walks an fs.FS and adds all entries.
@@ -701,7 +728,9 @@ type hardlinkKey struct {
 // A directory reachable twice by inode identity, a hard link to it or a
 // cycle through it, is refused as ErrCorrupt whatever the source: an image's
 // nid, or a host's device and inode, where a bind mount of a directory
-// under itself is one.
+// under itself is one. So is a directory that lists a name twice: a lookup
+// finds one of the two entries, and the copy would hold that one's content
+// under the other's metadata.
 //
 //nolint:gocognit // the walk callback: one case per entry kind, each with its own metadata and data source
 func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
@@ -783,7 +812,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 		fsys.hasBuildTime = true
 	}
 
-	return fs.WalkDir(src, ".", func(fpath string, d fs.DirEntry, err error) error {
+	return fs.WalkDir(listedOnce{src}, ".", func(fpath string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}

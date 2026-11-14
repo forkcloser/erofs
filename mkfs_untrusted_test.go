@@ -240,6 +240,177 @@ func TestUntrustedBlockCountIsRejected(t *testing.T) {
 	}
 }
 
+// movedMeta serves an image whose metadata area sits far past its other
+// bytes, as a sparse file holds it for nothing: reads from to on come from
+// buf at from. It reports no size, so the image is as long as its
+// superblock declares, and nothing else is there to read.
+type movedMeta struct {
+	buf      []byte
+	from, to int64
+}
+
+func (m *movedMeta) ReadAt(p []byte, off int64) (int, error) {
+	if off >= m.to {
+		off = off - m.to + m.from
+	}
+
+	if off < 0 || off >= int64(len(m.buf)) {
+		return 0, io.EOF
+	}
+
+	n := copy(p, m.buf[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+
+	return n, nil
+}
+
+// TestUntrustedDirectorySizeIsBounded covers a directory's i_size, which
+// sized the buffer the metadata-only copy read the directory into. The
+// size is held to the image's declared extent, and the metadata region to
+// 1 GiB, but the region may start anywhere: a superblock that puts it 4 GiB
+// in, on a source of a few kilobytes that reports no length, let the root
+// declare 2 GiB of entries and have them allocated before a byte was read.
+//
+//nolint:paralleltest // measures the process's TotalAlloc against a budget; a parallel test's allocations would count against it
+func TestUntrustedDirectorySizeIsBounded(t *testing.T) {
+	buf, _ := buildTamperableImage(t)
+
+	img0, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sb := img0.(*image).sb
+	blkBits := sb.BlkSizeBits
+	metaStart := img0.(*image).metaStartPos()
+
+	// The metadata area moves 4 GiB in, the block count with it.
+	const movedBy = int64(4 << 30)
+
+	blocks := uint32(movedBy >> blkBits)
+
+	binary.LittleEndian.PutUint32(buf[disk.SuperBlockOffset+40:], sb.MetaBlkAddr+blocks)
+	binary.LittleEndian.PutUint32(buf[disk.SuperBlockOffset+36:], sb.Blocks+blocks)
+	buf[disk.SuperBlockOffset+8] &^= disk.FeatureCompatSBChksum
+
+	// The root becomes a flat-plain directory of 2 GiB at block 0. i_size is
+	// 32 bits at offset 8 in a compact inode and 64 in an extended one.
+	root := metaStart + int64(sb.RootNid)*disk.SizeInodeCompact
+	format := binary.LittleEndian.Uint16(buf[root:])
+	binary.LittleEndian.PutUint16(buf[root:], format&^disk.InodeFormatLayoutMask)
+	binary.LittleEndian.PutUint32(buf[root+8:], 2<<30)
+
+	if format&disk.InodeFormatExtended != 0 {
+		binary.LittleEndian.PutUint32(buf[root+12:], 0)
+	}
+
+	binary.LittleEndian.PutUint32(buf[root+16:], 0)
+
+	img, err := Open(&movedMeta{buf: buf, from: metaStart, to: metaStart + movedBy})
+	if err != nil {
+		t.Fatalf("tampered image failed to open: %v", err)
+	}
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	err = Create(&seekBuf{}).CopyFrom(img, MetadataOnly())
+
+	runtime.ReadMemStats(&after)
+	grew := after.TotalAlloc - before.TotalAlloc
+
+	if !errors.Is(err, ErrInvalid) {
+		t.Errorf("err = %v, want it to wrap ErrInvalid", err)
+	}
+
+	t.Logf("rejected with %v (allocated %d bytes)", err, grew)
+
+	if grew > 64<<20 {
+		t.Errorf("allocated %d bytes for a root declaring 2 GiB of entries; want under 64 MiB", grew)
+	}
+}
+
+// TestUntrustedHoleSizeIsBounded covers a flat-plain file at the null
+// address, a hole, whose i_size sized the chunk list the metadata-only copy
+// built for it: an entry for every 65535 blocks, built before the writer's
+// limit on a file's chunk index refused the copy at Close. A hole of 2 GiB
+// is copied, which also holds the directory's 1 GiB bound to directories;
+// one of 1 PiB is refused by CopyFrom, with nothing built. The limit is the
+// writer's, 1<<27 blocks: a hole of exactly that passes CopyFrom, and one a
+// byte or a block longer does not.
+//
+//nolint:paralleltest // measures the process's TotalAlloc against a budget; a parallel test's allocations would count against it
+func TestUntrustedHoleSizeIsBounded(t *testing.T) {
+	const limit = maxChunkIndexEntries
+
+	// Sizes at the limit are in blocks of the image's own size; closed says
+	// the copy is also written out, which at the limit is 1 GiB of index.
+	for _, tc := range []struct {
+		name   string
+		size   func(blockSize uint64) uint64
+		want   error
+		closed bool
+	}{
+		{"2 GiB", func(uint64) uint64 { return 2 << 30 }, nil, true},
+		{"1 PiB", func(uint64) uint64 { return 1 << 50 }, ErrInvalid, false},
+		{"the limit", func(bs uint64) uint64 { return limit * bs }, nil, false},
+		{"a byte past the limit", func(bs uint64) uint64 { return limit*bs + 1 }, ErrInvalid, false},
+		{"a block past the limit", func(bs uint64) uint64 { return (limit + 1) * bs }, ErrInvalid, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buf, nid := buildTamperableImage(t)
+
+			img0, err := Open(bytes.NewReader(buf))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			size := tc.size(uint64(img0.(*image).blockSize()))
+
+			// An extended inode's start block is 48 bits, i_nb its high 16:
+			// all ones is the null address.
+			inodeOff := img0.(*image).metaStartPos() + int64(nid)*disk.SizeInodeCompact
+			binary.LittleEndian.PutUint16(buf[inodeOff:], disk.InodeFormatExtended|disk.LayoutFlatPlain<<1)
+			binary.LittleEndian.PutUint16(buf[inodeOff+6:], 0xffff)
+			binary.LittleEndian.PutUint64(buf[inodeOff+8:], size)
+			binary.LittleEndian.PutUint32(buf[inodeOff+16:], 0xffffffff)
+			buf[disk.SuperBlockOffset+8] &^= disk.FeatureCompatSBChksum
+
+			img, err := Open(bytes.NewReader(buf))
+			if err != nil {
+				t.Fatalf("tampered image failed to open: %v", err)
+			}
+
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+
+			dst := Create(&seekBuf{})
+			err = dst.CopyFrom(img, MetadataOnly())
+
+			runtime.ReadMemStats(&after)
+			grew := after.TotalAlloc - before.TotalAlloc
+
+			if !errors.Is(err, tc.want) {
+				t.Errorf("CopyFrom: %v, want %v", err, tc.want)
+			}
+
+			t.Logf("CopyFrom: %v (allocated %d bytes)", err, grew)
+
+			if grew > 64<<20 {
+				t.Errorf("allocated %d bytes copying a hole of %d bytes; want under 64 MiB", grew, size)
+			}
+
+			if tc.closed {
+				if err := dst.Close(); err != nil {
+					t.Errorf("Close: %v", err)
+				}
+			}
+		})
+	}
+}
+
 // patchDirentNid rewrites every 8-byte dirent nid slot equal to from so it
 // points at to, turning a valid tree into a cyclic graph.
 func patchDirentNid(buf []byte, from, to uint64) int {
