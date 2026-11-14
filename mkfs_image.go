@@ -125,9 +125,11 @@ type imgQEntry struct {
 func (fsys *Writer) copyFromImage(img *image) error {
 	metaStart := img.metaStartPos()
 
+	// The reader opens an image declaring no blocks, its length bounding
+	// it: a tree it reads, refused here rather than copied as empty.
 	totalBytes := int64(img.sb.Blocks) << img.sb.BlkSizeBits
 	if totalBytes <= 0 {
-		return nil
+		return fmt.Errorf("superblock declares %d blocks, which hold no metadata: %w", img.sb.Blocks, ErrCorrupt)
 	}
 
 	// sb.Blocks, sb.MetaBlkAddr and sb.Inos are read verbatim from the image
@@ -460,13 +462,49 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				cur.nid, size, totalBytes, ErrCorrupt)
 		}
 
+		// i_size sizes the buffer a directory or a link's target is read
+		// into whole, and an image whose source reports no length is as long
+		// as its superblock says. One directory gets the budget the whole
+		// metadata region has. A target is bounded as the copy with its data
+		// bounds it: the reader's page, then the writer's one byte less,
+		// which the reader reads and Symlink refuses.
+		if typ == disk.StatTypeDir && size > maxEagerMetaBytes {
+			return fmt.Errorf("directory nid %d declares %d bytes, over the %d byte limit: %w",
+				cur.nid, size, int64(maxEagerMetaBytes), ErrInvalid)
+		}
+
+		if typ == disk.StatTypeSymlink && size > maxSymlinkSize {
+			return fmt.Errorf("nid %d: symlink target size %d out of range: %w", cur.nid, size, ErrCorrupt)
+		}
+
+		if typ == disk.StatTypeSymlink && size > maxSymlinkTarget {
+			return fmt.Errorf("nid %d: symlink target is %d bytes, over the %d byte limit: %w",
+				cur.nid, size, maxSymlinkTarget, ErrInvalid)
+		}
+
 		if trailingAddr%int64(blockSize)+tail > int64(blockSize) {
 			return fmt.Errorf("inline data crosses block boundary for nid %d: %w", cur.nid, ErrCorrupt)
 		}
 
-		// inlineData reads an inode's flat data: the whole blocks at i_u,
-		// then the tail beside the inode.
+		// inlineData reads a directory's entries or a symlink's target: flat
+		// data is the whole blocks at i_u, then the tail beside the inode. In
+		// chunks i_u is the chunk format, never a start block, and the data
+		// is where the reader's map puts it.
 		inlineData := func(size int64) ([]byte, error) {
+			if layout == disk.LayoutChunkBased {
+				ftype := fs.ModeSymlink
+				if typ == disk.StatTypeDir {
+					ftype = fs.ModeDir
+				}
+
+				data := make([]byte, size)
+				if err := readAll(&file{img: img, name: cur.path, nid: cur.nid, ftype: ftype}, data); err != nil {
+					return nil, err
+				}
+
+				return data, nil
+			}
+
 			if layout == disk.LayoutFlatPlain {
 				pa, err := img.blockAddr(cur.nid, startBlk)
 				if err != nil {
@@ -518,8 +556,16 @@ func (fsys *Writer) copyFromImage(img *image) error {
 					return fmt.Errorf("read dir data for nid %d: %w", cur.nid, err)
 				}
 
+				listed := len(queue)
+
 				if err := fsys.parseDirBlock(dirData, dirSize, blockSize, cur.path, &queue); err != nil {
 					return fmt.Errorf("dir nid %d: %w", cur.nid, err)
+				}
+
+				// The copy with its data refuses this too; here the second
+				// entry would replace the first under its path.
+				if twice, ok := listedTwice(queue[listed:]); ok {
+					return fmt.Errorf("dir nid %d lists %s twice: %w", cur.nid, twice, ErrCorrupt)
 				}
 			}
 
@@ -556,6 +602,14 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				// being the tail.
 				// #nosec G115 -- size is at most math.MaxInt64, checked above
 				whole := uint64((int64(size) - tail + int64(blockSize) - 1) >> blkBits)
+				// The index is an entry a block, and the writer refuses more
+				// of them at Close. Refused here, before the chunk list below
+				// is built: it grows with an i_size that goes to 1<<63.
+				if whole > maxChunkIndexEntries {
+					return fmt.Errorf("nid %d: chunk index for a %d byte file exceeds the %d entry limit: %w",
+						cur.nid, size, int64(maxChunkIndexEntries), ErrInvalid)
+				}
+
 				switch {
 				case whole == 0:
 				case layout == disk.LayoutFlatPlain && nullStartBlock(startBlk, addr48):
@@ -680,6 +734,32 @@ func (fsys *Writer) copyFromImage(img *image) error {
 	}
 
 	return nil
+}
+
+// listedTwice reports a path that two of a directory's entries have. The
+// entries of a well-formed directory ascend by name, block after block,
+// and are told apart in one pass; only one out of order is searched.
+func listedTwice(children []imgQEntry) (string, bool) {
+	ascending := true
+
+	for i := 1; i < len(children) && ascending; i++ {
+		ascending = children[i-1].path < children[i].path
+	}
+
+	if ascending {
+		return "", false
+	}
+
+	seen := make(map[string]struct{}, len(children))
+	for _, c := range children {
+		if _, twice := seen[c.path]; twice {
+			return c.path, true
+		}
+
+		seen[c.path] = struct{}{}
+	}
+
+	return "", false
 }
 
 // parseDirBlock extracts directory entries from dirent data and enqueues
