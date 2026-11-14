@@ -1,0 +1,7 @@
+go test fuzz v1
+byte('\x00')
+uint32(6760)
+byte('Ù')
+uint32(0)
+byte('5')
+uint32(0)
