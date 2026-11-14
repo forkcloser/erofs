@@ -2275,6 +2275,85 @@ func TestContractCopyOfASymlinkInChunks(t *testing.T) {
 	}
 }
 
+// TestContractCopyOfALinkTargetAtItsBounds: a copy, in both modes, holds
+// a symlink target of 4095 bytes, the most Symlink stores; refuses one of
+// 4096, which the reader reads, as ErrInvalid and not as a corrupt source;
+// and refuses one of 4097 as ErrCorrupt, as ReadLink does. The
+// metadata-only copy reads the target itself, into a buffer of the inode's
+// i_size. The source is small-chunk-512's d/s rewritten flat-plain, its
+// target "a…" in blocks appended to the image.
+func TestContractCopyOfALinkTargetAtItsBounds(t *testing.T) {
+	t.Parallel()
+
+	var src []byte
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name == "small-chunk-512" {
+			src = im.Img
+		}
+	}
+
+	if src == nil {
+		t.Fatal("small-chunk-512 is not among the committed images")
+	}
+
+	const blockSize = 512
+
+	at := inodeOffset(t, src, "d/s")
+
+	format := binary.LittleEndian.Uint16(src[at:])
+	if format&disk.InodeFormatLayoutMask != disk.LayoutFlatInline<<1 {
+		t.Fatalf("d/s reads i_format %#x; want a flat-inline inode", format)
+	}
+
+	for _, length := range []uint32{4095, 4096, 4097} {
+		t.Run(strconv.Itoa(int(length)), func(t *testing.T) {
+			t.Parallel()
+
+			img := append(bytes.Clone(src), bytes.Repeat([]byte("a"), 9*blockSize)...)
+			binary.LittleEndian.PutUint16(img[at:], format&^disk.InodeFormatLayoutMask)
+			binary.LittleEndian.PutUint32(img[at+8:], length)
+			binary.LittleEndian.PutUint32(img[at+16:], uint32(len(src)/blockSize))
+
+			source, err := erofs.Open(bytes.NewReader(img))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			target, err := fs.ReadLink(source, "d/s")
+
+			switch {
+			case length > 4096 && !errors.Is(err, erofs.ErrCorrupt):
+				t.Fatalf("ReadLink d/s: %v, want ErrCorrupt (the premise)", err)
+			case length <= 4096 && (err != nil || len(target) != int(length)):
+				t.Fatalf("ReadLink d/s: %d bytes, %v; want %d (the premise: the reader reads it)",
+					len(target), err, length)
+			}
+
+			for _, metadataOnly := range []bool{false, true} {
+				made, err := copyOpened(source, metadataOnly, img, nil)
+
+				switch {
+				case length > 4096:
+					if !errors.Is(err, erofs.ErrCorrupt) {
+						t.Errorf("CopyFrom%s: %v, want ErrCorrupt", copyMode(metadataOnly), err)
+					}
+				case length == 4096:
+					if !errors.Is(err, erofs.ErrInvalid) || errors.Is(err, erofs.ErrCorrupt) {
+						t.Errorf("CopyFrom%s: %v, want ErrInvalid and not ErrCorrupt", copyMode(metadataOnly), err)
+					}
+				case err != nil:
+					t.Errorf("CopyFrom%s: %v", copyMode(metadataOnly), err)
+				default:
+					if d := copyAgrees(img, nil, made.Img, made.Extra()); d != "" {
+						t.Errorf("CopyFrom%s: the copy is not the source: %s", copyMode(metadataOnly), d)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestContractMetadataOnlyCopyRefusesWhatStatRefusesAsNotImplemented: the
 // metadata-only copy refuses, in Stat's class, an inode the reader does
 // not implement: a chunk format word with a bit outside

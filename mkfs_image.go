@@ -462,6 +462,26 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				cur.nid, size, totalBytes, ErrCorrupt)
 		}
 
+		// i_size sizes the buffer a directory or a link's target is read
+		// into whole, and an image whose source reports no length is as long
+		// as its superblock says. One directory gets the budget the whole
+		// metadata region has. A target is bounded as the copy with its data
+		// bounds it: the reader's page, then the writer's one byte less,
+		// which the reader reads and Symlink refuses.
+		if typ == disk.StatTypeDir && size > maxEagerMetaBytes {
+			return fmt.Errorf("directory nid %d declares %d bytes, over the %d byte limit: %w",
+				cur.nid, size, int64(maxEagerMetaBytes), ErrInvalid)
+		}
+
+		if typ == disk.StatTypeSymlink && size > maxSymlinkSize {
+			return fmt.Errorf("nid %d: symlink target size %d out of range: %w", cur.nid, size, ErrCorrupt)
+		}
+
+		if typ == disk.StatTypeSymlink && size > maxSymlinkTarget {
+			return fmt.Errorf("nid %d: symlink target is %d bytes, over the %d byte limit: %w",
+				cur.nid, size, maxSymlinkTarget, ErrInvalid)
+		}
+
 		if trailingAddr%int64(blockSize)+tail > int64(blockSize) {
 			return fmt.Errorf("inline data crosses block boundary for nid %d: %w", cur.nid, ErrCorrupt)
 		}
@@ -582,6 +602,14 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				// being the tail.
 				// #nosec G115 -- size is at most math.MaxInt64, checked above
 				whole := uint64((int64(size) - tail + int64(blockSize) - 1) >> blkBits)
+				// The index is an entry a block, and the writer refuses more
+				// of them at Close. Refused here, before the chunk list below
+				// is built: it grows with an i_size that goes to 1<<63.
+				if whole > maxChunkIndexEntries {
+					return fmt.Errorf("nid %d: chunk index for a %d byte file exceeds the %d entry limit: %w",
+						cur.nid, size, int64(maxChunkIndexEntries), ErrInvalid)
+				}
+
 				switch {
 				case whole == 0:
 				case layout == disk.LayoutFlatPlain && nullStartBlock(startBlk, addr48):
