@@ -466,9 +466,25 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			return fmt.Errorf("inline data crosses block boundary for nid %d: %w", cur.nid, ErrCorrupt)
 		}
 
-		// inlineData reads an inode's flat data: the whole blocks at i_u,
-		// then the tail beside the inode.
+		// inlineData reads a directory's entries or a symlink's target: flat
+		// data is the whole blocks at i_u, then the tail beside the inode. In
+		// chunks i_u is the chunk format, never a start block, and the data
+		// is where the reader's map puts it.
 		inlineData := func(size int64) ([]byte, error) {
+			if layout == disk.LayoutChunkBased {
+				ftype := fs.ModeSymlink
+				if typ == disk.StatTypeDir {
+					ftype = fs.ModeDir
+				}
+
+				data := make([]byte, size)
+				if err := readAll(&file{img: img, name: cur.path, nid: cur.nid, ftype: ftype}, data); err != nil {
+					return nil, err
+				}
+
+				return data, nil
+			}
+
 			if layout == disk.LayoutFlatPlain {
 				pa, err := img.blockAddr(cur.nid, startBlk)
 				if err != nil {

@@ -2096,6 +2096,185 @@ func TestContractMetadataOnlyCopyRefusesASourceDeclaringNoBlocks(t *testing.T) {
 	}
 }
 
+// TestContractCopyOfADirectoryInChunks: a directory in the chunk-based
+// layout holds its entries where its chunk map says, and i_u is its chunk
+// format, not a block. No tool writes one; the reader and the reference
+// read it through the map. A copy, with its data or metadata-only, is that
+// directory when the map is inside the image, and is refused as
+// ErrCorrupt, as ReadDir is, when the map points past it. The source is
+// small-chunk-512's d/sub, a flat-inline directory of one whole block and
+// a tail, rewritten as one chunk of that block.
+func TestContractCopyOfADirectoryInChunks(t *testing.T) {
+	t.Parallel()
+
+	var src []byte
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name == "small-chunk-512" {
+			src = im.Img
+		}
+	}
+
+	if src == nil {
+		t.Fatal("small-chunk-512 is not among the committed images")
+	}
+
+	const blockSize = 512
+
+	at := inodeOffset(t, src, "d/sub")
+
+	format, xattrs := binary.LittleEndian.Uint16(src[at:]), binary.LittleEndian.Uint16(src[at+2:])
+	size, start := binary.LittleEndian.Uint64(src[at+8:]), binary.LittleEndian.Uint32(src[at+16:])
+
+	if format != disk.InodeFormatExtended|disk.LayoutFlatInline<<1 || xattrs != 0 || size <= blockSize ||
+		size >= 2*blockSize {
+		t.Fatalf("d/sub reads i_format %#x, i_xattr_icount %d, i_size %d; want an extended flat-inline inode "+
+			"without xattrs, one block and a tail", format, xattrs, size)
+	}
+
+	// chunked is d/sub as one chunk of a block, at the given address: the
+	// chunk format zero (a chunk is a block, a four-byte address each), the
+	// map right after the inode, where the tail was.
+	chunked := func(addr uint32) []byte {
+		img := bytes.Clone(src)
+		binary.LittleEndian.PutUint16(img[at:], disk.InodeFormatExtended|disk.LayoutChunkBased<<1)
+		binary.LittleEndian.PutUint64(img[at+8:], blockSize)
+		binary.LittleEndian.PutUint32(img[at+16:], 0)
+		binary.LittleEndian.PutUint32(img[at+disk.SizeInodeExtended:], addr)
+
+		return img
+	}
+
+	t.Run("inside the image", func(t *testing.T) {
+		t.Parallel()
+
+		img := chunked(start)
+
+		source, err := erofs.Open(bytes.NewReader(img))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		entries, err := fs.ReadDir(source, "d/sub")
+		if err != nil || len(entries) == 0 {
+			t.Fatalf("ReadDir d/sub: %d entries, %v (the premise: the reader reads it)", len(entries), err)
+		}
+
+		for _, metadataOnly := range []bool{false, true} {
+			got, err := copyOpened(source, metadataOnly, img, nil)
+			if err != nil {
+				t.Errorf("CopyFrom%s: %v", copyMode(metadataOnly), err)
+
+				continue
+			}
+
+			if d := copyAgrees(img, nil, got.Img, got.Extra()); d != "" {
+				t.Errorf("CopyFrom%s: the copy is not the source: %s", copyMode(metadataOnly), d)
+			}
+		}
+	})
+
+	t.Run("past the image", func(t *testing.T) {
+		t.Parallel()
+
+		img := chunked(uint32(len(src)/blockSize) + 100)
+
+		source, err := erofs.Open(bytes.NewReader(img))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := fs.ReadDir(source, "d/sub"); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("ReadDir d/sub: %v, want ErrCorrupt (the premise)", err)
+		}
+
+		for _, metadataOnly := range []bool{false, true} {
+			if _, err := copyOpened(source, metadataOnly, img, nil); !errors.Is(err, erofs.ErrCorrupt) {
+				t.Errorf("CopyFrom%s: %v, want ErrCorrupt", copyMode(metadataOnly), err)
+			}
+		}
+	})
+}
+
+// TestContractCopyOfASymlinkInChunks: a symlink in the chunk-based layout
+// holds its target where its chunk map says, as a directory holds its
+// entries. No tool writes one; the reader reads the target through the
+// map, and a copy, with its data or metadata-only, is that link. The
+// source is small-chunk-512's d/s, a fast symlink, rewritten as one chunk:
+// its target in a block appended to the image, the map where the target
+// was.
+func TestContractCopyOfASymlinkInChunks(t *testing.T) {
+	t.Parallel()
+
+	var src []byte
+
+	for _, im := range corpus.Committed(t) {
+		if im.Name == "small-chunk-512" {
+			src = im.Img
+		}
+	}
+
+	if src == nil {
+		t.Fatal("small-chunk-512 is not among the committed images")
+	}
+
+	const blockSize = 512
+
+	plain, err := erofs.Open(bytes.NewReader(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	target, err := fs.ReadLink(plain, "d/s")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	at := inodeOffset(t, src, "d/s")
+	format, xattrs := binary.LittleEndian.Uint16(src[at:]), binary.LittleEndian.Uint16(src[at+2:])
+
+	inodeSize := disk.SizeInodeCompact
+	if format&disk.InodeFormatExtended != 0 {
+		inodeSize = disk.SizeInodeExtended
+	}
+
+	if format&disk.InodeFormatLayoutMask != disk.LayoutFlatInline<<1 || xattrs != 0 ||
+		string(src[at+inodeSize:at+inodeSize+len(target)]) != target {
+		t.Fatalf("d/s reads i_format %#x, i_xattr_icount %d; want a flat-inline inode without xattrs, "+
+			"its target %q beside it", format, xattrs, target)
+	}
+
+	// The chunk format zero: a chunk is a block, a four-byte address each.
+	img := append(bytes.Clone(src), make([]byte, blockSize)...)
+	copy(img[len(src):], target)
+	binary.LittleEndian.PutUint16(img[at:], format&^disk.InodeFormatLayoutMask|disk.LayoutChunkBased<<1)
+	binary.LittleEndian.PutUint32(img[at+16:], 0)
+	binary.LittleEndian.PutUint32(img[at+inodeSize:], uint32(len(src)/blockSize))
+
+	source, err := erofs.Open(bytes.NewReader(img))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := fs.ReadLink(source, "d/s")
+	if err != nil || got != target {
+		t.Fatalf("ReadLink d/s: %q, %v; want %q (the premise: the reader reads it)", got, err, target)
+	}
+
+	for _, metadataOnly := range []bool{false, true} {
+		made, err := copyOpened(source, metadataOnly, img, nil)
+		if err != nil {
+			t.Errorf("CopyFrom%s: %v", copyMode(metadataOnly), err)
+
+			continue
+		}
+
+		if d := copyAgrees(img, nil, made.Img, made.Extra()); d != "" {
+			t.Errorf("CopyFrom%s: the copy is not the source: %s", copyMode(metadataOnly), d)
+		}
+	}
+}
+
 // TestContractMetadataOnlyCopyRefusesWhatStatRefusesAsNotImplemented: the
 // metadata-only copy refuses, in Stat's class, an inode the reader does
 // not implement: a chunk format word with a bit outside
