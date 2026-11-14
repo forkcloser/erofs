@@ -2480,6 +2480,89 @@ func (f *dataRangerFile) Read(p []byte) (int, error) {
 }
 func (*dataRangerFile) Close() error { return nil }
 
+// A directory that lists a name twice is not a tree either: ReadDir lists
+// both entries, a lookup finds one of them, and a copy made by name would
+// hold one entry's content under the other's metadata, or a directory's
+// entries under a symlink's name. CopyFrom refuses the source in both
+// modes with ErrCorrupt, after the reader has opened it and listed the
+// name twice. Three shapes, each one byte of a committed image, a name
+// shortened or changed into another: a symlink and a directory both named
+// "s"; two regular files both named "513", side by side on disk; and the
+// same two with "512" between them, a directory out of name order, which
+// a comparison of neighbours on disk would miss.
+func TestCopyFromRefusesADirectoryListingANameTwice(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		image, dir, name string
+		at               int
+		was, is          byte
+	}{
+		// d's names end "…ssub": the "u" zeroed ends the last name at "s".
+		{image: "small-chunk-512", dir: "d", name: "s", at: 1385, was: 'u', is: 0},
+		// sizes' names "…511512513…": "512" becomes a second "513".
+		{image: "b512", dir: "sizes", name: "513", at: 1940, was: '2', is: '3'},
+		// "511" becomes one instead: 513, 512, 513 on disk.
+		{image: "b512", dir: "sizes", name: "513", at: 1937, was: '1', is: '3'},
+	} {
+		t.Run(fmt.Sprintf("%s byte %d", tc.image, tc.at), func(t *testing.T) {
+			t.Parallel()
+
+			var img []byte
+
+			for _, c := range corpus.Committed(t) {
+				if c.Name == tc.image {
+					img = bytes.Clone(c.Img)
+				}
+			}
+
+			if img == nil {
+				t.Fatalf("the committed %s image is missing", tc.image)
+			}
+
+			if img[tc.at] != tc.was {
+				t.Fatalf(
+					"byte %d reads %q, want %q: the names are not where the test edits them",
+					tc.at,
+					img[tc.at],
+					tc.was,
+				)
+			}
+
+			img[tc.at] = tc.is
+			img[disk.SuperBlockOffset+8] &^= disk.FeatureCompatSBChksum
+
+			source, err := erofs.Open(bytes.NewReader(img))
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+
+			entries, err := fs.ReadDir(source, tc.dir)
+			if err != nil {
+				t.Fatalf("ReadDir %s: %v", tc.dir, err)
+			}
+
+			listed := 0
+
+			for _, e := range entries {
+				if e.Name() == tc.name {
+					listed++
+				}
+			}
+
+			if listed != 2 {
+				t.Fatalf("the premise: %s lists %q %d times, want twice", tc.dir, tc.name, listed)
+			}
+
+			for _, metadataOnly := range []bool{false, true} {
+				if _, err := copyOpened(source, metadataOnly, img, nil); !errors.Is(err, erofs.ErrCorrupt) {
+					t.Errorf("CopyFrom%s: %v, want ErrCorrupt", copyMode(metadataOnly), err)
+				}
+			}
+		})
+	}
+}
+
 // A source that names one directory twice is not a tree, and a copy of it
 // would hold the subtree once per name: the tree at 512 with root's "sizes"
 // dirent retargeted at "many"'s inode (its nid's low byte, the checksum

@@ -536,8 +536,16 @@ func (fsys *Writer) copyFromImage(img *image) error {
 					return fmt.Errorf("read dir data for nid %d: %w", cur.nid, err)
 				}
 
+				listed := len(queue)
+
 				if err := fsys.parseDirBlock(dirData, dirSize, blockSize, cur.path, &queue); err != nil {
 					return fmt.Errorf("dir nid %d: %w", cur.nid, err)
+				}
+
+				// The copy with its data refuses this too; here the second
+				// entry would replace the first under its path.
+				if twice, ok := listedTwice(queue[listed:]); ok {
+					return fmt.Errorf("dir nid %d lists %s twice: %w", cur.nid, twice, ErrCorrupt)
 				}
 			}
 
@@ -698,6 +706,32 @@ func (fsys *Writer) copyFromImage(img *image) error {
 	}
 
 	return nil
+}
+
+// listedTwice reports a path that two of a directory's entries have. The
+// entries of a well-formed directory ascend by name, block after block,
+// and are told apart in one pass; only one out of order is searched.
+func listedTwice(children []imgQEntry) (string, bool) {
+	ascending := true
+
+	for i := 1; i < len(children) && ascending; i++ {
+		ascending = children[i-1].path < children[i].path
+	}
+
+	if ascending {
+		return "", false
+	}
+
+	seen := make(map[string]struct{}, len(children))
+	for _, c := range children {
+		if _, twice := seen[c.path]; twice {
+			return c.path, true
+		}
+
+		seen[c.path] = struct{}{}
+	}
+
+	return "", false
 }
 
 // parseDirBlock extracts directory entries from dirent data and enqueues
