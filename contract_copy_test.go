@@ -2052,6 +2052,50 @@ func TestContractMetadataOnlyCopyRefusesWhatStatRefuses(t *testing.T) {
 	}
 }
 
+// TestContractMetadataOnlyCopyRefusesASourceDeclaringNoBlocks: the
+// metadata-only copy walks the source inside the extent its superblock
+// declares and refuses what lies outside it as ErrCorrupt. A superblock
+// declaring zero blocks leaves the metadata itself outside, and that copy
+// is refused like the others, never made as an empty image. The reader
+// opens such a source, bounded by its length, and the copy with its data
+// is the source.
+func TestContractMetadataOnlyCopyRefusesASourceDeclaringNoBlocks(t *testing.T) {
+	t.Parallel()
+
+	img := writeImage(t, []corpus.Node{{Path: "a", Type: tar.TypeReg, Mode: 0o644, Data: []byte("a")}})
+
+	// The block count is the superblock's u32 at offset 36; its checksum is
+	// switched off so the count is what is judged.
+	binary.LittleEndian.PutUint32(img[disk.SuperBlockOffset+36:], 0)
+	img[disk.SuperBlockOffset+8] &^= disk.FeatureCompatSBChksum
+
+	source, err := erofs.Open(bytes.NewReader(img))
+	if err != nil {
+		t.Fatalf("Open: %v (the premise: the reader opens it)", err)
+	}
+
+	b, err := fs.ReadFile(source, "a")
+	if err != nil || string(b) != "a" {
+		t.Fatalf("ReadFile a: %q, %v (the premise: the reader reads it)", b, err)
+	}
+
+	w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	err = w.CopyFrom(source, erofs.MetadataOnly())
+	if !errors.Is(err, erofs.ErrCorrupt) {
+		t.Errorf("CopyFrom(MetadataOnly): %v, want ErrCorrupt", err)
+	}
+
+	got, err := copyOpened(source, false, img, nil)
+	if err != nil {
+		t.Fatalf("CopyFrom with its data: %v", err)
+	}
+
+	if d := copyAgrees(img, nil, got.Img, got.Extra()); d != "" {
+		t.Errorf("the copy with its data is not the source: %s", d)
+	}
+}
+
 // TestContractMetadataOnlyCopyRefusesWhatStatRefusesAsNotImplemented: the
 // metadata-only copy refuses, in Stat's class, an inode the reader does
 // not implement: a chunk format word with a bit outside

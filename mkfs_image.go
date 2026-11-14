@@ -125,9 +125,11 @@ type imgQEntry struct {
 func (fsys *Writer) copyFromImage(img *image) error {
 	metaStart := img.metaStartPos()
 
+	// The reader opens an image declaring no blocks, its length bounding
+	// it: a tree it reads, refused here rather than copied as empty.
 	totalBytes := int64(img.sb.Blocks) << img.sb.BlkSizeBits
 	if totalBytes <= 0 {
-		return nil
+		return fmt.Errorf("superblock declares %d blocks, which hold no metadata: %w", img.sb.Blocks, ErrCorrupt)
 	}
 
 	// sb.Blocks, sb.MetaBlkAddr and sb.Inos are read verbatim from the image
