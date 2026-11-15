@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/erofs/internal/builder"
 	"github.com/forkcloser/erofs/internal/corpus"
 	"github.com/forkcloser/erofs/internal/disk"
 	"github.com/forkcloser/erofs/internal/erofsspec"
@@ -2046,4 +2047,419 @@ func TestContractWriterOneOpenFile(t *testing.T) {
 	if err = b.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestContractWriterReadsBackWhatItCopied: "A file CopyFrom added whose
+// data the Writer does not hold ... is opened again in that source". Every
+// regular file of every committed image, copied with its data, into a data
+// file, and metadata-only, reads back through the Writer before Close as
+// the source reads it, after a file of the Writer's own that fills the
+// first bytes of its spool or data file. Reading them back changes nothing
+// of what Close writes.
+func TestContractWriterReadsBackWhatItCopied(t *testing.T) {
+	t.Parallel()
+
+	for _, im := range corpus.Committed(t) {
+		// The images of a tree: the others are there to be refused.
+		if im.Tree == nil {
+			continue
+		}
+
+		for _, mode := range []string{"with its data", "into a data file", "metadata-only"} {
+			t.Run(im.Name+", "+mode, func(t *testing.T) {
+				t.Parallel()
+
+				src := openImage(t, im)
+				if src == nil {
+					t.Skip("a 48-bit image, which the package does not open")
+				}
+
+				opts := []erofs.CreateOpt{erofs.WithBuildTime(corpus.BuildTime, 0)}
+
+				var df *os.File
+
+				if mode == "into a data file" {
+					var err error
+					if df, err = os.Create(filepath.Join(t.TempDir(), "data.bin")); err != nil {
+						t.Fatal(err)
+					}
+
+					t.Cleanup(func() { _ = df.Close() })
+
+					opts = append(opts, erofs.WithDataFile(df))
+				}
+
+				out := &testBuffer{}
+				w := erofs.Create(out, opts...)
+
+				var copyOpts []erofs.CopyOpt
+				if mode == "metadata-only" {
+					copyOpts = append(copyOpts, erofs.MetadataOnly())
+				}
+
+				if cerr := w.CopyFrom(src, copyOpts...); cerr != nil {
+					t.Fatalf("the copy: %v", cerr)
+				}
+
+				// After the copy, so that the image's block size is the
+				// source's; its bytes are still the first of the spool.
+				own := bytes.Repeat([]byte("the Writer's own. "), 300)
+				mustCreate(t, w, "made-by-the-writer", own)
+
+				if files := sameFileBytes(t, src, w, "the Writer"); files == 0 {
+					t.Fatal("no regular file was read back")
+				}
+
+				if got, rerr := fs.ReadFile(w, "made-by-the-writer"); rerr != nil || !bytes.Equal(got, own) {
+					t.Errorf("the Writer's own file reads %d bytes back, %v", len(got), rerr)
+				}
+
+				if cerr := w.Close(); cerr != nil {
+					t.Fatalf("Close: %v", cerr)
+				}
+
+				copied := corpus.Image{Name: "copy", Img: out.Bytes()}
+
+				switch mode {
+				case "into a data file":
+					blob, rerr := os.ReadFile(df.Name())
+					if rerr != nil {
+						t.Fatal(rerr)
+					}
+
+					copied.Blob = blob
+				case "metadata-only":
+					copied.Devices = append([][]byte{im.Img}, im.Extra()...)
+				}
+
+				sameFileBytes(t, src, openImage(t, copied), "the image")
+			})
+		}
+	}
+}
+
+// sameFileBytes holds every regular file of want to the same bytes in got,
+// each opened, read and closed there, and returns how many there were.
+func sameFileBytes(t *testing.T, want, got fs.FS, reader string) int {
+	t.Helper()
+
+	files := 0
+
+	err := fs.WalkDir(want, ".", func(name string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return err
+		}
+
+		source, err := fs.ReadFile(want, name)
+		if err != nil {
+			return err
+		}
+
+		f, err := got.Open(name)
+		if err != nil {
+			return err
+		}
+
+		read, err := io.ReadAll(f)
+		if cerr := errors.Join(err, f.Close()); cerr != nil {
+			return cerr
+		}
+
+		if !bytes.Equal(read, source) {
+			t.Errorf("%s: %s reads %d bytes, not the source's %d", name, reader, len(read), len(source))
+		}
+
+		files++
+
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return files
+}
+
+// reopened is a source that counts the files it opens and the ones closed,
+// and can stop opening any, or reading the ones it opens.
+type reopened struct {
+	fs.FS
+
+	opened, closed int
+	gone, unread   error
+}
+
+func (r *reopened) Open(name string) (fs.File, error) {
+	if r.gone != nil {
+		return nil, r.gone
+	}
+
+	f, err := r.FS.Open(name)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, dir := f.(fs.ReadDirFile); dir {
+		return f, nil
+	}
+
+	r.opened++
+
+	return &reopenedFile{File: f, of: r}, nil
+}
+
+type reopenedFile struct {
+	fs.File
+
+	of *reopened
+}
+
+func (f *reopenedFile) Read(p []byte) (int, error) {
+	if f.of.unread != nil {
+		return 0, f.of.unread
+	}
+
+	return f.File.Read(p)
+}
+
+func (f *reopenedFile) Close() error {
+	f.of.closed++
+
+	return f.File.Close()
+}
+
+var errSourceGone = errors.New("the source is gone")
+
+// TestContractWriterOpenOfACopiedFile: the file Open returns for a copied
+// entry is the source's, opened again, under the Writer's info: closing it
+// closes that one and leaves the copy's own, and it ends where the copied
+// file does when the source's has grown, and fails where the source's has
+// shrunk. So is a file the walk copied metadata-only. A source that no longer
+// opens it fails Open with its error, and one that no longer reads it fails
+// the read with its error, unless the Writer holds the data, in
+// its data file, and reads it there. And a file whose data the source
+// handed over itself is refused with ErrNotImplemented, with its data and
+// metadata-only, where the spool's first bytes used to be read for it.
+func TestContractWriterOpenOfACopiedFile(t *testing.T) {
+	t.Parallel()
+
+	content := []byte("copied by CopyFrom")
+
+	t.Run("opened again in its source", func(t *testing.T) {
+		t.Parallel()
+
+		src := &reopened{FS: fstest.MapFS{"copied": &fstest.MapFile{Data: content, Mode: 0o644}}}
+		out := &testBuffer{}
+		w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+		mustCreate(t, w, "made", []byte("made by Create, first in the spool"))
+
+		if err := w.CopyFrom(src); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := w.Chmod("copied", 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		// The copy holds its own file open until Close.
+		held := src.opened
+
+		f, err := w.Open("copied")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if src.opened != held+1 {
+			t.Errorf("the source opened %d files for the read back, want 1", src.opened-held)
+		}
+
+		info, err := f.Stat()
+		if err != nil || info.Mode().Perm() != 0o600 || info.Size() != int64(len(content)) {
+			t.Errorf("Stat: %v, %v; want the Writer's mode 0600 and %d bytes", info, err, len(content))
+		}
+
+		if got, rerr := io.ReadAll(f); rerr != nil || !bytes.Equal(got, content) {
+			t.Errorf("read back %q, %v; want %q", got, rerr, content)
+		}
+
+		closed := src.closed
+		if err := f.Close(); err != nil || src.closed != closed+1 {
+			t.Errorf("Close: %v, %d of the source's files closed, want 1", err, src.closed-closed)
+		}
+
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		if got, err := fs.ReadFile(openImage(t, corpus.Image{Name: "copy", Img: out.Bytes()}), "copied"); err != nil ||
+			!bytes.Equal(got, content) {
+			t.Errorf("the image reads %q, %v; want %q", got, err, content)
+		}
+	})
+
+	t.Run("a source that no longer opens it", func(t *testing.T) {
+		t.Parallel()
+
+		src := &reopened{FS: fstest.MapFS{"copied": &fstest.MapFile{Data: content, Mode: 0o644}}}
+		w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+		if err := w.CopyFrom(src); err != nil {
+			t.Fatal(err)
+		}
+
+		src.gone = errSourceGone
+
+		if _, err := w.Open("copied"); !errors.Is(err, errSourceGone) {
+			t.Errorf("Open: %v, want the source's error", err)
+		}
+	})
+
+	t.Run("a source that no longer reads it", func(t *testing.T) {
+		t.Parallel()
+
+		src := &reopened{FS: fstest.MapFS{"copied": &fstest.MapFile{Data: content, Mode: 0o644}}}
+		w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+		if err := w.CopyFrom(src); err != nil {
+			t.Fatal(err)
+		}
+
+		src.unread = errSourceGone
+
+		if got, err := fs.ReadFile(w, "copied"); !errors.Is(err, errSourceGone) {
+			t.Errorf("read back %q, %v; want the source's error", got, err)
+		}
+	})
+
+	t.Run("a source that no longer opens it, and a data file", func(t *testing.T) {
+		t.Parallel()
+
+		df, err := os.Create(filepath.Join(t.TempDir(), "data.bin"))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		t.Cleanup(func() { _ = df.Close() })
+
+		src := &reopened{FS: fstest.MapFS{"copied": &fstest.MapFile{Data: content, Mode: 0o644}}}
+		w := erofs.Create(&testBuffer{}, erofs.WithDataFile(df), erofs.WithBuildTime(corpus.BuildTime, 0))
+
+		if err := w.CopyFrom(src); err != nil {
+			t.Fatal(err)
+		}
+
+		src.gone = errSourceGone
+
+		if got, err := fs.ReadFile(w, "copied"); err != nil || !bytes.Equal(got, content) {
+			t.Errorf("read back %q, %v; want %q from the data file", got, err, content)
+		}
+	})
+
+	t.Run("a source file that grew since", func(t *testing.T) {
+		t.Parallel()
+
+		files := fstest.MapFS{"copied": &fstest.MapFile{Data: content, Mode: 0o644}}
+		w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+		if err := w.CopyFrom(files); err != nil {
+			t.Fatal(err)
+		}
+
+		files["copied"] = &fstest.MapFile{Data: append(bytes.Clone(content), " and more"...), Mode: 0o644}
+
+		if got, err := fs.ReadFile(w, "copied"); err != nil || !bytes.Equal(got, content) {
+			t.Errorf("read back %q, %v; want the %d bytes that were copied", got, err, len(content))
+		}
+	})
+
+	t.Run("a source file that shrank since", func(t *testing.T) {
+		t.Parallel()
+
+		files := fstest.MapFS{"copied": &fstest.MapFile{Data: content, Mode: 0o644}}
+		w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+		if err := w.CopyFrom(files); err != nil {
+			t.Fatal(err)
+		}
+
+		files["copied"] = &fstest.MapFile{Data: content[:6], Mode: 0o644}
+
+		f, err := w.Open("copied")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if got, rerr := io.ReadAll(f); !errors.Is(rerr, io.ErrUnexpectedEOF) {
+			t.Errorf("read back %q, %v; want ErrUnexpectedEOF for a source 12 bytes short", got, rerr)
+		}
+	})
+
+	t.Run("copied metadata-only by the walk", func(t *testing.T) {
+		t.Parallel()
+
+		data := bytes.Repeat([]byte("on the device. "), 300)
+		src := &dataRangerFS{
+			deviceBlocks: 16,
+			file: &dataRangerFileInfo{
+				name: "copied", size: int64(len(data)), content: data,
+				ranges: []erofs.DataRange{{Offset: 0, Size: int64(len(data))}},
+			},
+		}
+		w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(corpus.BuildTime, 0))
+		mustCreate(t, w, "made", []byte("made by Create, first in the spool"))
+
+		if err := w.CopyFrom(src, erofs.MetadataOnly()); err != nil {
+			t.Fatal(err)
+		}
+
+		if got, err := fs.ReadFile(w, "copied"); err != nil || !bytes.Equal(got, data) {
+			t.Errorf("read back %d bytes, %v; want the source's %d", len(got), err, len(data))
+		}
+	})
+
+	t.Run("data the source handed over itself, metadata-only", func(t *testing.T) {
+		t.Parallel()
+
+		src := fstest.MapFS{"copied": &fstest.MapFile{
+			Data: content, Mode: 0o644, Sys: &builder.Entry{Data: bytes.NewReader(content)},
+		}}
+		w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(corpus.BuildTime, 0))
+		mustCreate(t, w, "made", []byte("made by Create, first in the spool"))
+
+		if err := w.CopyFrom(src, erofs.MetadataOnly()); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := w.Open("copied"); !errors.Is(err, erofs.ErrNotImplemented) {
+			t.Errorf("Open: %v, want ErrNotImplemented", err)
+		}
+	})
+
+	t.Run("data the source handed over itself", func(t *testing.T) {
+		t.Parallel()
+
+		src := fstest.MapFS{"copied": &fstest.MapFile{
+			Data: content, Mode: 0o644, Sys: &builder.Entry{Data: bytes.NewReader(content)},
+		}}
+		out := &testBuffer{}
+		w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+		mustCreate(t, w, "made", []byte("made by Create, first in the spool"))
+
+		if err := w.CopyFrom(src); err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := w.Open("copied"); !errors.Is(err, erofs.ErrNotImplemented) {
+			t.Errorf("Open: %v, want ErrNotImplemented", err)
+		}
+
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		if got, err := fs.ReadFile(openImage(t, corpus.Image{Name: "copy", Img: out.Bytes()}), "copied"); err != nil ||
+			!bytes.Equal(got, content) {
+			t.Errorf("the image reads %q, %v; want %q", got, err, content)
+		}
+	})
 }
