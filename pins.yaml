@@ -1,55 +1,56 @@
-# The mkfs.erofs the image-backed tests run: forkcloser/testbin's build of
-# erofs-utils, one archive per platform the tests run on, verified against
-# testbin's release attestation (limen's book, tooling.md, "Pinned artifacts
-# beyond aqua"). The `mkfs-erofs` recipe fetches this host's and puts it on
-# the tests' PATH. The archive name carries erofs-utils' own version, so a
-# testbin release that moves to a newer erofs-utils changes it: Renovate's
-# bump of `version:` then fails the digest refresh, and the five urls move by
-# hand with it. The attestation is held to testbin's release workflow by
-# name: a workflow renamed there fails the next refresh, closed.
+# The mkfs.erofs the image-backed tests run, and the fsck.erofs that reads
+# their images back: forkcloser/testbin's build of erofs-utils, one archive
+# per platform the tests run on, verified against testbin's release
+# attestation (limen's book, tooling.md, "Pinned artifacts beyond aqua").
+# The `mkfs-erofs` recipe fetches this host's and puts both on the tests'
+# PATH. The archive is named for its platform alone, so a testbin release
+# moves `version:` and nothing else, whatever erofs-utils it builds: which
+# one that is, the recipe prints. The attestation is held to testbin's
+# release workflow by name: a workflow renamed there fails the next refresh,
+# closed.
 pins:
   - name: mkfs-erofs-linux-amd64
     renovate: github-releases forkcloser/testbin
-    version: 0.2.0
-    url: https://github.com/forkcloser/testbin/releases/download/v${version}/erofs-1.9.4-linux-amd64.tar.gz
+    version: 0.3.0
+    url: https://github.com/forkcloser/testbin/releases/download/v${version}/erofs-linux-amd64.tar.gz
     verify: github-attestation forkcloser/testbin forkcloser/testbin/.github/workflows/release.yaml
     digest:
-      version: 0.2.0
-      source: ba0e7342554ea39665ca65fc21e8532adb85848b8a4a4e558bcd47b0f564ac0e
-      sha256: e5c0c9d0e4870f51187f564556e8fcc47ecdc5321ca4460fa086eaf19c03f1f7
+      version: 0.3.0
+      source: 1326bd0ec1662a765fbb887f6b9ba589f47d3cb928688614dcc15ef1d6a8f70d
+      sha256: 9fcd8da75b4e2fb9113fd37ff1dcd9dca51883a2d352afaa8ee0a0d1e937bd2c
   - name: mkfs-erofs-linux-arm64
     renovate: github-releases forkcloser/testbin
-    version: 0.2.0
-    url: https://github.com/forkcloser/testbin/releases/download/v${version}/erofs-1.9.4-linux-arm64.tar.gz
+    version: 0.3.0
+    url: https://github.com/forkcloser/testbin/releases/download/v${version}/erofs-linux-arm64.tar.gz
     verify: github-attestation forkcloser/testbin forkcloser/testbin/.github/workflows/release.yaml
     digest:
-      version: 0.2.0
-      source: 44e9165eac81f39fb617d3997a434f5f4d63e9860b372904d91ff882a2b150d5
-      sha256: f3aa8f5f3af8ae567705f98e44c2b7914d0bb08f7997330b84c96536725c09bc
+      version: 0.3.0
+      source: 40996b923ca21fdaac7271e31a2bc0539fc9588ccf493f95ea8f256c8f00ff54
+      sha256: 43b91b990047b332c8d01e3c10276422c743c4fa918fb87d30414a8c9984bb25
   - name: mkfs-erofs-darwin-arm64
     renovate: github-releases forkcloser/testbin
-    version: 0.2.0
-    url: https://github.com/forkcloser/testbin/releases/download/v${version}/erofs-1.9.4-darwin-arm64.tar.gz
+    version: 0.3.0
+    url: https://github.com/forkcloser/testbin/releases/download/v${version}/erofs-darwin-arm64.tar.gz
     verify: github-attestation forkcloser/testbin forkcloser/testbin/.github/workflows/release.yaml
     digest:
-      version: 0.2.0
-      source: 9234086aaa6a98495087cb85e1dd59c8e671aa8434a621df6f394905f51c3aad
-      sha256: 2995fb046f0b72e6984629479c4968e0db69e759213dd9d1ae13f928777262ce
+      version: 0.3.0
+      source: 4ba5186346b5039be62ebd11070e80695bbb838b7598e38fbc51d9e1f1f11470
+      sha256: 4de8e611a96d3ec18f720a29e1fa008ea1b2a45daf18d864bf45373696b5baa9
   - name: mkfs-erofs-windows-amd64
     renovate: github-releases forkcloser/testbin
-    version: 0.2.0
-    url: https://github.com/forkcloser/testbin/releases/download/v${version}/erofs-1.9.4-windows-amd64.tar.gz
+    version: 0.3.0
+    url: https://github.com/forkcloser/testbin/releases/download/v${version}/erofs-windows-amd64.tar.gz
     verify: github-attestation forkcloser/testbin forkcloser/testbin/.github/workflows/release.yaml
     digest:
-      version: 0.2.0
-      source: a0d0943d3e663260c4cc8c350b08f01c1854ec649b1d18739da2c4b727ed5299
-      sha256: 476b81ca55d04d0ccd0b3015c50dc5ad1252fe1e906f09c80be7216f18375e84
+      version: 0.3.0
+      source: 09f96fd65dd39ff9bfe8f3103e58912a57ebb77d7efa944bc2fa0a9d4bd049e8
+      sha256: 75adce4fbbbe7c391a487681f8d96fbff51048c8c10faeda169baaaf69e68ce4
   - name: mkfs-erofs-windows-arm64
     renovate: github-releases forkcloser/testbin
-    version: 0.2.0
-    url: https://github.com/forkcloser/testbin/releases/download/v${version}/erofs-1.9.4-windows-arm64.tar.gz
+    version: 0.3.0
+    url: https://github.com/forkcloser/testbin/releases/download/v${version}/erofs-windows-arm64.tar.gz
     verify: github-attestation forkcloser/testbin forkcloser/testbin/.github/workflows/release.yaml
     digest:
-      version: 0.2.0
-      source: 558a5b3bc77ac176041dfba9049d45b432d75c4453eac298d30166c9eacc9ff0
-      sha256: 0490694f81ba4fa0f631c0a7ea320d669c5694781b10803e04e1f8ca9a4a5df6
+      version: 0.3.0
+      source: 3b372abdad4f60e1376b58ca0b46109462be9411061c3ac96f96428c323205d0
+      sha256: e61ea426de13d3c744404eff6c4a987cbf8e3b8b34f63e0b3888d25a6dc5d1ab

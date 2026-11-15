@@ -44,10 +44,11 @@ mkfs-erofs:
     rm -rf ".build/mkfs-erofs/${name}"
     tar -xzf "${archive}" -C .build/mkfs-erofs
     mv -f ".build/mkfs-erofs/${name}/mkfs.erofs${x}" ".build/mkfs-erofs/bin/mkfs.erofs${x}"
-    # fsck.erofs is in the archive where it builds (not windows): the tests
-    # hold their images to its verdict where it is on PATH.
+    # fsck.erofs is in the archive where it builds, which is everywhere but
+    # windows. An archive without it there fails here: the tests take its
+    # verdict where it is on PATH and say nothing where it is not.
     rm -f .build/mkfs-erofs/bin/fsck.erofs
-    [ ! -e ".build/mkfs-erofs/${name}/fsck.erofs" ] || mv -f ".build/mkfs-erofs/${name}/fsck.erofs" .build/mkfs-erofs/bin/
+    [ "$(go env GOOS)" = windows ] || mv -f ".build/mkfs-erofs/${name}/fsck.erofs" .build/mkfs-erofs/bin/
     echo "mkfs.erofs: $(".build/mkfs-erofs/bin/mkfs.erofs${x}" -V 2>&1 | head -n 1) at .build/mkfs-erofs/bin"
 
 # --- added by limen fix: the recipe the security workflow runs ---
