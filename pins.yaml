@@ -15,6 +15,7 @@ pins:
     verify: github-attestation forkcloser/testbin forkcloser/testbin/.github/workflows/release.yaml
     digest:
       version: 0.2.0
+      source: ba0e7342554ea39665ca65fc21e8532adb85848b8a4a4e558bcd47b0f564ac0e
       sha256: e5c0c9d0e4870f51187f564556e8fcc47ecdc5321ca4460fa086eaf19c03f1f7
   - name: mkfs-erofs-linux-arm64
     renovate: github-releases forkcloser/testbin
@@ -23,6 +24,7 @@ pins:
     verify: github-attestation forkcloser/testbin forkcloser/testbin/.github/workflows/release.yaml
     digest:
       version: 0.2.0
+      source: 44e9165eac81f39fb617d3997a434f5f4d63e9860b372904d91ff882a2b150d5
       sha256: f3aa8f5f3af8ae567705f98e44c2b7914d0bb08f7997330b84c96536725c09bc
   - name: mkfs-erofs-darwin-arm64
     renovate: github-releases forkcloser/testbin
@@ -31,6 +33,7 @@ pins:
     verify: github-attestation forkcloser/testbin forkcloser/testbin/.github/workflows/release.yaml
     digest:
       version: 0.2.0
+      source: 9234086aaa6a98495087cb85e1dd59c8e671aa8434a621df6f394905f51c3aad
       sha256: 2995fb046f0b72e6984629479c4968e0db69e759213dd9d1ae13f928777262ce
   - name: mkfs-erofs-windows-amd64
     renovate: github-releases forkcloser/testbin
@@ -39,6 +42,7 @@ pins:
     verify: github-attestation forkcloser/testbin forkcloser/testbin/.github/workflows/release.yaml
     digest:
       version: 0.2.0
+      source: a0d0943d3e663260c4cc8c350b08f01c1854ec649b1d18739da2c4b727ed5299
       sha256: 476b81ca55d04d0ccd0b3015c50dc5ad1252fe1e906f09c80be7216f18375e84
   - name: mkfs-erofs-windows-arm64
     renovate: github-releases forkcloser/testbin
@@ -47,4 +51,5 @@ pins:
     verify: github-attestation forkcloser/testbin forkcloser/testbin/.github/workflows/release.yaml
     digest:
       version: 0.2.0
+      source: 558a5b3bc77ac176041dfba9049d45b432d75c4453eac298d30166c9eacc9ff0
       sha256: 0490694f81ba4fa0f631c0a7ea320d669c5694781b10803e04e1f8ca9a4a5df6
