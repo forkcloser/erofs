@@ -2501,10 +2501,10 @@ func (fsys *Writer) chunksFromRanges(ranges []DataRange, fileSize int64) ([]buil
 			// Hole: emit NullPhysicalBlock chunks covering the hole span.
 			totalBlocks := (uint64(r.Size) + blockSize - 1) / blockSize
 			for totalBlocks > 0 {
-				count := min(totalBlocks, math.MaxUint16)
+				count := min(totalBlocks, math.MaxUint32)
 				chunks = append(chunks, builder.Chunk{
 					PhysicalBlock: builder.NullPhysicalBlock,
-					Count:         uint16(count),
+					Count:         uint32(count),
 				})
 				totalBlocks -= count
 			}
@@ -2542,10 +2542,10 @@ func (fsys *Writer) chunksFromRanges(ranges []DataRange, fileSize int64) ([]buil
 
 		totalBlocks := (uint64(r.Size) + blockSize - 1) / blockSize
 		for totalBlocks > 0 {
-			count := min(totalBlocks, math.MaxUint16)
+			count := min(totalBlocks, math.MaxUint32)
 			chunks = append(chunks, builder.Chunk{
 				PhysicalBlock: startBlock,
-				Count:         uint16(count),
+				Count:         uint32(count),
 				DeviceID:      deviceID,
 			})
 			startBlock += count
@@ -2646,10 +2646,10 @@ func (f *File) closeDataFile() error {
 	totalBlocks := (uint64(f.written) + uint64(f.fs.resolveBlockSize()) - 1) / uint64(f.fs.resolveBlockSize())
 
 	for totalBlocks > 0 {
-		count := min(totalBlocks, math.MaxUint16)
+		count := min(totalBlocks, math.MaxUint32)
 		f.entry.chunks = append(f.entry.chunks, builder.Chunk{
 			PhysicalBlock: startBlock,
-			Count:         uint16(count),
+			Count:         uint32(count),
 			DeviceID:      1,
 		})
 		startBlock += count

@@ -40,6 +40,6 @@ const NullPhysicalBlock uint64 = ^uint64(0)
 // blocks of zeros with no physical backing. DeviceID is ignored for holes.
 type Chunk struct {
 	PhysicalBlock uint64 // physical block address, or NullPhysicalBlock for a hole
-	Count         uint16 // number of contiguous blocks
+	Count         uint32 // number of contiguous blocks
 	DeviceID      uint16 // 0 = primary, 1+ = extra device; ignored for holes
 }

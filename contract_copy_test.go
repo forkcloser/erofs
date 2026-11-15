@@ -1815,6 +1815,80 @@ func TestContractGenericEmptyDataRangeIsAllHoles(t *testing.T) {
 	}
 }
 
+// TestContractCopyOfACopyKeepsARunPast65535Blocks: a contiguous file of
+// more than 65535 blocks is written with one chunk as large as the file,
+// and an image holding one is a source like any other. Its metadata-only
+// copy names the same bytes, through the reference and the package.
+func TestContractCopyOfACopyKeepsARunPast65535Blocks(t *testing.T) {
+	t.Parallel()
+
+	const (
+		bs     = 512
+		blocks = 70000
+		first  = 8 // the file's first block on the device
+		size   = blocks*bs - 100
+	)
+
+	blob := make([]byte, (first+blocks)*bs)
+	for i := range blob {
+		blob[i] = byte(i ^ i>>9)
+	}
+
+	src := blockSizedSource{
+		dataRangerFS: &dataRangerFS{
+			deviceBlocks: first + blocks,
+			file: &dataRangerFileInfo{
+				name:   "f",
+				size:   size,
+				ranges: []erofs.DataRange{{Offset: first * bs, Size: size}},
+			},
+		},
+		bs: bs,
+	}
+
+	once := &testBuffer{}
+	w := erofs.Create(once, erofs.WithBlockSize(bs), erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if err := errors.Join(w.CopyFrom(src, erofs.MetadataOnly()), w.Close()); err != nil {
+		t.Fatalf("the copy: %v", err)
+	}
+
+	copied := corpus.Image{Name: "copy", Img: once.Bytes(), Blob: blob}
+
+	twice := &testBuffer{}
+	w = erofs.Create(twice, erofs.WithBlockSize(bs), erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if err := errors.Join(w.CopyFrom(openImage(t, copied), erofs.MetadataOnly()), w.Close()); err != nil {
+		t.Fatalf("the copy of the copy: %v", err)
+	}
+
+	want := blob[first*bs : first*bs+size]
+
+	for _, im := range []corpus.Image{
+		copied,
+		{Name: "copy of the copy", Img: twice.Bytes(), Devices: [][]byte{once.Bytes(), blob}},
+	} {
+		ref := parseImage(t, im)
+
+		in, err := ref.Resolve("f", 0)
+		if err != nil {
+			t.Fatalf("%s: %v", im.Name, err)
+		}
+
+		if got, err := ref.Read(in); err != nil || !bytes.Equal(got, want) {
+			t.Errorf("%s: the reference reads %d bytes, %v; want the device's %d", im.Name, len(got), err, len(want))
+		}
+
+		if got, err := fs.ReadFile(openImage(t, im), "f"); err != nil || !bytes.Equal(got, want) {
+			t.Errorf("%s: ReadFile reads %d bytes, %v; want the device's %d", im.Name, len(got), err, len(want))
+		}
+
+		if err := corpus.FsckVerdict(t, im); err != nil {
+			t.Fatalf("%s: %v", im.Name, err)
+		}
+	}
+}
+
 // TestContractMetadataOnlyCopyOfAChunkOnTheSourceImageItself: a source
 // whose chunk names device 0, the source image's own blocks, copied
 // metadata-only into a writer with its own data file: the copy's devices

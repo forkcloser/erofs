@@ -908,13 +908,9 @@ func (*Writer) parseChunks(
 	chunkBits := blkBits + uint8(chunkFmt&disk.LayoutChunkFormatBits)
 	// #nosec G115 -- chunkBits is at least 9, the smallest block, so the count is below 1<<55
 	nchunks := int((fileSize-1)>>chunkBits) + 1
-	blocksPerChunk := 1 << (chunkBits - blkBits)
-
-	// builder.Chunk counts blocks in a uint16, so a chunk spanning more
-	// blocks than that cannot be represented at all.
-	if blocksPerChunk > math.MaxUint16 {
-		return nil, fmt.Errorf("chunk size of %d blocks is not representable: %w", blocksPerChunk, ErrInvalid)
-	}
+	// At most 1<<31 blocks, the format's five chunk bits: within the
+	// uint32 a builder.Chunk counts blocks in.
+	blocksPerChunk := uint32(1) << (chunkBits - blkBits)
 
 	// Align to 8 bytes for index entries.
 	needed := int64(nchunks) * disk.SizeChunkIndex
@@ -948,9 +944,8 @@ func (*Writer) parseChunks(
 			if len(chunks) > 0 {
 				prev := &chunks[len(chunks)-1]
 				if prev.PhysicalBlock == builder.NullPhysicalBlock &&
-					int(prev.Count)+blocksPerChunk <= math.MaxUint16 {
-					// #nosec G115 -- the sum was checked against math.MaxUint16 above
-					prev.Count += uint16(blocksPerChunk)
+					uint64(prev.Count)+uint64(blocksPerChunk) <= math.MaxUint32 {
+					prev.Count += blocksPerChunk
 
 					continue
 				}
@@ -958,7 +953,7 @@ func (*Writer) parseChunks(
 
 			chunks = append(chunks, builder.Chunk{
 				PhysicalBlock: builder.NullPhysicalBlock,
-				Count:         uint16(blocksPerChunk), // #nosec G115 -- checked against math.MaxUint16 on entry
+				Count:         blocksPerChunk,
 			})
 
 			continue
@@ -986,16 +981,15 @@ func (*Writer) parseChunks(
 			if prev.PhysicalBlock != builder.NullPhysicalBlock &&
 				prev.DeviceID == deviceID &&
 				prev.PhysicalBlock+uint64(prev.Count) == physBlock &&
-				int(prev.Count)+blocksPerChunk <= math.MaxUint16 {
-				// #nosec G115 -- the sum was checked against math.MaxUint16 above
-				prev.Count += uint16(blocksPerChunk)
+				uint64(prev.Count)+uint64(blocksPerChunk) <= math.MaxUint32 {
+				prev.Count += blocksPerChunk
 				continue
 			}
 		}
 
 		chunks = append(chunks, builder.Chunk{
 			PhysicalBlock: physBlock,
-			Count:         uint16(blocksPerChunk), // #nosec G115 -- checked against math.MaxUint16 on entry
+			Count:         blocksPerChunk,
 			DeviceID:      deviceID,
 		})
 	}
@@ -1157,15 +1151,15 @@ func xattrName(xe disk.XattrEntry, rawName []byte, longPrefix func(uint8) (strin
 }
 
 // deviceChunks names a run of blocks from start on device as chunk runs, each
-// within a chunk's 16-bit count; from the null block, the runs are holes.
+// within a chunk's 32-bit count; from the null block, the runs are holes.
 func deviceChunks(start, blocks uint64, device uint16) []builder.Chunk {
 	var chunks []builder.Chunk
 
 	for blocks > 0 {
-		count := min(blocks, math.MaxUint16)
+		count := min(blocks, math.MaxUint32)
 		chunks = append(chunks, builder.Chunk{
 			PhysicalBlock: start,
-			Count:         uint16(count), // #nosec G115 -- bounded by math.MaxUint16 just above
+			Count:         uint32(count), // #nosec G115 -- bounded by math.MaxUint32 just above
 			DeviceID:      device,
 		})
 
