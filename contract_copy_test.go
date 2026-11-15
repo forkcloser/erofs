@@ -1889,6 +1889,242 @@ func TestContractCopyOfACopyKeepsARunPast65535Blocks(t *testing.T) {
 	}
 }
 
+// TestContractChunkSizeFollowsTheRuns: a metadata-only file's chunk is as
+// large as the places where its runs of blocks begin and end allow, so its
+// index has an entry a chunk and not an entry a block, and the file still
+// reads what its ranges say, through the reference and the package.
+func TestContractChunkSizeFollowsTheRuns(t *testing.T) {
+	t.Parallel()
+
+	const (
+		bs     = 4096
+		blocks = 64
+	)
+
+	blob := make([]byte, blocks*bs)
+	for i := range blob {
+		blob[i] = byte(i ^ i>>12)
+	}
+
+	data := func(block, n int64) erofs.DataRange { return erofs.DataRange{Offset: block * bs, Size: n * bs} }
+	hole := func(n int64) erofs.DataRange { return erofs.DataRange{Offset: -1, Size: n * bs} }
+
+	for _, tc := range []struct {
+		name   string
+		ranges []erofs.DataRange
+		cut    int64 // bytes the file ends before its last range does
+		bits   uint  // log2 of the chunk size in blocks
+	}{
+		{"one hole", []erofs.DataRange{hole(40)}, 7, 6},
+		{"runs on multiples of eight blocks", []erofs.DataRange{data(16, 8), hole(16), data(40, 8)}, 5, 3},
+		{"a run that ends on an odd block", []erofs.DataRange{data(2, 3), hole(5), data(20, 8)}, 0, 0},
+		{"two runs that follow each other on the device", []erofs.DataRange{data(4, 3), data(7, 5)}, 1, 3},
+		{"two runs that do not", []erofs.DataRange{data(4, 4), data(9, 4)}, 0, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ranges := slices.Clone(tc.ranges)
+			ranges[len(ranges)-1].Size -= tc.cut
+
+			var want []byte
+
+			for _, r := range ranges {
+				if r.Offset < 0 {
+					want = append(want, make([]byte, r.Size)...)
+				} else {
+					want = append(want, blob[r.Offset:r.Offset+r.Size]...)
+				}
+			}
+
+			src := &dataRangerFS{
+				deviceBlocks: blocks,
+				file:         &dataRangerFileInfo{name: "f", size: int64(len(want)), ranges: ranges},
+			}
+			out := &testBuffer{}
+			w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+			if err := errors.Join(w.CopyFrom(src, erofs.MetadataOnly()), w.Close()); err != nil {
+				t.Fatal(err)
+			}
+
+			im := corpus.Image{Name: tc.name, Img: out.Bytes(), Blob: blob}
+			ref := parseImage(t, im)
+
+			in, err := ref.Resolve("f", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if got := in.ChunkBits - uint(ref.Super.BlockBits); got != tc.bits {
+				t.Errorf("a chunk of 1<<%d blocks, want 1<<%d", got, tc.bits)
+			}
+
+			if got, err := ref.Read(in); err != nil || !bytes.Equal(got, want) {
+				t.Errorf("the reference reads %d bytes, %v; want the ranges' %d", len(got), err, len(want))
+			}
+
+			if got, err := fs.ReadFile(openImage(t, im), "f"); err != nil || !bytes.Equal(got, want) {
+				t.Errorf("ReadFile reads %d bytes, %v; want the ranges' %d", len(got), err, len(want))
+			}
+
+			if err := corpus.FsckVerdict(t, im); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// TestContractChunkSizeKeepsRunsOnTheirDevices: two runs whose block
+// numbers follow each other on two different devices are two runs. A chunk
+// holding both would read the second from the first's device.
+func TestContractChunkSizeKeepsRunsOnTheirDevices(t *testing.T) {
+	t.Parallel()
+
+	const (
+		bs     = 4096
+		blocks = 16
+	)
+
+	pattern := func(seed int) []byte {
+		b := make([]byte, blocks*bs)
+		for i := range b {
+			b[i] = byte(i ^ i>>12 ^ seed)
+		}
+
+		return b
+	}
+	one, two := pattern(0x11), pattern(0xa5)
+
+	source := func(name string, ranges ...erofs.DataRange) *dataRangerFS {
+		var size int64
+		for _, r := range ranges {
+			size += r.Size
+		}
+
+		return &dataRangerFS{
+			deviceBlocks: blocks,
+			file:         &dataRangerFileInfo{name: name, size: size, ranges: ranges},
+		}
+	}
+
+	// f's two blocks are block 5 and block 9 of the first device; g only
+	// brings the second device in.
+	first := &testBuffer{}
+	w := erofs.Create(first, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if err := errors.Join(
+		w.CopyFrom(source("f", erofs.DataRange{Offset: 5 * bs, Size: bs}, erofs.DataRange{Offset: 9 * bs, Size: bs}),
+			erofs.MetadataOnly()),
+		w.CopyFrom(source("g", erofs.DataRange{Offset: 0, Size: bs}), erofs.MetadataOnly()),
+		w.Close(),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// f's second block becomes block 6 of the second device: the block
+	// number after its first block's, on another device.
+	img := first.Bytes()
+	entry := []byte{0, 0, 1, 0, 9, 0, 0, 0}
+
+	if bytes.Count(img, entry) != 1 {
+		t.Fatalf("the index entry for block 9 of device 1 appears %d times, want once", bytes.Count(img, entry))
+	}
+
+	img = bytes.Replace(img, entry, []byte{0, 0, 2, 0, 6, 0, 0, 0}, 1)
+	edited := corpus.Image{Name: "edited", Img: img, Devices: [][]byte{one, two}}
+
+	out := &testBuffer{}
+	w = erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if err := errors.Join(w.CopyFrom(openImage(t, edited), erofs.MetadataOnly()), w.Close()); err != nil {
+		t.Fatal(err)
+	}
+
+	want := slices.Concat(one[5*bs:6*bs], two[6*bs:7*bs])
+
+	for _, im := range []corpus.Image{
+		edited,
+		{Name: "copy", Img: out.Bytes(), Devices: [][]byte{img, one, two}},
+	} {
+		ref := parseImage(t, im)
+
+		in, err := ref.Resolve("f", 0)
+		if err != nil {
+			t.Fatalf("%s: %v", im.Name, err)
+		}
+
+		if got, err := ref.Read(in); err != nil || !bytes.Equal(got, want) {
+			t.Errorf("%s: the reference does not read a block of each device (%d bytes, %v)", im.Name, len(got), err)
+		}
+
+		if got, err := fs.ReadFile(openImage(t, im), "f"); err != nil || !bytes.Equal(got, want) {
+			t.Errorf("%s: ReadFile does not read a block of each device (%d bytes, %v)", im.Name, len(got), err)
+		}
+
+		if err := corpus.FsckVerdict(t, im); err != nil {
+			t.Fatalf("%s: %v", im.Name, err)
+		}
+	}
+}
+
+// TestContractChunksShorterThanTheFileEndInAHole: a file whose chunks stop
+// before it does reads zeros from there on, whatever follows its last block
+// on the device. The hole begins where the data ends, on a chunk boundary.
+func TestContractChunksShorterThanTheFileEndInAHole(t *testing.T) {
+	t.Parallel()
+
+	const bs = 4096
+
+	device := make([]byte, 16*bs)
+	for i := range device {
+		device[i] = byte(i ^ i>>12 ^ 0x5a)
+	}
+
+	df, err := os.Create(filepath.Join(t.TempDir(), "data.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, werr := df.Write(device); werr != nil {
+		t.Fatal(werr)
+	}
+
+	out := &testBuffer{}
+	w := erofs.Create(out, erofs.WithDataFile(df), erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	// Blocks 4 to 6 of the data file, then five blocks nothing maps.
+	src := chunkMapSourceFS{
+		name:   "f",
+		size:   8 * bs,
+		chunks: []builder.Chunk{{PhysicalBlock: 4, Count: 3, DeviceID: 1}},
+	}
+	if cerr := errors.Join(w.CopyFrom(src, erofs.MetadataOnly()), w.Close(), df.Close()); cerr != nil {
+		t.Fatal(cerr)
+	}
+
+	im := corpus.Image{Name: "short-chunks", Img: out.Bytes(), Blob: device}
+	want := slices.Concat(device[4*bs:7*bs], make([]byte, 5*bs))
+	ref := parseImage(t, im)
+
+	in, err := ref.Resolve("f", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, rerr := ref.Read(in); rerr != nil || !bytes.Equal(got, want) {
+		t.Errorf("the reference does not read three blocks and a hole (%d bytes, %v)", len(got), rerr)
+	}
+
+	if got, rerr := fs.ReadFile(openImage(t, im), "f"); rerr != nil || !bytes.Equal(got, want) {
+		t.Errorf("ReadFile does not read three blocks and a hole (%d bytes, %v)", len(got), rerr)
+	}
+
+	if verr := corpus.FsckVerdict(t, im); verr != nil {
+		t.Fatal(verr)
+	}
+}
+
 // TestContractMetadataOnlyCopyOfAChunkOnTheSourceImageItself: a source
 // whose chunk names device 0, the source image's own blocks, copied
 // metadata-only into a writer with its own data file: the copy's devices
@@ -1980,21 +2216,31 @@ func TestContractMetadataOnlyCopyOfAChunkOnTheSourceImageItself(t *testing.T) {
 	}
 }
 
-// chunkMapSourceFS is a source of one 4096-byte regular file whose chunk map
-// is supplied verbatim, for a mapping the public API would not build.
+// chunkMapSourceFS is a source of one regular file, of 4096 bytes unless
+// size says otherwise, whose chunk map is supplied verbatim, for a mapping
+// the public API would not build.
 type chunkMapSourceFS struct {
 	name   string
+	size   int64
 	chunks []builder.Chunk
 }
 
 type chunkMapSourceInfo struct {
 	name   string
 	dir    bool
+	size   int64
 	chunks []builder.Chunk
 }
 
 func (i chunkMapSourceInfo) Name() string { return i.name }
-func (chunkMapSourceInfo) Size() int64    { return 4096 }
+
+func (i chunkMapSourceInfo) Size() int64 {
+	if i.size == 0 {
+		return 4096
+	}
+
+	return i.size
+}
 
 func (i chunkMapSourceInfo) Mode() fs.FileMode {
 	if i.dir {
@@ -2032,7 +2278,9 @@ func (chunkMapSourceDir) Stat() (fs.FileInfo, error) {
 }
 
 func (d chunkMapSourceDir) ReadDir(int) ([]fs.DirEntry, error) {
-	return []fs.DirEntry{chunkMapSourceDirent{chunkMapSourceInfo{name: d.fsys.name, chunks: d.fsys.chunks}}}, nil
+	return []fs.DirEntry{chunkMapSourceDirent{chunkMapSourceInfo{
+		name: d.fsys.name, size: d.fsys.size, chunks: d.fsys.chunks,
+	}}}, nil
 }
 
 func (fsys chunkMapSourceFS) Open(name string) (fs.File, error) {

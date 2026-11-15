@@ -602,11 +602,13 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				// being the tail.
 				// #nosec G115 -- size is at most math.MaxInt64, checked above
 				whole := uint64((int64(size) - tail + int64(blockSize) - 1) >> blkBits)
-				// The index is an entry a block, and the writer refuses more
-				// of them at Close. Refused here, before the chunk list below
-				// is built: it grows with an i_size that goes to 1<<63.
+				// A flat file is copied in as many blocks as the writer
+				// takes index entries: what its index costs when no chunk
+				// size above a block fits its runs. And a file at the null
+				// address is as large as its i_size says, to 1<<63, with
+				// nothing in the image to hold that to.
 				if whole > maxChunkIndexEntries {
-					return fmt.Errorf("nid %d: chunk index for a %d byte file exceeds the %d entry limit: %w",
+					return fmt.Errorf("nid %d: a flat file of %d bytes is past the %d blocks a copy takes: %w",
 						cur.nid, size, int64(maxChunkIndexEntries), ErrInvalid)
 				}
 

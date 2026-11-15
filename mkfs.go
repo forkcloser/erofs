@@ -976,14 +976,13 @@ func (fsys *Writer) Close() error {
 		buildTimeNs: fsys.buildTimeNs,
 		devices:     fsys.devices,
 		blockSize:   fsys.blockSize,
-		// chunkBits 0 makes the chunk size equal the block size, which is the
-		// only granularity at which an arbitrary extent list can be mapped
-		// exactly: chunk indexes carry one mapping per chunk, while chunks
-		// and DataRange describe extents per block. A larger chunk size
-		// silently swallows any extent or hole boundary that falls inside a
-		// chunk. Contiguous files still get a larger chunk size per entry via
-		// minChunkBits, where a single extent covers the whole file and there
-		// are no interior boundaries to lose.
+		// chunkBits 0 makes the chunk size equal the block size, the one
+		// granularity at which any extent list is mapped exactly: a chunk
+		// index carries one mapping per chunk, while chunks and DataRange
+		// describe extents per block, and a larger chunk swallows an extent
+		// or hole boundary that falls inside it. It is the floor: planLayout
+		// gives each file the largest chunk its own boundaries allow
+		// (runChunkBits).
 		chunkBits:    0,
 		noInlineData: fsys.noInlineData,
 		zeroBuf:      make([]byte, fsys.blockSize),

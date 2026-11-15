@@ -333,31 +333,29 @@ func TestUntrustedDirectorySizeIsBounded(t *testing.T) {
 }
 
 // TestUntrustedHoleSizeIsBounded covers a flat-plain file at the null
-// address, a hole, whose i_size sized the chunk list the metadata-only copy
-// built for it: an entry for every 65535 blocks, built before the writer's
-// limit on a file's chunk index refused the copy at Close. A hole of 2 GiB
-// is copied, which also holds the directory's 1 GiB bound to directories;
-// one of 1 PiB is refused by CopyFrom, with nothing built. The limit is the
-// writer's, 1<<27 blocks: a hole of exactly that passes CopyFrom, and one a
-// byte or a block longer does not.
+// address, a hole, whose i_size is all that sizes it: nothing in the image
+// backs the bytes it declares. A hole of 2 GiB is copied, which also holds
+// the directory's 1 GiB bound to directories; one of 1 PiB is refused by
+// CopyFrom, with nothing built. The limit is 1<<27 blocks: a hole of
+// exactly that is copied, and one a byte or a block longer is not. A hole
+// that is copied is one chunk, an index entry whatever its size, so the
+// copy is no larger than its source.
 //
 //nolint:paralleltest // measures the process's TotalAlloc against a budget; a parallel test's allocations would count against it
 func TestUntrustedHoleSizeIsBounded(t *testing.T) {
 	const limit = maxChunkIndexEntries
 
-	// Sizes at the limit are in blocks of the image's own size; closed says
-	// the copy is also written out, which at the limit is 1 GiB of index.
+	// Sizes at the limit are in blocks of the image's own size.
 	for _, tc := range []struct {
-		name   string
-		size   func(blockSize uint64) uint64
-		want   error
-		closed bool
+		name string
+		size func(blockSize uint64) uint64
+		want error
 	}{
-		{"2 GiB", func(uint64) uint64 { return 2 << 30 }, nil, true},
-		{"1 PiB", func(uint64) uint64 { return 1 << 50 }, ErrInvalid, false},
-		{"the limit", func(bs uint64) uint64 { return limit * bs }, nil, false},
-		{"a byte past the limit", func(bs uint64) uint64 { return limit*bs + 1 }, ErrInvalid, false},
-		{"a block past the limit", func(bs uint64) uint64 { return (limit + 1) * bs }, ErrInvalid, false},
+		{"2 GiB", func(uint64) uint64 { return 2 << 30 }, nil},
+		{"1 PiB", func(uint64) uint64 { return 1 << 50 }, ErrInvalid},
+		{"the limit", func(bs uint64) uint64 { return limit * bs }, nil},
+		{"a byte past the limit", func(bs uint64) uint64 { return limit*bs + 1 }, ErrInvalid},
+		{"a block past the limit", func(bs uint64) uint64 { return (limit + 1) * bs }, ErrInvalid},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			buf, nid := buildTamperableImage(t)
@@ -386,26 +384,31 @@ func TestUntrustedHoleSizeIsBounded(t *testing.T) {
 			var before, after runtime.MemStats
 			runtime.ReadMemStats(&before)
 
-			dst := Create(&seekBuf{})
+			out := &seekBuf{}
+			dst := Create(out)
+
 			err = dst.CopyFrom(img, MetadataOnly())
-
-			runtime.ReadMemStats(&after)
-			grew := after.TotalAlloc - before.TotalAlloc
-
 			if !errors.Is(err, tc.want) {
 				t.Errorf("CopyFrom: %v, want %v", err, tc.want)
 			}
 
-			t.Logf("CopyFrom: %v (allocated %d bytes)", err, grew)
+			if err == nil {
+				if cerr := dst.Close(); cerr != nil {
+					t.Errorf("Close: %v", cerr)
+				}
+			}
+
+			runtime.ReadMemStats(&after)
+			grew := after.TotalAlloc - before.TotalAlloc
+
+			t.Logf("CopyFrom: %v (allocated %d bytes, wrote %d)", err, grew, len(out.buf))
 
 			if grew > 64<<20 {
 				t.Errorf("allocated %d bytes copying a hole of %d bytes; want under 64 MiB", grew, size)
 			}
 
-			if tc.closed {
-				if err := dst.Close(); err != nil {
-					t.Errorf("Close: %v", err)
-				}
+			if len(out.buf) > len(buf) {
+				t.Errorf("the copy of a %d byte image holding a hole of %d bytes is %d bytes", len(buf), size, len(out.buf))
 			}
 		})
 	}
