@@ -15,7 +15,7 @@ export TMPDIR := env_var_or_default('TMPDIR', env_var_or_default('TEMP', '/tmp')
 # The FIRST recipe defined here becomes `just`'s default.
 lint: do::lint::go::default do::lint::go::deadcode do::lint::default
 fix: do::fix::go::default do::fix::default
-test: mkfs-erofs do::test::go::unit do::test::go::race
+test: mkfs-erofs do::test::go::unit do::test::go::race do::test::go::cover
 bench: do::perf::go::bench
 
 # The mkfs.erofs the image-backed tests run, and the fsck.erofs that reads
