@@ -727,6 +727,11 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			fsys.root.mtimeNs = fe.mtimeNs
 			fsys.root.xattrs = fe.xattrs
 		} else {
+			if typ == disk.StatTypeReg && size > 0 {
+				name := cur.path[1:]
+				fe.reopen = func() (fs.File, error) { return img.Open(name) }
+			}
+
 			fe = fsys.placeEntry(fe)
 			if typ != disk.StatTypeDir && nlink > 1 {
 				fsys.copyLinks[hardlinkKey{0, cur.nid}] = fe

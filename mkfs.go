@@ -885,7 +885,17 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 
 		// For regular files, get a data reader.
 		if info.Mode().IsRegular() && info.Size() > 0 && (be == nil || be.Data == nil) {
-			return fsys.addRegular(src, fpath, p, info, be)
+			if aerr := fsys.addRegular(src, fpath, p, info, be); aerr != nil {
+				return aerr
+			}
+			// Where the Writer holds none of the file's data. A further
+			// name of an inode already copied holds none either way, and
+			// reads back through the first.
+			if e := fsys.byPath[cleanPath(p)]; e != nil && (e.metadataOnly || e.directData != nil) {
+				e.reopen = func() (fs.File, error) { return src.Open(fpath) }
+			}
+
+			return nil
 		}
 
 		// For symlinks without LinkTarget, read via ReadLink interface.
@@ -1022,6 +1032,14 @@ func (fsys *Writer) Stat(name string) (fs.FileInfo, error) {
 // Open opens the named file for reading. For regular files, the file must
 // have been closed (data finalized) before it can be opened for reading.
 // For directories, the returned file implements fs.ReadDirFile.
+//
+// A file CopyFrom added whose data the Writer does not hold, because it
+// stays with the source until Close or, metadata-only, for good, is opened
+// again in that source, which has to be usable still; the file's info is
+// the Writer's, and it reads as many bytes as were copied: no more if the
+// source's file has grown since, and io.ErrUnexpectedEOF if it has shrunk.
+// Where the source handed the data over itself, with nothing to open again,
+// Open fails with ErrNotImplemented.
 func (fsys *Writer) Open(name string) (fs.File, error) {
 	name = cleanPath(name)
 
@@ -1044,23 +1062,34 @@ func (fsys *Writer) Open(name string) (fs.File, error) {
 			return nil, &fs.PathError{Op: "open", Path: name, Err: errFileOpen}
 		}
 
-		var sr *io.SectionReader
+		// #nosec G115 -- e.size fits int64: File counts it in an int64, and add and copyFromImage bound it
+		size := int64(e.size)
 
 		switch {
+		case size == 0:
 		case e.holedInDataFile:
-			// #nosec G115 -- e.size fits int64: add bounds it
-			sr = io.NewSectionReader(
-				chunkedData{fsys.dataFile, e.chunks, int64(fsys.resolveBlockSize())}, 0, int64(e.size),
-			)
+			return &readFile{entry: e, reader: io.NewSectionReader(
+				chunkedData{fsys.dataFile, e.chunks, int64(fsys.resolveBlockSize())}, 0, size,
+			)}, nil
+		case e.reopen != nil:
+			src, err := e.reopen()
+			if err != nil {
+				return nil, fmt.Errorf("mkfs: open %s where it was copied from: %w", name, err)
+			}
+
+			return &readFile{entry: e, reader: &copiedBytes{src: src, left: size}, source: src}, nil
+		case e.metadataOnly || e.directData != nil:
+			// Neither the spool nor the data file holds it: reading them
+			// at this entry's offset, zero, reads another file's bytes.
+			return nil, fmt.Errorf("mkfs: open %s: its data is with its source, which gave no way to open it again: %w",
+				name, ErrNotImplemented)
 		case fsys.dataFile != nil:
-			// #nosec G115 -- e.size fits int64: File counts it in an int64, and add and copyFromImage bound it
-			sr = io.NewSectionReader(fsys.dataFile, e.dataStartOff, int64(e.size))
-		case fsys.spool != nil && e.size > 0:
-			// #nosec G115 -- e.size fits int64: File counts it in an int64, and add and copyFromImage bound it
-			sr = io.NewSectionReader(fsys.spool, e.dataStartOff, int64(e.size))
+			return &readFile{entry: e, reader: io.NewSectionReader(fsys.dataFile, e.dataStartOff, size)}, nil
+		case fsys.spool != nil:
+			return &readFile{entry: e, reader: io.NewSectionReader(fsys.spool, e.dataStartOff, size)}, nil
 		}
 
-		return &readFile{entry: e, reader: sr}, nil
+		return &readFile{entry: e}, nil
 
 	default:
 		// Symlinks, devices, etc.: stat-only, no readable data.
@@ -1210,6 +1239,10 @@ type fsEntry struct {
 	dataStartOff int64     // byte offset where file data begins (spool or data file)
 	fileClosed   bool      // true after File.Close() is called
 	directData   io.Reader // bypasses spool; set by add() for source-provided data
+	// reopen opens the file again in the source CopyFrom read it from, for
+	// Open: the Writer holds none of its data, which is the source's until
+	// Close (directData) or for good (metadataOnly).
+	reopen func() (fs.File, error)
 
 	removed      bool // true if removed by a whiteout in a merge layer
 	metadataOnly bool // from a metadata-only CopyFrom; use chunk-based layout
@@ -1463,7 +1496,8 @@ func (e *fsEntry) linkCount() uint32 {
 // readFile implements fs.File for reading back a finalized file's data.
 type readFile struct {
 	entry  *fsEntry
-	reader *io.SectionReader // nil for empty files or non-regular types
+	reader io.Reader // nil for empty files or non-regular types
+	source io.Closer // the file a copied entry was opened again as, or nil
 	closed bool
 }
 
@@ -1490,7 +1524,45 @@ func (f *readFile) Close() error {
 
 	f.closed = true
 
+	if f.source != nil {
+		if err := f.source.Close(); err != nil {
+			return fmt.Errorf("mkfs: close %s where it was copied from: %w", f.entry.path, err)
+		}
+	}
+
 	return nil
+}
+
+// copiedBytes reads a copied file's bytes from its source, opened again:
+// as many as were copied, and an error where the source has fewer now.
+type copiedBytes struct {
+	src  io.Reader
+	left int64
+}
+
+func (c *copiedBytes) Read(p []byte) (int, error) {
+	if c.left == 0 {
+		return 0, io.EOF
+	}
+
+	if int64(len(p)) > c.left {
+		p = p[:c.left]
+	}
+
+	n, err := c.src.Read(p)
+	c.left -= int64(n)
+
+	switch {
+	case err == nil:
+		return n, nil
+	case !errors.Is(err, io.EOF):
+		return n, fmt.Errorf("mkfs: read where it was copied from: %w", err)
+	case c.left > 0:
+		return n, fmt.Errorf("mkfs: the source's file ends %d bytes before the copied one: %w",
+			c.left, io.ErrUnexpectedEOF)
+	default:
+		return n, io.EOF
+	}
 }
 
 // readDir implements fs.ReadDirFile for a directory in Writer.
