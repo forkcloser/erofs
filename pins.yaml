@@ -11,7 +11,7 @@
 pins:
   - name: mkfs-erofs-linux-amd64
     renovate: github-releases forkcloser/testbin
-    version: 0.3.0
+    version: 0.4.0
     url: https://github.com/forkcloser/testbin/releases/download/v${version}/erofs-linux-amd64.tar.gz
     verify: github-attestation forkcloser/testbin forkcloser/testbin/.github/workflows/release.yaml
     digest:
@@ -20,7 +20,7 @@ pins:
       sha256: 9fcd8da75b4e2fb9113fd37ff1dcd9dca51883a2d352afaa8ee0a0d1e937bd2c
   - name: mkfs-erofs-linux-arm64
     renovate: github-releases forkcloser/testbin
-    version: 0.3.0
+    version: 0.4.0
     url: https://github.com/forkcloser/testbin/releases/download/v${version}/erofs-linux-arm64.tar.gz
     verify: github-attestation forkcloser/testbin forkcloser/testbin/.github/workflows/release.yaml
     digest:
@@ -29,7 +29,7 @@ pins:
       sha256: 43b91b990047b332c8d01e3c10276422c743c4fa918fb87d30414a8c9984bb25
   - name: mkfs-erofs-darwin-arm64
     renovate: github-releases forkcloser/testbin
-    version: 0.3.0
+    version: 0.4.0
     url: https://github.com/forkcloser/testbin/releases/download/v${version}/erofs-darwin-arm64.tar.gz
     verify: github-attestation forkcloser/testbin forkcloser/testbin/.github/workflows/release.yaml
     digest:
@@ -38,7 +38,7 @@ pins:
       sha256: 4de8e611a96d3ec18f720a29e1fa008ea1b2a45daf18d864bf45373696b5baa9
   - name: mkfs-erofs-windows-amd64
     renovate: github-releases forkcloser/testbin
-    version: 0.3.0
+    version: 0.4.0
     url: https://github.com/forkcloser/testbin/releases/download/v${version}/erofs-windows-amd64.tar.gz
     verify: github-attestation forkcloser/testbin forkcloser/testbin/.github/workflows/release.yaml
     digest:
@@ -47,7 +47,7 @@ pins:
       sha256: 75adce4fbbbe7c391a487681f8d96fbff51048c8c10faeda169baaaf69e68ce4
   - name: mkfs-erofs-windows-arm64
     renovate: github-releases forkcloser/testbin
-    version: 0.3.0
+    version: 0.4.0
     url: https://github.com/forkcloser/testbin/releases/download/v${version}/erofs-windows-arm64.tar.gz
     verify: github-attestation forkcloser/testbin forkcloser/testbin/.github/workflows/release.yaml
     digest:
