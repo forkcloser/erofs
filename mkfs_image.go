@@ -605,8 +605,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				// A flat file is copied in as many blocks as the writer
 				// takes index entries: what its index costs when no chunk
 				// size above a block fits its runs. And a file at the null
-				// address is as large as its i_size says, to 1<<63, with
-				// nothing in the image to hold that to.
+				// address is as large as its i_size says (checkFlatHole).
 				if whole > maxChunkIndexEntries {
 					return fmt.Errorf("nid %d: a flat file of %d bytes is past the %d blocks a copy takes: %w",
 						cur.nid, size, int64(maxChunkIndexEntries), ErrInvalid)
@@ -1150,6 +1149,122 @@ func xattrName(xe disk.XattrEntry, rawName []byte, longPrefix func(uint8) (strin
 	}
 
 	return prefix + string(rawName), nil
+}
+
+// checkFlatHole holds a flat file at the null address to the blocks a copy
+// takes of one. It is a hole as large as its i_size says, to 1<<63, with
+// nothing in the image to back that: a hole a chunk index spells out has
+// its index.
+func checkFlatHole(nid uint64, size, blockSize int64) error {
+	// #nosec G115 -- a file's size and a block size, neither negative
+	if blocks := (uint64(size) + uint64(blockSize) - 1) / uint64(blockSize); blocks > maxChunkIndexEntries {
+		return fmt.Errorf("nid %d: a flat file of %d bytes is past the %d blocks a copy takes: %w",
+			nid, size, int64(maxChunkIndexEntries), ErrInvalid)
+	}
+
+	return nil
+}
+
+// holedData lays out, in blocks of blockSize bytes, a file of the image that
+// has holes: the chunks, a hole wherever whole blocks lie inside one of the
+// file's, the rest counted from zero as blocks of data; and that data, the
+// file read without those holes. Nil chunks: the file has no such hole.
+func holedData(f *file, ino *inode, blockSize int64) ([]builder.Chunk, io.Reader, error) {
+	ranges, err := f.buildDataRanges(ino, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// #nosec G115 -- readInfo bounded the size, which is not negative
+	blocks := (uint64(ino.size) + uint64(blockSize) - 1) / uint64(blockSize)
+	if ino.inodeLayout == disk.LayoutFlatPlain && ino.nullAddress() {
+		if err := checkFlatHole(ino.nid, ino.size, blockSize); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	var (
+		chunks []builder.Chunk
+		data   = &rangesReader{f: f}
+		next   uint64 // the first block no chunk covers yet
+		stored uint64 // blocks of data so far
+		pos    int64  // the logical byte the range starts at
+	)
+
+	// The blocks from next to end are data: a chunk, and a range to read.
+	keep := func(end uint64) {
+		if end == next {
+			return
+		}
+
+		chunks = append(chunks, deviceChunks(stored, end-next, 0)...)
+		stored += end - next
+		// #nosec G115 -- block numbers of a file whose size fits an int64
+		data.ranges = append(data.ranges, [2]int64{int64(next) * blockSize, min(int64(end)*blockSize, ino.size)})
+		next = end
+	}
+
+	for _, r := range ranges {
+		end := pos + r.Size
+		if first, last := wholeBlocks(pos, end, ino.size, blockSize); r.Offset == holeOffset && last > first {
+			keep(first)
+
+			chunks = append(chunks, deviceChunks(builder.NullPhysicalBlock, last-first, 0)...)
+			next = last
+		}
+
+		pos = end
+	}
+
+	if chunks == nil {
+		return nil, nil, nil
+	}
+
+	keep(blocks)
+
+	return chunks, data, nil
+}
+
+// wholeBlocks is the blocks that lie whole between two bytes of a file of
+// size bytes, from the first to before the last; the file's last block is
+// whole to its end.
+func wholeBlocks(from, to, size, blockSize int64) (first, last uint64) {
+	// #nosec G115 -- byte offsets within the file and a block size, none negative
+	first, last = uint64(from+blockSize-1)/uint64(blockSize), uint64(to)/uint64(blockSize)
+	if to == size {
+		// #nosec G115 -- as above
+		last = (uint64(size) + uint64(blockSize) - 1) / uint64(blockSize)
+	}
+
+	return first, last
+}
+
+// rangesReader reads ranges of a file of an image, each from its first byte
+// to its last, one after the other.
+type rangesReader struct {
+	f      *file
+	ranges [][2]int64 // the logical bytes [from, to) still to read
+	left   int64      // of the range being read
+}
+
+func (r *rangesReader) Read(p []byte) (int, error) {
+	for r.left == 0 {
+		if len(r.ranges) == 0 {
+			return 0, io.EOF
+		}
+
+		r.f.offset, r.left = r.ranges[0][0], r.ranges[0][1]-r.ranges[0][0]
+		r.ranges = r.ranges[1:]
+	}
+
+	if int64(len(p)) > r.left {
+		p = p[:r.left]
+	}
+
+	n, err := r.f.Read(p)
+	r.left -= int64(n)
+
+	return n, err
 }
 
 // deviceChunks names a run of blocks from start on device as chunk runs, each

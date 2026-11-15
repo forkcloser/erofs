@@ -396,6 +396,9 @@ func (w *erofsWriter) assignFlatPlainAddrs(addr uint32) uint32 {
 	for _, e := range w.entries {
 		if ds := w.flatPlainDataSize(e); ds > 0 {
 			e.dataBlkAddr = addr
+			if e.chunksOfData {
+				placeChunks(e.chunks, uint64(addr), 0)
+			}
 			// #nosec G115 -- checkLimits bounded the image's block count, and so every address, to 32 bits
 			addr += uint32((ds + w.blockSize - 1) / w.blockSize)
 		}
@@ -1050,8 +1053,14 @@ func (w *erofsWriter) writeTailBlock(out io.Writer, e *erofsEntry) error {
 	return nil
 }
 
-// flatPlainDataSize returns the data size for a flat-plain entry, or 0.
+// flatPlainDataSize returns the size of the data e keeps in blocks of this
+// image: a flat-plain entry's, or what a file with holes has beside them;
+// 0 for any other.
 func (w *erofsWriter) flatPlainDataSize(e *erofsEntry) int {
+	if e.chunksOfData {
+		return e.dataBytes
+	}
+
 	if e.layout != disk.LayoutFlatPlain {
 		return 0
 	}

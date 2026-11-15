@@ -339,7 +339,17 @@ func TestUntrustedDirectorySizeIsBounded(t *testing.T) {
 // CopyFrom, with nothing built. The limit is 1<<27 blocks: a hole of
 // exactly that is copied, and one a byte or a block longer is not. A hole
 // that is copied is one chunk, an index entry whatever its size, so the
-// copy is no larger than its source.
+// copy is no larger than its source. The copy with its data is held to the
+// same: the hole is a hole there too, and none of it is written out. So is
+// the copy of the image behind a wrapper, which the walk reads and not
+// copyFromImage: the bound and the hole are the file's, not the source's.
+// A wrapper may hide the file's info and still open the image's file, where
+// the hole is kept and bounded all the same; or hide the file and report
+// the image's info, where the hole is zeros to the copy and only the bound
+// holds, so that source is given the sizes that are refused and no other.
+// Metadata-only no file is opened: behind a wrapper of its info the file is
+// any source's file of that size with no range, copied as one hole whatever
+// the size, which costs an entry for every 1<<31 blocks.
 //
 //nolint:paralleltest // measures the process's TotalAlloc against a budget; a parallel test's allocations would count against it
 func TestUntrustedHoleSizeIsBounded(t *testing.T) {
@@ -357,60 +367,144 @@ func TestUntrustedHoleSizeIsBounded(t *testing.T) {
 		{"a byte past the limit", func(bs uint64) uint64 { return limit*bs + 1 }, ErrInvalid},
 		{"a block past the limit", func(bs uint64) uint64 { return (limit + 1) * bs }, ErrInvalid},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			buf, nid := buildTamperableImage(t)
-
-			img0, err := Open(bytes.NewReader(buf))
-			if err != nil {
-				t.Fatal(err)
+		for _, mode := range []struct {
+			name string
+			opts []CopyOpt
+			wrap func(fs.FS) fs.FS
+		}{
+			{"metadata-only", []CopyOpt{MetadataOnly()}, nil},
+			{"with its data", nil, nil},
+			{"metadata-only, wrapped", []CopyOpt{MetadataOnly()}, func(f fs.FS) fs.FS { return struct{ fs.FS }{f} }},
+			{"with its data, wrapped", nil, func(f fs.FS) fs.FS { return struct{ fs.FS }{f} }},
+			{"metadata-only, its info wrapped", []CopyOpt{MetadataOnly()}, func(f fs.FS) fs.FS { return infoWrapped{f} }},
+			{"with its data, its info wrapped", nil, func(f fs.FS) fs.FS { return infoWrapped{f} }},
+			{"with its data, its files wrapped", nil, func(f fs.FS) fs.FS { return filesWrapped{f} }},
+		} {
+			// Behind a wrapper of its files a hole that is copied is
+			// written out, all of it.
+			if strings.HasSuffix(mode.name, "files wrapped") && tc.want == nil {
+				continue
 			}
 
-			size := tc.size(uint64(img0.(*image).blockSize()))
-
-			// An extended inode's start block is 48 bits, i_nb its high 16:
-			// all ones is the null address.
-			inodeOff := img0.(*image).metaStartPos() + int64(nid)*disk.SizeInodeCompact
-			binary.LittleEndian.PutUint16(buf[inodeOff:], disk.InodeFormatExtended|disk.LayoutFlatPlain<<1)
-			binary.LittleEndian.PutUint16(buf[inodeOff+6:], 0xffff)
-			binary.LittleEndian.PutUint64(buf[inodeOff+8:], size)
-			binary.LittleEndian.PutUint32(buf[inodeOff+16:], 0xffffffff)
-			buf[disk.SuperBlockOffset+8] &^= disk.FeatureCompatSBChksum
-
-			img, err := Open(bytes.NewReader(buf))
-			if err != nil {
-				t.Fatalf("tampered image failed to open: %v", err)
+			want := tc.want
+			if mode.name == "metadata-only, its info wrapped" {
+				want = nil
 			}
 
-			var before, after runtime.MemStats
-			runtime.ReadMemStats(&before)
+			t.Run(tc.name+", "+mode.name, func(t *testing.T) {
+				holeSizeIsBounded(t, tc.size, want, mode.opts, mode.wrap)
+			})
+		}
+	}
+}
 
-			out := &seekBuf{}
-			dst := Create(out)
+// infoWrapped is a source whose directories list the image's entries with
+// their info behind a type of its own: the walk sees no range of theirs,
+// and still opens the image's files.
+type infoWrapped struct{ fs.FS }
 
-			err = dst.CopyFrom(img, MetadataOnly())
-			if !errors.Is(err, tc.want) {
-				t.Errorf("CopyFrom: %v, want %v", err, tc.want)
-			}
+func (w infoWrapped) ReadDir(name string) ([]fs.DirEntry, error) {
+	entries, err := fs.ReadDir(w.FS, name)
+	for i, e := range entries {
+		entries[i] = infoWrappedEntry{e}
+	}
 
-			if err == nil {
-				if cerr := dst.Close(); cerr != nil {
-					t.Errorf("Close: %v", cerr)
-				}
-			}
+	return entries, err
+}
 
-			runtime.ReadMemStats(&after)
-			grew := after.TotalAlloc - before.TotalAlloc
+type infoWrappedEntry struct{ fs.DirEntry }
 
-			t.Logf("CopyFrom: %v (allocated %d bytes, wrote %d)", err, grew, len(out.buf))
+func (e infoWrappedEntry) Info() (fs.FileInfo, error) {
+	info, err := e.DirEntry.Info()
+	if err != nil {
+		return nil, err
+	}
 
-			if grew > 64<<20 {
-				t.Errorf("allocated %d bytes copying a hole of %d bytes; want under 64 MiB", grew, size)
-			}
+	return struct{ fs.FileInfo }{info}, nil
+}
 
-			if len(out.buf) > len(buf) {
-				t.Errorf("the copy of a %d byte image holding a hole of %d bytes is %d bytes", len(buf), size, len(out.buf))
-			}
-		})
+// filesWrapped is a source that opens the image's regular files behind a
+// type of its own: the walk sees their info, and reads them as any file.
+type filesWrapped struct{ fs.FS }
+
+func (w filesWrapped) Open(name string) (fs.File, error) {
+	f, err := w.FS.Open(name)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, dir := f.(fs.ReadDirFile); dir {
+		return f, nil
+	}
+
+	return struct{ fs.File }{f}, nil
+}
+
+// holeSizeIsBounded copies an image whose file is a flat hole of the size
+// given, itself or behind a wrapper, and holds the copy to its error, its
+// allocations and its size.
+func holeSizeIsBounded(
+	t *testing.T, sizeOf func(blockSize uint64) uint64, want error, opts []CopyOpt, wrap func(fs.FS) fs.FS,
+) {
+	t.Helper()
+
+	buf, nid := buildTamperableImage(t)
+
+	img0, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	size := sizeOf(uint64(img0.(*image).blockSize()))
+
+	// An extended inode's start block is 48 bits, i_nb its high 16: all
+	// ones is the null address.
+	inodeOff := img0.(*image).metaStartPos() + int64(nid)*disk.SizeInodeCompact
+	binary.LittleEndian.PutUint16(buf[inodeOff:], disk.InodeFormatExtended|disk.LayoutFlatPlain<<1)
+	binary.LittleEndian.PutUint16(buf[inodeOff+6:], 0xffff)
+	binary.LittleEndian.PutUint64(buf[inodeOff+8:], size)
+	binary.LittleEndian.PutUint32(buf[inodeOff+16:], 0xffffffff)
+	buf[disk.SuperBlockOffset+8] &^= disk.FeatureCompatSBChksum
+
+	img, err := Open(bytes.NewReader(buf))
+	if err != nil {
+		t.Fatalf("tampered image failed to open: %v", err)
+	}
+
+	if wrap != nil {
+		img = wrap(img)
+	}
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	out := &seekBuf{}
+	dst := Create(out)
+
+	err = dst.CopyFrom(img, opts...)
+	if !errors.Is(err, want) {
+		t.Errorf("CopyFrom: %v, want %v", err, want)
+	}
+
+	// A copy that should have been refused is not written out: it may be
+	// the hole, as zeros.
+	if err == nil && want == nil {
+		if cerr := dst.Close(); cerr != nil {
+			t.Errorf("Close: %v", cerr)
+		}
+	}
+
+	runtime.ReadMemStats(&after)
+	grew := after.TotalAlloc - before.TotalAlloc
+
+	t.Logf("CopyFrom: %v (allocated %d bytes, wrote %d)", err, grew, len(out.buf))
+
+	if grew > 64<<20 {
+		t.Errorf("allocated %d bytes copying a hole of %d bytes; want under 64 MiB", grew, size)
+	}
+
+	if len(out.buf) > len(buf) {
+		t.Errorf("the copy of a %d byte image holding a hole of %d bytes is %d bytes", len(buf), size, len(out.buf))
 	}
 }
 

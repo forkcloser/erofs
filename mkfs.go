@@ -731,6 +731,14 @@ func (l listedOnce) ReadDir(name string) ([]fs.DirEntry, error) {
 // under itself is one. So is a directory that lists a name twice: a lookup
 // finds one of the two entries, and the copy would hold that one's content
 // under the other's metadata.
+// A hole in a file of an EROFS image stays a hole in the copy, with its
+// data as well as metadata-only: the copy stores what the source stores.
+// With its data that holds when src opens this package's own files: the
+// image Open returned, or what fs.Sub makes of it; a source that wraps the
+// files themselves has its holes read, and stored, as zeros. A flat file at
+// the null address, a hole whose size nothing in the image backs, is not
+// copied past 1<<27 blocks, ErrInvalid, where src reports this package's
+// file info for it or, with its data, opens this package's file.
 //
 //nolint:gocognit // the walk callback: one case per entry kind, each with its own metadata and data source
 func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
@@ -1037,10 +1045,17 @@ func (fsys *Writer) Open(name string) (fs.File, error) {
 		}
 
 		var sr *io.SectionReader
-		if fsys.dataFile != nil {
+
+		switch {
+		case e.holedInDataFile:
+			// #nosec G115 -- e.size fits int64: add bounds it
+			sr = io.NewSectionReader(
+				chunkedData{fsys.dataFile, e.chunks, int64(fsys.resolveBlockSize())}, 0, int64(e.size),
+			)
+		case fsys.dataFile != nil:
 			// #nosec G115 -- e.size fits int64: File counts it in an int64, and add and copyFromImage bound it
 			sr = io.NewSectionReader(fsys.dataFile, e.dataStartOff, int64(e.size))
-		} else if fsys.spool != nil && e.size > 0 {
+		case fsys.spool != nil && e.size > 0:
 			// #nosec G115 -- e.size fits int64: File counts it in an int64, and add and copyFromImage bound it
 			sr = io.NewSectionReader(fsys.spool, e.dataStartOff, int64(e.size))
 		}
@@ -1167,6 +1182,13 @@ type fsEntry struct {
 	linkTarget string
 	chunks     []builder.Chunk
 	contiguous bool // data blocks are contiguous; flat-plain is sufficient
+	// chunksOfData: the chunks lay the file out over directData, which
+	// leaves its holes out; Close stores that data in this image and
+	// places the chunks on it.
+	chunksOfData bool
+	// holedInDataFile: the file's data is in the data file without its
+	// holes, where the chunks say, and not in one piece at dataStartOff.
+	holedInDataFile bool
 	// tail is the inline end of a metadata-only file copied from an image,
 	// shorter than a block: a chunk can only name whole blocks of a device,
 	// so Close writes it as one block of this image after the chunks.
@@ -1285,6 +1307,11 @@ type erofsEntry struct {
 
 	// For regular files — full-image mode
 	data io.Reader
+	// chunksOfData: a file with holes. data holds what is not a hole,
+	// dataBytes of it, and chunks count its blocks from zero until
+	// assignFlatPlainAddrs places them in this image.
+	chunksOfData bool
+	dataBytes    int
 
 	// Extended attributes
 	xattrs map[string]string
@@ -1564,6 +1591,14 @@ func (de *dirEntry) Info() (fs.FileInfo, error) { return &writerFileInfo{entry: 
 //
 //nolint:gocognit // one case per data source, each with its own checks, as the doc says
 func (fsys *Writer) addRegular(src fs.FS, fpath, p string, info fs.FileInfo, be *builder.Entry) error {
+	// The bound copyFromImage puts on a flat hole, for an image this walk
+	// reads, behind fs.Sub, say; and with its data too, where a source that
+	// wraps the image's files would have the hole written out as zeros.
+	if fi, ok := info.(*fileInfo); ok && fi.flatHole() {
+		if err := checkFlatHole(fi.stat.Ino, fi.size, int64(fsys.resolveBlockSize())); err != nil {
+			return fmt.Errorf("mkfs: %s: %w", p, err)
+		}
+	}
 	// In metadata-only mode, data is referenced via chunk indexes
 	// from the source — no need to open the file.
 	if fsys.copyMetadataOnly {
@@ -1630,6 +1665,24 @@ func (fsys *Writer) addRegular(src fs.FS, fpath, p string, info fs.FileInfo, be 
 	f, err := src.Open(fpath)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", fpath, err)
+	}
+	// A hole stays a hole: read as zeros and stored as data, it is as large
+	// in the copy as the inode says it is, which nothing in the source has
+	// to back. Judged on the file and not on the source, which may be an
+	// image behind fs.Sub or another wrapper that opens the image's files.
+	if imgFile, ok := f.(*file); ok {
+		if ino, ierr := imgFile.readInfo(); ierr == nil {
+			chunks, data, herr := holedData(imgFile, ino, int64(fsys.resolveBlockSize()))
+			if herr != nil {
+				return fmt.Errorf("mkfs: %s: %w", p, herr)
+			}
+
+			if chunks != nil {
+				be.Data, be.Chunks, be.ChunksOfData = data, chunks, true
+
+				return fsys.add(p, &entryFileInfo{info: info, sys: be})
+			}
+		}
 	}
 
 	be.Data = f
@@ -1778,6 +1831,18 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 	// Skip entirely in metadata-only mode.
 	needData := typ == disk.StatTypeReg && size > 0 && be.Data != nil &&
 		!fsys.copyMetadataOnly
+	if needData && be.ChunksOfData {
+		fe.fileClosed = true
+
+		if fsys.dataFile != nil {
+			return fsys.chunksToDataFile(fe, be.Data)
+		}
+
+		fe.directData, fe.chunksOfData = be.Data, true
+
+		return nil
+	}
+
 	if needData {
 		// Data is stored locally; clear any source chunk mappings.
 		fe.chunks = nil
@@ -2295,7 +2360,7 @@ func (fsys *Writer) fsToErofs(e *fsEntry) erofsEntry {
 
 	var data io.Reader
 
-	if fsys.dataFile == nil && len(e.chunks) == 0 && !e.metadataOnly &&
+	if fsys.dataFile == nil && (len(e.chunks) == 0 || e.chunksOfData) && !e.metadataOnly &&
 		e.mode&disk.StatTypeMask == disk.StatTypeReg && e.size > 0 {
 		if e.directData != nil {
 			data = e.directData
@@ -2303,6 +2368,12 @@ func (fsys *Writer) fsToErofs(e *fsEntry) erofsEntry {
 			// #nosec G115 -- e.size fits int64: File counts it in an int64, and add and copyFromImage bound it
 			data = io.NewSectionReader(fsys.spool, e.spoolOff, int64(e.size))
 		}
+	}
+
+	var dataBytes int
+	if e.chunksOfData {
+		// #nosec G115 -- the bytes of a source's data blocks, which fit the int its reader counts them in
+		dataBytes = int(chunkDataBytes(e.chunks, e.size, uint64(fsys.resolveBlockSize())))
 	}
 
 	return erofsEntry{
@@ -2322,6 +2393,8 @@ func (fsys *Writer) fsToErofs(e *fsEntry) erofsEntry {
 		metadataOnly:  e.metadataOnly,
 		tail:          e.tail,
 		data:          data,
+		chunksOfData:  e.chunksOfData,
+		dataBytes:     dataBytes,
 		xattrs:        e.xattrs,
 		erofsFileType: modeToFileType(e.mode),
 	}
@@ -2586,6 +2659,119 @@ func (fsys *Writer) lookup(name string) (*fsEntry, error) {
 	}
 
 	return e, nil
+}
+
+// chunkDataBytes is how many bytes of data chunks lay a size-byte file out
+// over: every block that is not a hole, less what the file's last block
+// lacks when it is one of them.
+func chunkDataBytes(chunks []builder.Chunk, size, blockSize uint64) uint64 {
+	var blocks uint64
+
+	for _, c := range chunks {
+		if c.PhysicalBlock != builder.NullPhysicalBlock {
+			blocks += uint64(c.Count)
+		}
+	}
+
+	bytes := blocks * blockSize
+	if rem := size % blockSize; rem != 0 && len(chunks) > 0 &&
+		chunks[len(chunks)-1].PhysicalBlock != builder.NullPhysicalBlock {
+		bytes -= blockSize - rem
+	}
+
+	return bytes
+}
+
+// chunksToDataFile stores in the data file the data fe's chunks lay it out
+// over, and places the chunks there, on device 1. The holes stay holes.
+func (fsys *Writer) chunksToDataFile(fe *fsEntry, data io.Reader) error {
+	if err := fsys.alignDataOff(); err != nil {
+		return err
+	}
+
+	// #nosec G115 -- a positive block size and a data file offset, neither negative
+	bs, at := uint64(fsys.resolveBlockSize()), uint64(fsys.dataOff)
+
+	n, err := io.CopyBuffer(onlyWriter{fsys.dataFile}, data, fsys.copyBuf())
+	fsys.dataOff += n
+
+	if err != nil {
+		return fmt.Errorf("mkfs: %s: %w", fe.path, err)
+	}
+
+	// #nosec G115 -- a byte count, never negative
+	if want := chunkDataBytes(fe.chunks, fe.size, bs); uint64(n) != want {
+		return fmt.Errorf("mkfs: %s: its data is %d bytes, its chunks lay out %d: %w",
+			fe.path, n, want, io.ErrUnexpectedEOF)
+	}
+
+	if err := fsys.alignDataOff(); err != nil {
+		return err
+	}
+
+	placeChunks(fe.chunks, at/bs, 1)
+	fe.holedInDataFile = true
+
+	return nil
+}
+
+// chunkedData reads a file through chunks that are holes or blocks of the
+// data file: what Open serves of a file stored there without its holes.
+type chunkedData struct {
+	data      io.ReaderAt
+	chunks    []builder.Chunk
+	blockSize int64
+}
+
+func (c chunkedData) ReadAt(p []byte, off int64) (int, error) {
+	var (
+		n     int
+		start int64 // the logical byte the chunk begins at
+	)
+
+	for _, chunk := range c.chunks {
+		end := start + int64(chunk.Count)*c.blockSize
+
+		if n == len(p) {
+			break
+		}
+
+		if at := off + int64(n); at < end {
+			part := p[n:min(len(p), n+int(end-at))]
+			if chunk.PhysicalBlock == builder.NullPhysicalBlock {
+				clear(part)
+			} else {
+				// #nosec G115 -- a block of the data file, whose offsets fit an int64
+				from := int64(chunk.PhysicalBlock)*c.blockSize + at - start
+				// A full read may come with io.EOF, at the end of the data
+				// file: a short one is the error.
+				if m, err := c.data.ReadAt(part, from); m < len(part) {
+					return n + m, err
+				}
+			}
+
+			n += len(part)
+		}
+
+		start = end
+	}
+
+	if n < len(p) {
+		return n, io.EOF
+	}
+
+	return n, nil
+}
+
+// placeChunks moves chunks that count a file's data blocks from zero to
+// where that data is: from block first of device.
+func placeChunks(chunks []builder.Chunk, first uint64, device uint16) {
+	for i := range chunks {
+		if chunks[i].PhysicalBlock != builder.NullPhysicalBlock {
+			chunks[i].PhysicalBlock += first
+			chunks[i].DeviceID = device
+		}
+	}
 }
 
 // alignDataOff pads the data file up to a block boundary.
