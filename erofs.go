@@ -3106,6 +3106,12 @@ func (fi *fileInfo) GetXattr(name string) (string, bool) {
 	return v, ok
 }
 
+// flatHole reports a flat file at the null address: one hole, whose size is
+// the inode's word alone.
+func (fi *fileInfo) flatHole() bool {
+	return fi.layout == disk.LayoutFlatPlain && len(fi.dataRanges) == 1 && fi.dataRanges[0].Offset == holeOffset
+}
+
 func decodeSuperBlock(b [disk.SizeSuperBlock]byte, sb *disk.SuperBlock) error {
 	sb.Unmarshal(b[:])
 

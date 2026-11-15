@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/bits"
 	"os"
 	"slices"
 
@@ -204,16 +205,67 @@ func (w *erofsWriter) checkLimits() error {
 	return nil
 }
 
+// runChunkBits returns the largest chunkBits at which e's index still says
+// what its chunks say: an index entry maps one whole chunk from its first
+// block, so a chunk may not hold the place where a run of e's blocks ends
+// and another begins, a hole after data, data on another device, or blocks
+// that do not follow. Every such place is a multiple of the chunk size;
+// with none, one chunk holds the file. A file's holes then cost an entry a
+// chunk, not an entry a block.
+func (w *erofsWriter) runChunkBits(e *erofsEntry) uint8 {
+	fit := w.minChunkBits(e.size)
+
+	var (
+		at   uint64 // the logical block the next run starts at
+		prev *builder.Chunk
+	)
+
+	for i := range e.chunks {
+		c := &e.chunks[i]
+		if prev != nil && !follows(prev, c) {
+			fit = min(fit, alignedBits(at))
+		}
+
+		at += uint64(c.Count)
+		prev = c
+	}
+	// Past the chunks the file is its tail, a block of this image that
+	// follows nothing, or else a hole, which follows a hole alone.
+	// #nosec G115 -- the block size is positive, 512 to 1<<16
+	blocks := (e.size + uint64(w.blockSize) - 1) / uint64(w.blockSize)
+	if prev != nil && at < blocks && (len(e.tail) > 0 || prev.PhysicalBlock != builder.NullPhysicalBlock) {
+		fit = min(fit, alignedBits(at))
+	}
+
+	return fit
+}
+
+// follows reports whether c continues the run prev ends: a hole after a
+// hole, or the next blocks of the same device.
+func follows(prev, c *builder.Chunk) bool {
+	if prev.PhysicalBlock == builder.NullPhysicalBlock || c.PhysicalBlock == builder.NullPhysicalBlock {
+		return prev.PhysicalBlock == c.PhysicalBlock
+	}
+
+	return prev.DeviceID == c.DeviceID && prev.PhysicalBlock+uint64(prev.Count) == c.PhysicalBlock
+}
+
+// alignedBits is the largest chunkBits whose chunk size divides block.
+func alignedBits(block uint64) uint8 {
+	// #nosec G115 -- a count of bits, at most 64
+	return uint8(bits.TrailingZeros64(block))
+}
+
 // minChunkBits returns the minimum chunkBits such that file size fits in
 // one chunk (chunkSize >= size). Capped at 31 (LayoutChunkFormatBits max).
 func (w *erofsWriter) minChunkBits(size uint64) uint8 {
-	bits := w.chunkBits
+	fit := w.chunkBits
 	// #nosec G115 -- the block size is positive, 512 to 1<<16
-	for uint64(w.blockSize)<<bits < size && bits < 31 {
-		bits++
+	for uint64(w.blockSize)<<fit < size && fit < 31 {
+		fit++
 	}
 
-	return bits
+	return fit
 }
 
 func (w *erofsWriter) write(out io.WriteSeeker) error {
@@ -344,6 +396,9 @@ func (w *erofsWriter) assignFlatPlainAddrs(addr uint32) uint32 {
 	for _, e := range w.entries {
 		if ds := w.flatPlainDataSize(e); ds > 0 {
 			e.dataBlkAddr = addr
+			if e.chunksOfData {
+				placeChunks(e.chunks, uint64(addr), 0)
+			}
 			// #nosec G115 -- checkLimits bounded the image's block count, and so every address, to 32 bits
 			addr += uint32((ds + w.blockSize - 1) / w.blockSize)
 		}
@@ -351,8 +406,9 @@ func (w *erofsWriter) assignFlatPlainAddrs(addr uint32) uint32 {
 		if len(e.tail) > 0 {
 			e.tailBlkAddr = addr
 			// The tail's chunk: the one block of this image, after the
-			// chunks on the source's devices; one logical chunk is one
-			// block here, which the tail's entry keeps non-contiguous.
+			// chunks on the source's devices. It begins a chunk of its
+			// own, whatever the chunk size: runChunkBits holds that to
+			// what the blocks before the tail are a multiple of.
 			e.chunks = append(e.chunks, builder.Chunk{PhysicalBlock: uint64(addr), Count: 1})
 			addr++
 		}
@@ -997,8 +1053,14 @@ func (w *erofsWriter) writeTailBlock(out io.Writer, e *erofsEntry) error {
 	return nil
 }
 
-// flatPlainDataSize returns the data size for a flat-plain entry, or 0.
+// flatPlainDataSize returns the size of the data e keeps in blocks of this
+// image: a flat-plain entry's, or what a file with holes has beside them;
+// 0 for any other.
 func (w *erofsWriter) flatPlainDataSize(e *erofsEntry) int {
+	if e.chunksOfData {
+		return e.dataBytes
+	}
+
 	if e.layout != disk.LayoutFlatPlain {
 		return 0
 	}

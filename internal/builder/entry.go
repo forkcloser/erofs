@@ -26,6 +26,7 @@ type Entry struct {
 	LinkTarget   string
 	Data         io.Reader // file content (full-image mode)
 	Chunks       []Chunk   // physical block refs (metadata-only mode)
+	ChunksOfData bool      // Chunks count the blocks of Data, device 0, from zero: Data leaves the file's holes out
 	Contiguous   bool      // data blocks are contiguous; flat-plain is sufficient
 	MetadataOnly bool      // chunk-based layout even without chunks
 }
@@ -40,6 +41,6 @@ const NullPhysicalBlock uint64 = ^uint64(0)
 // blocks of zeros with no physical backing. DeviceID is ignored for holes.
 type Chunk struct {
 	PhysicalBlock uint64 // physical block address, or NullPhysicalBlock for a hole
-	Count         uint16 // number of contiguous blocks
+	Count         uint32 // number of contiguous blocks
 	DeviceID      uint16 // 0 = primary, 1+ = extra device; ignored for holes
 }

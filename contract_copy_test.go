@@ -1214,12 +1214,12 @@ func checkEditedCopy(t *testing.T, im corpus.Image, img []byte, label string) in
 	// directory is the search's, and the copy is not compared.
 	unsorted := false
 
-	// An edit can make a file of a few bytes a hole of gigabytes: the copy
-	// with its data writes it out as zeros, the metadata-only one indexes
-	// it block by block, both into memory here, a fuzzer's worker beside
-	// seventeen others. A source whose files declare more than the copy's
-	// buffer holds is opened and not copied; the buffer's own limit is for
-	// the source the reference does not read.
+	// An edit can make a file of a few bytes a hole of gigabytes. Its
+	// copies are small, and comparing them reads the file whole, from the
+	// source and from each copy, into memory here, a fuzzer's worker
+	// beside seventeen others. A source whose files declare more than the
+	// copy's buffer holds is opened and not copied; the buffer's own limit
+	// is for the source the reference does not read.
 	declared := int64(0)
 
 	if ref, perr := erofsspec.Parse(img, im.Extra()); perr == nil {
@@ -1815,6 +1815,920 @@ func TestContractGenericEmptyDataRangeIsAllHoles(t *testing.T) {
 	}
 }
 
+// TestContractCopyOfACopyKeepsARunPast65535Blocks: a contiguous file of
+// more than 65535 blocks is written with one chunk as large as the file,
+// and an image holding one is a source like any other. Its metadata-only
+// copy names the same bytes, through the reference and the package.
+func TestContractCopyOfACopyKeepsARunPast65535Blocks(t *testing.T) {
+	t.Parallel()
+
+	const (
+		bs     = 512
+		blocks = 70000
+		first  = 8 // the file's first block on the device
+		size   = blocks*bs - 100
+	)
+
+	blob := make([]byte, (first+blocks)*bs)
+	for i := range blob {
+		blob[i] = byte(i ^ i>>9)
+	}
+
+	src := blockSizedSource{
+		dataRangerFS: &dataRangerFS{
+			deviceBlocks: first + blocks,
+			file: &dataRangerFileInfo{
+				name:   "f",
+				size:   size,
+				ranges: []erofs.DataRange{{Offset: first * bs, Size: size}},
+			},
+		},
+		bs: bs,
+	}
+
+	once := &testBuffer{}
+	w := erofs.Create(once, erofs.WithBlockSize(bs), erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if err := errors.Join(w.CopyFrom(src, erofs.MetadataOnly()), w.Close()); err != nil {
+		t.Fatalf("the copy: %v", err)
+	}
+
+	copied := corpus.Image{Name: "copy", Img: once.Bytes(), Blob: blob}
+
+	twice := &testBuffer{}
+	w = erofs.Create(twice, erofs.WithBlockSize(bs), erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if err := errors.Join(w.CopyFrom(openImage(t, copied), erofs.MetadataOnly()), w.Close()); err != nil {
+		t.Fatalf("the copy of the copy: %v", err)
+	}
+
+	want := blob[first*bs : first*bs+size]
+
+	for _, im := range []corpus.Image{
+		copied,
+		{Name: "copy of the copy", Img: twice.Bytes(), Devices: [][]byte{once.Bytes(), blob}},
+	} {
+		ref := parseImage(t, im)
+
+		in, err := ref.Resolve("f", 0)
+		if err != nil {
+			t.Fatalf("%s: %v", im.Name, err)
+		}
+
+		if got, err := ref.Read(in); err != nil || !bytes.Equal(got, want) {
+			t.Errorf("%s: the reference reads %d bytes, %v; want the device's %d", im.Name, len(got), err, len(want))
+		}
+
+		if got, err := fs.ReadFile(openImage(t, im), "f"); err != nil || !bytes.Equal(got, want) {
+			t.Errorf("%s: ReadFile reads %d bytes, %v; want the device's %d", im.Name, len(got), err, len(want))
+		}
+
+		if err := corpus.FsckVerdict(t, im); err != nil {
+			t.Fatalf("%s: %v", im.Name, err)
+		}
+	}
+}
+
+// TestContractChunkSizeFollowsTheRuns: a metadata-only file's chunk is as
+// large as the places where its runs of blocks begin and end allow, so its
+// index has an entry a chunk and not an entry a block, and the file still
+// reads what its ranges say, through the reference and the package.
+func TestContractChunkSizeFollowsTheRuns(t *testing.T) {
+	t.Parallel()
+
+	const (
+		bs     = 4096
+		blocks = 64
+	)
+
+	blob := make([]byte, blocks*bs)
+	for i := range blob {
+		blob[i] = byte(i ^ i>>12)
+	}
+
+	data := func(block, n int64) erofs.DataRange { return erofs.DataRange{Offset: block * bs, Size: n * bs} }
+	hole := func(n int64) erofs.DataRange { return erofs.DataRange{Offset: -1, Size: n * bs} }
+
+	for _, tc := range []struct {
+		name   string
+		ranges []erofs.DataRange
+		cut    int64 // bytes the file ends before its last range does
+		bits   uint  // log2 of the chunk size in blocks
+	}{
+		{"one hole", []erofs.DataRange{hole(40)}, 7, 6},
+		{"runs on multiples of eight blocks", []erofs.DataRange{data(16, 8), hole(16), data(40, 8)}, 5, 3},
+		{"a run that ends on an odd block", []erofs.DataRange{data(2, 3), hole(5), data(20, 8)}, 0, 0},
+		{"two runs that follow each other on the device", []erofs.DataRange{data(4, 3), data(7, 5)}, 1, 3},
+		{"two runs that do not", []erofs.DataRange{data(4, 4), data(9, 4)}, 0, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ranges := slices.Clone(tc.ranges)
+			ranges[len(ranges)-1].Size -= tc.cut
+
+			var want []byte
+
+			for _, r := range ranges {
+				if r.Offset < 0 {
+					want = append(want, make([]byte, r.Size)...)
+				} else {
+					want = append(want, blob[r.Offset:r.Offset+r.Size]...)
+				}
+			}
+
+			src := &dataRangerFS{
+				deviceBlocks: blocks,
+				file:         &dataRangerFileInfo{name: "f", size: int64(len(want)), ranges: ranges},
+			}
+			out := &testBuffer{}
+			w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+			if err := errors.Join(w.CopyFrom(src, erofs.MetadataOnly()), w.Close()); err != nil {
+				t.Fatal(err)
+			}
+
+			im := corpus.Image{Name: tc.name, Img: out.Bytes(), Blob: blob}
+			ref := parseImage(t, im)
+
+			in, err := ref.Resolve("f", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if got := in.ChunkBits - uint(ref.Super.BlockBits); got != tc.bits {
+				t.Errorf("a chunk of 1<<%d blocks, want 1<<%d", got, tc.bits)
+			}
+
+			if got, err := ref.Read(in); err != nil || !bytes.Equal(got, want) {
+				t.Errorf("the reference reads %d bytes, %v; want the ranges' %d", len(got), err, len(want))
+			}
+
+			if got, err := fs.ReadFile(openImage(t, im), "f"); err != nil || !bytes.Equal(got, want) {
+				t.Errorf("ReadFile reads %d bytes, %v; want the ranges' %d", len(got), err, len(want))
+			}
+
+			if err := corpus.FsckVerdict(t, im); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// TestContractChunkSizeKeepsRunsOnTheirDevices: two runs whose block
+// numbers follow each other on two different devices are two runs. A chunk
+// holding both would read the second from the first's device.
+func TestContractChunkSizeKeepsRunsOnTheirDevices(t *testing.T) {
+	t.Parallel()
+
+	const (
+		bs     = 4096
+		blocks = 16
+	)
+
+	pattern := func(seed int) []byte {
+		b := make([]byte, blocks*bs)
+		for i := range b {
+			b[i] = byte(i ^ i>>12 ^ seed)
+		}
+
+		return b
+	}
+	one, two := pattern(0x11), pattern(0xa5)
+
+	source := func(name string, ranges ...erofs.DataRange) *dataRangerFS {
+		var size int64
+		for _, r := range ranges {
+			size += r.Size
+		}
+
+		return &dataRangerFS{
+			deviceBlocks: blocks,
+			file:         &dataRangerFileInfo{name: name, size: size, ranges: ranges},
+		}
+	}
+
+	// f's two blocks are block 5 and block 9 of the first device; g only
+	// brings the second device in.
+	first := &testBuffer{}
+	w := erofs.Create(first, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if err := errors.Join(
+		w.CopyFrom(source("f", erofs.DataRange{Offset: 5 * bs, Size: bs}, erofs.DataRange{Offset: 9 * bs, Size: bs}),
+			erofs.MetadataOnly()),
+		w.CopyFrom(source("g", erofs.DataRange{Offset: 0, Size: bs}), erofs.MetadataOnly()),
+		w.Close(),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// f's second block becomes block 6 of the second device: the block
+	// number after its first block's, on another device.
+	img := first.Bytes()
+	entry := []byte{0, 0, 1, 0, 9, 0, 0, 0}
+
+	if bytes.Count(img, entry) != 1 {
+		t.Fatalf("the index entry for block 9 of device 1 appears %d times, want once", bytes.Count(img, entry))
+	}
+
+	img = bytes.Replace(img, entry, []byte{0, 0, 2, 0, 6, 0, 0, 0}, 1)
+	edited := corpus.Image{Name: "edited", Img: img, Devices: [][]byte{one, two}}
+
+	out := &testBuffer{}
+	w = erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if err := errors.Join(w.CopyFrom(openImage(t, edited), erofs.MetadataOnly()), w.Close()); err != nil {
+		t.Fatal(err)
+	}
+
+	want := slices.Concat(one[5*bs:6*bs], two[6*bs:7*bs])
+
+	for _, im := range []corpus.Image{
+		edited,
+		{Name: "copy", Img: out.Bytes(), Devices: [][]byte{img, one, two}},
+	} {
+		ref := parseImage(t, im)
+
+		in, err := ref.Resolve("f", 0)
+		if err != nil {
+			t.Fatalf("%s: %v", im.Name, err)
+		}
+
+		if got, err := ref.Read(in); err != nil || !bytes.Equal(got, want) {
+			t.Errorf("%s: the reference does not read a block of each device (%d bytes, %v)", im.Name, len(got), err)
+		}
+
+		if got, err := fs.ReadFile(openImage(t, im), "f"); err != nil || !bytes.Equal(got, want) {
+			t.Errorf("%s: ReadFile does not read a block of each device (%d bytes, %v)", im.Name, len(got), err)
+		}
+
+		if err := corpus.FsckVerdict(t, im); err != nil {
+			t.Fatalf("%s: %v", im.Name, err)
+		}
+	}
+}
+
+// TestContractChunksShorterThanTheFileEndInAHole: a file whose chunks stop
+// before it does reads zeros from there on, whatever follows its last block
+// on the device. The hole begins where the data ends, on a chunk boundary.
+func TestContractChunksShorterThanTheFileEndInAHole(t *testing.T) {
+	t.Parallel()
+
+	const bs = 4096
+
+	device := make([]byte, 16*bs)
+	for i := range device {
+		device[i] = byte(i ^ i>>12 ^ 0x5a)
+	}
+
+	df, err := os.Create(filepath.Join(t.TempDir(), "data.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, werr := df.Write(device); werr != nil {
+		t.Fatal(werr)
+	}
+
+	out := &testBuffer{}
+	w := erofs.Create(out, erofs.WithDataFile(df), erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	// Blocks 4 to 6 of the data file, then five blocks nothing maps.
+	src := chunkMapSourceFS{
+		name:   "f",
+		size:   8 * bs,
+		chunks: []builder.Chunk{{PhysicalBlock: 4, Count: 3, DeviceID: 1}},
+	}
+	if cerr := errors.Join(w.CopyFrom(src, erofs.MetadataOnly()), w.Close(), df.Close()); cerr != nil {
+		t.Fatal(cerr)
+	}
+
+	im := corpus.Image{Name: "short-chunks", Img: out.Bytes(), Blob: device}
+	want := slices.Concat(device[4*bs:7*bs], make([]byte, 5*bs))
+	ref := parseImage(t, im)
+
+	in, err := ref.Resolve("f", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, rerr := ref.Read(in); rerr != nil || !bytes.Equal(got, want) {
+		t.Errorf("the reference does not read three blocks and a hole (%d bytes, %v)", len(got), rerr)
+	}
+
+	if got, rerr := fs.ReadFile(openImage(t, im), "f"); rerr != nil || !bytes.Equal(got, want) {
+		t.Errorf("ReadFile does not read three blocks and a hole (%d bytes, %v)", len(got), rerr)
+	}
+
+	if verr := corpus.FsckVerdict(t, im); verr != nil {
+		t.Fatal(verr)
+	}
+}
+
+// TestContractCopyWithDataKeepsHoles: a copy with its data stores what a
+// source image's file holds and none of its holes. The file reads the same,
+// through the reference and the package; the source's holes are holes in
+// the copy, in the image or in its data file; and the copy is the size of
+// the data, not of the file. A file with no hole is stored flat, as ever.
+// The data file holds other bytes before the copy, and the copy's data
+// begins and ends on a block of it; the Writer reads the file back from
+// there, holes and all, before Close. And the source may be the image or a
+// wrapper that opens the image's files, as fs.Sub is. Behind a wrapper the
+// copy does not take the source's block size, and a hole is then the copy's
+// blocks that lie whole inside it: what is left of one at either end is
+// stored, zeros and all.
+func TestContractCopyWithDataKeepsHoles(t *testing.T) {
+	t.Parallel()
+
+	// A run of the file's blocks: n of them from block of the device, or a
+	// hole.
+	type span struct {
+		block, n int64 // block -1: a hole
+	}
+
+	for _, tc := range []struct {
+		name   string
+		bs     int // the block size, the source's and the copy's
+		to     int // the copy's, when it is another: from a wrapped image only
+		spans  []span
+		cut    int64 // bytes the file ends before its last run does
+		holes  int64 // bytes of the copy's file that are holes
+		chunks bool  // the copy's file is stored as chunks
+	}{
+		{"a hole between data", 4096, 0, []span{{16, 8}, {-1, 16}, {40, 8}}, 5, 16 * 4096, true},
+		{"a hole between data, in blocks of 512", 512, 0, []span{{16, 8}, {-1, 16}, {40, 8}}, 5, 16 * 512, true},
+		{"a hole first", 4096, 0, []span{{-1, 8}, {3, 5}}, 0, 8 * 4096, true},
+		{"a hole last", 4096, 0, []span{{3, 5}, {-1, 11}}, 100, 11*4096 - 100, true},
+		{"a hole of one block last", 4096, 0, []span{{3, 5}, {-1, 1}}, 4000, 96, true},
+		{"nothing but a hole", 4096, 0, []span{{-1, 40}}, 7, 40*4096 - 7, true},
+		{"two holes", 4096, 0, []span{{2, 3}, {-1, 5}, {20, 8}, {-1, 1}, {30, 2}}, 0, 6 * 4096, true},
+		{"no hole", 4096, 0, []span{{4, 4}, {9, 4}}, 3, 0, false},
+		// Bytes 1536 to 8192 are a hole: the copy's second block.
+		{"a hole across the copy's larger blocks", 512, 4096, []span{{2, 3}, {-1, 13}, {20, 9}}, 0, 4096, true},
+		// Bytes 0 to 5632 and 10240 to 20992, the end: the copy's first
+		// block, and its fourth to its sixth and last.
+		{"holes at both ends of larger blocks", 512, 4096, []span{{-1, 11}, {5, 9}, {-1, 21}}, 0, 4096 + 8704, true},
+		// Bytes 1536 to 3584: none of the copy's blocks, and the file is
+		// stored whole.
+		{"a hole inside one larger block", 512, 4096, []span{{2, 3}, {-1, 4}, {20, 2}}, 0, 0, false},
+		// Blocks of 4096 into blocks of 512: every hole is whole blocks.
+		{"a hole in the copy's smaller blocks", 4096, 512, []span{{3, 2}, {-1, 3}, {9, 1}}, 100, 3 * 4096, true},
+	} {
+		for _, variant := range []struct{ dataFile, wrapped bool }{
+			{false, false}, {true, false}, {false, true}, {true, true},
+		} {
+			if tc.to != 0 && !variant.wrapped {
+				continue
+			}
+
+			dataFile := variant.dataFile
+
+			to := tc.bs
+			if tc.to != 0 {
+				to = tc.to
+			}
+
+			name := tc.name
+			if dataFile {
+				name += ", into a data file"
+			}
+
+			if variant.wrapped {
+				name += ", from a wrapped image"
+			}
+
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				from := int64(tc.bs)
+
+				device := make([]byte, 64*from)
+				for i := range device {
+					device[i] = byte(i ^ i>>9 ^ 0x3c)
+				}
+
+				var (
+					ranges []erofs.DataRange
+					want   []byte
+				)
+
+				for i, s := range tc.spans {
+					size := s.n * from
+					if i == len(tc.spans)-1 {
+						size -= tc.cut
+					}
+
+					if s.block < 0 {
+						ranges = append(ranges, erofs.DataRange{Offset: -1, Size: size})
+						want = append(want, make([]byte, size)...)
+					} else {
+						ranges = append(ranges, erofs.DataRange{Offset: s.block * from, Size: size})
+						want = append(want, device[s.block*from:s.block*from+size]...)
+					}
+				}
+
+				// The source: an image whose file is chunks on the device
+				// and holes.
+				src := blockSizedSource{
+					dataRangerFS: &dataRangerFS{
+						deviceBlocks: 64,
+						file:         &dataRangerFileInfo{name: "f", size: int64(len(want)), ranges: ranges},
+					},
+					bs: uint32(tc.bs),
+				}
+				holed := &testBuffer{}
+				w := erofs.Create(holed, erofs.WithBlockSize(tc.bs), erofs.WithBuildTime(corpus.BuildTime, 0))
+
+				if err := errors.Join(w.CopyFrom(src, erofs.MetadataOnly()), w.Close()); err != nil {
+					t.Fatalf("the source: %v", err)
+				}
+
+				source := openImage(t, corpus.Image{Name: "holed", Img: holed.Bytes(), Blob: device})
+				if variant.wrapped {
+					source = struct{ fs.FS }{source}
+				}
+
+				// The copy, with its data.
+				opts := []erofs.CreateOpt{erofs.WithBlockSize(to), erofs.WithBuildTime(corpus.BuildTime, 0)}
+
+				var df *os.File
+
+				if dataFile {
+					var err error
+					if df, err = os.Create(filepath.Join(t.TempDir(), "data.bin")); err != nil {
+						t.Fatal(err)
+					}
+
+					// A block and a half of something else, already there.
+					if _, err = df.Write(bytes.Repeat([]byte{0xee}, to+to/2)); err != nil {
+						t.Fatal(err)
+					}
+
+					opts = append(opts, erofs.WithDataFile(df))
+				}
+
+				out := &testBuffer{}
+				w = erofs.Create(out, opts...)
+
+				if err := w.CopyFrom(source); err != nil {
+					t.Fatalf("the copy: %v", err)
+				}
+
+				if dataFile {
+					back, err := w.Open("f")
+					if err != nil {
+						t.Fatal(err)
+					}
+
+					// Into a buffer that is not zeros: a hole has to be read.
+					got := bytes.Repeat([]byte{0xff}, len(want)+1)
+					if n, rerr := io.ReadFull(back, got); n != len(want) || !errors.Is(rerr, io.ErrUnexpectedEOF) ||
+						!bytes.Equal(got[:n], want) {
+						t.Errorf("the Writer does not read the file back (%d bytes of %d, %v)", n, len(want), rerr)
+					}
+				}
+
+				if err := w.Close(); err != nil {
+					t.Fatalf("the copy: %v", err)
+				}
+
+				im := corpus.Image{Name: name, Img: out.Bytes()}
+
+				if dataFile {
+					blob, rerr := os.ReadFile(df.Name())
+					if cerr := errors.Join(rerr, df.Close()); cerr != nil {
+						t.Fatal(cerr)
+					}
+
+					if len(blob)%to != 0 {
+						t.Errorf("the data file ends %d bytes into a block", len(blob)%to)
+					}
+
+					im.Blob = blob
+				}
+
+				ref := parseImage(t, im)
+
+				in, err := ref.Resolve("f", 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				if got, rerr := ref.Read(in); rerr != nil || !bytes.Equal(got, want) {
+					t.Errorf("the reference does not read the source's file (%d bytes, %v)", len(got), rerr)
+				}
+
+				if got, rerr := fs.ReadFile(openImage(t, im), "f"); rerr != nil || !bytes.Equal(got, want) {
+					t.Errorf("ReadFile does not read the source's file (%d bytes, %v)", len(got), rerr)
+				}
+
+				extents, err := ref.Extents(in)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				var holes int64
+
+				for _, e := range extents {
+					if e.Hole {
+						holes += e.Length
+					}
+				}
+
+				if holes != tc.holes {
+					t.Errorf("%d bytes of the copy's file are holes, want %d", holes, tc.holes)
+				}
+
+				// A data file's blocks are always named by chunks.
+				if got := in.Layout == erofsspec.LayoutChunkBased; got != (tc.chunks || dataFile) {
+					t.Errorf("stored as chunks: %t, want %t", got, tc.chunks || dataFile)
+				}
+
+				// A superblock, the data in whole blocks, an inode and its
+				// index, and the two blocks the data file began with: ten
+				// blocks more than the data at the very most.
+				stored := int64(len(want)) - tc.holes
+				if size := int64(len(im.Img) + len(im.Blob)); size > stored+10*int64(to) {
+					t.Errorf("the copy is %d bytes for %d bytes of data", size, stored)
+				}
+
+				if verr := corpus.FsckVerdict(t, im); verr != nil {
+					t.Fatal(verr)
+				}
+			})
+		}
+	}
+}
+
+// shortDevice is a device that ends before the image's chunks on it do, and
+// reports no size the reader could hold them to.
+type shortDevice struct{ b []byte }
+
+func (d shortDevice) ReadAt(p []byte, off int64) (int, error) {
+	if off >= int64(len(d.b)) {
+		return 0, io.EOF
+	}
+
+	n := copy(p, d.b[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+
+	return n, nil
+}
+
+// TestContractCopyWithDataRefusesAHoledFileItCannotRead: a file with holes
+// whose data runs past the end of its device is not copied short, into the
+// image or into a data file: the reader's refusal is the copy's.
+func TestContractCopyWithDataRefusesAHoledFileItCannotRead(t *testing.T) {
+	t.Parallel()
+
+	const bs = 4096
+
+	device := bytes.Repeat([]byte{0x5c}, 16*bs)
+
+	src := &dataRangerFS{
+		deviceBlocks: 16,
+		file: &dataRangerFileInfo{
+			name: "f",
+			size: 12 * bs,
+			ranges: []erofs.DataRange{
+				{Offset: 4 * bs, Size: 4 * bs}, {Offset: -1, Size: 4 * bs}, {Offset: 12 * bs, Size: 4 * bs},
+			},
+		},
+	}
+	holed := &testBuffer{}
+	w := erofs.Create(holed, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if err := errors.Join(w.CopyFrom(src, erofs.MetadataOnly()), w.Close()); err != nil {
+		t.Fatalf("the source: %v", err)
+	}
+
+	for _, dataFile := range []bool{false, true} {
+		name := "into the image"
+		if dataFile {
+			name = "into a data file"
+		}
+
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// The device ends inside the file's second run of data.
+			source, err := erofs.Open(bytes.NewReader(holed.Bytes()),
+				erofs.WithExtraDevices(shortDevice{device[:13*bs]}))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			opts := []erofs.CreateOpt{erofs.WithBuildTime(corpus.BuildTime, 0)}
+
+			if dataFile {
+				df, err := os.Create(filepath.Join(t.TempDir(), "data.bin"))
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				t.Cleanup(func() { _ = df.Close() })
+
+				opts = append(opts, erofs.WithDataFile(df))
+			}
+
+			w := erofs.Create(&testBuffer{}, opts...)
+			if err := errors.Join(w.CopyFrom(source), w.Close()); !errors.Is(err, erofs.ErrCorrupt) {
+				t.Errorf("the copy of a file whose device ends early: %v, want ErrCorrupt", err)
+			}
+		})
+	}
+}
+
+// TestContractCopyKeepsAnIndexedHoleOfAnySize: the bound on a flat file at
+// the null address is that file's alone, whose size nothing in the image
+// backs. A hole a chunk index spells out is copied whatever its size, here
+// twice the blocks a flat one may have, as one hole and an image of a few
+// blocks, with its data and metadata-only, from the image and from a
+// wrapper of it, which the walk reads.
+func TestContractCopyKeepsAnIndexedHoleOfAnySize(t *testing.T) {
+	t.Parallel()
+
+	const (
+		bs   = 512
+		size = int64(1<<28) * bs
+	)
+
+	src := blockSizedSource{
+		dataRangerFS: &dataRangerFS{
+			deviceBlocks: 16,
+			file: &dataRangerFileInfo{
+				name:   "f",
+				size:   size,
+				ranges: []erofs.DataRange{{Offset: -1, Size: size}},
+			},
+		},
+		bs: bs,
+	}
+	holed := &testBuffer{}
+	w := erofs.Create(holed, erofs.WithBlockSize(bs), erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if err := errors.Join(w.CopyFrom(src, erofs.MetadataOnly()), w.Close()); err != nil {
+		t.Fatalf("the source: %v", err)
+	}
+
+	device := make([]byte, 16*bs)
+	source := corpus.Image{Name: "holed", Img: holed.Bytes(), Blob: device}
+
+	for _, variant := range []struct{ metadataOnly, wrapped bool }{
+		{false, false}, {true, false}, {false, true}, {true, true},
+	} {
+		name := copyMode(variant.metadataOnly)
+		if variant.wrapped {
+			name += "-wrapped"
+		}
+
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			from := openImage(t, source)
+			if variant.wrapped {
+				from = struct{ fs.FS }{from}
+			}
+
+			im, err := copyOpened(from, variant.metadataOnly, source.Img, source.Extra())
+			if err != nil {
+				t.Fatalf("the copy: %v", err)
+			}
+
+			// The walk registers no device for a source that names none.
+			if variant.wrapped {
+				im.Devices = nil
+			}
+
+			ref := parseImage(t, im)
+
+			in, err := ref.Resolve("f", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			extents, err := ref.Extents(in)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if in.Size != size || len(extents) != 1 || !extents[0].Hole || extents[0].Length != size {
+				t.Errorf("a file of %d bytes mapped %+v, want one hole of %d", in.Size, extents, size)
+			}
+
+			// Two blocks of 4096, the size a wrapper's copy defaults to.
+			if len(im.Img) > 2*4096 {
+				t.Errorf("the copy is %d bytes", len(im.Img))
+			}
+
+			if verr := corpus.FsckVerdict(t, im); verr != nil {
+				t.Fatal(verr)
+			}
+		})
+	}
+}
+
+// TestContractCopyKeepsARunPastWhatAChunkCounts: a run of more blocks than
+// the 32 bits a chunk counts them in is several chunks, and what follows it
+// stays where it is. A hole that long and then one block of data, in the
+// source and in its copies, with its data and metadata-only: the hole is
+// all there, and the block is the device's, at the hole's end.
+func TestContractCopyKeepsARunPastWhatAChunkCounts(t *testing.T) {
+	t.Parallel()
+
+	const bs = 512
+
+	device := make([]byte, 16*bs)
+	for i := range device {
+		device[i] = byte(i ^ i>>9 ^ 0x71)
+	}
+
+	for _, blocks := range []int64{1 << 32, 3 << 31, 1 << 33} {
+		t.Run(fmt.Sprintf("a hole of %d blocks", blocks), func(t *testing.T) {
+			t.Parallel()
+
+			hole := blocks * bs
+
+			src := blockSizedSource{
+				dataRangerFS: &dataRangerFS{
+					deviceBlocks: 16,
+					file: &dataRangerFileInfo{
+						name:   "f",
+						size:   hole + bs,
+						ranges: []erofs.DataRange{{Offset: -1, Size: hole}, {Offset: 4 * bs, Size: bs}},
+					},
+				},
+				bs: bs,
+			}
+			holed := &testBuffer{}
+			w := erofs.Create(holed, erofs.WithBlockSize(bs), erofs.WithBuildTime(corpus.BuildTime, 0))
+
+			if err := errors.Join(w.CopyFrom(src, erofs.MetadataOnly()), w.Close()); err != nil {
+				t.Fatalf("the source: %v", err)
+			}
+
+			source := corpus.Image{Name: "the source", Img: holed.Bytes(), Blob: device}
+			images := []corpus.Image{source}
+
+			for _, metadataOnly := range []bool{false, true} {
+				im, err := copyOpened(openImage(t, source), metadataOnly, source.Img, source.Extra())
+				if err != nil {
+					t.Fatalf("the copy, %s: %v", copyMode(metadataOnly), err)
+				}
+
+				im.Name = "the copy, " + copyMode(metadataOnly)
+				images = append(images, im)
+			}
+
+			for _, im := range images {
+				ref := parseImage(t, im)
+
+				in, err := ref.Resolve("f", 0)
+				if err != nil {
+					t.Fatalf("%s: %v", im.Name, err)
+				}
+
+				extents, err := ref.Extents(in)
+				if err != nil {
+					t.Fatalf("%s: %v", im.Name, err)
+				}
+
+				var holes, data int64
+
+				for _, e := range extents {
+					if e.Hole {
+						holes += e.Length
+					} else {
+						data += e.Length
+					}
+				}
+
+				if in.Size != hole+bs || holes != hole || data != bs {
+					t.Errorf("%s: %d bytes, %d of hole and %d of data; want %d of hole and %d of data",
+						im.Name, in.Size, holes, data, hole, bs)
+				}
+
+				if got, rerr := ref.ReadAt(in, hole, bs); rerr != nil || !bytes.Equal(got, device[4*bs:5*bs]) {
+					t.Errorf("%s: the block after the hole is not the device's (%d bytes, %v)", im.Name, len(got), rerr)
+				}
+
+				if verr := corpus.FsckVerdict(t, im); verr != nil {
+					t.Fatalf("%s: %v", im.Name, verr)
+				}
+			}
+		})
+	}
+}
+
+// eofAtEnd is a data file whose ReadAt reports io.EOF along with a read
+// that ends where the file does, as an io.ReaderAt may.
+type eofAtEnd struct{ *os.File }
+
+func (f eofAtEnd) ReadAt(p []byte, off int64) (int, error) {
+	n, err := f.File.ReadAt(p, off)
+	if err != nil {
+		return n, err
+	}
+
+	if st, serr := f.Stat(); serr == nil && off+int64(n) == st.Size() {
+		return n, io.EOF
+	}
+
+	return n, nil
+}
+
+var errUnreadable = errors.New("the data file cannot be read")
+
+// unreadable is a data file that takes writes and refuses reads.
+type unreadable struct{ *os.File }
+
+func (unreadable) ReadAt([]byte, int64) (int, error) { return 0, errUnreadable }
+
+// TestContractWriterReadsAHoledFileBackFromItsDataFile: before Close the
+// Writer reads a file stored in the data file without its holes from the
+// blocks its chunks name. A data file that says io.EOF with the read that
+// reaches its end has delivered that read, and one that fails a read fails
+// the Writer's, with its own error.
+func TestContractWriterReadsAHoledFileBackFromItsDataFile(t *testing.T) {
+	t.Parallel()
+
+	const bs = 4096
+
+	device := make([]byte, 16*bs)
+	for i := range device {
+		device[i] = byte(i ^ i>>12 ^ 0x2d)
+	}
+
+	src := &dataRangerFS{
+		deviceBlocks: 16,
+		file: &dataRangerFileInfo{
+			name: "f",
+			size: 14 * bs,
+			// The file ends in a hole: its last data is the data file's
+			// last, and there is more of the file to read after it.
+			ranges: []erofs.DataRange{
+				{Offset: 4 * bs, Size: 4 * bs},
+				{Offset: -1, Size: 4 * bs},
+				{Offset: 12 * bs, Size: 4 * bs},
+				{Offset: -1, Size: 2 * bs},
+			},
+		},
+	}
+	holed := &testBuffer{}
+	w := erofs.Create(holed, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+	if err := errors.Join(w.CopyFrom(src, erofs.MetadataOnly()), w.Close()); err != nil {
+		t.Fatalf("the source: %v", err)
+	}
+
+	want := slices.Concat(device[4*bs:8*bs], make([]byte, 4*bs), device[12*bs:16*bs], make([]byte, 2*bs))
+
+	for _, tc := range []struct {
+		name string
+		file func(*os.File) erofs.DataFile
+		want error
+	}{
+		{"io.EOF with its last read", func(f *os.File) erofs.DataFile { return eofAtEnd{f} }, nil},
+		{"a read that fails", func(f *os.File) erofs.DataFile { return unreadable{f} }, errUnreadable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			df, err := os.Create(filepath.Join(t.TempDir(), "data.bin"))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			t.Cleanup(func() { _ = df.Close() })
+
+			source := openImage(t, corpus.Image{Name: "holed", Img: holed.Bytes(), Blob: device})
+			w := erofs.Create(&testBuffer{}, erofs.WithDataFile(tc.file(df)), erofs.WithBuildTime(corpus.BuildTime, 0))
+
+			if cerr := w.CopyFrom(source); cerr != nil {
+				t.Fatalf("the copy: %v", cerr)
+			}
+
+			back, err := w.Open("f")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got := bytes.Repeat([]byte{0xff}, len(want))
+
+			n, err := io.ReadFull(back, got)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("reading the file back: %d bytes, %v; want %v", n, err, tc.want)
+			}
+
+			if tc.want == nil && !bytes.Equal(got, want) {
+				t.Error("the Writer does not read the file back")
+			}
+		})
+	}
+}
+
 // TestContractMetadataOnlyCopyOfAChunkOnTheSourceImageItself: a source
 // whose chunk names device 0, the source image's own blocks, copied
 // metadata-only into a writer with its own data file: the copy's devices
@@ -1906,21 +2820,31 @@ func TestContractMetadataOnlyCopyOfAChunkOnTheSourceImageItself(t *testing.T) {
 	}
 }
 
-// chunkMapSourceFS is a source of one 4096-byte regular file whose chunk map
-// is supplied verbatim, for a mapping the public API would not build.
+// chunkMapSourceFS is a source of one regular file, of 4096 bytes unless
+// size says otherwise, whose chunk map is supplied verbatim, for a mapping
+// the public API would not build.
 type chunkMapSourceFS struct {
 	name   string
+	size   int64
 	chunks []builder.Chunk
 }
 
 type chunkMapSourceInfo struct {
 	name   string
 	dir    bool
+	size   int64
 	chunks []builder.Chunk
 }
 
 func (i chunkMapSourceInfo) Name() string { return i.name }
-func (chunkMapSourceInfo) Size() int64    { return 4096 }
+
+func (i chunkMapSourceInfo) Size() int64 {
+	if i.size == 0 {
+		return 4096
+	}
+
+	return i.size
+}
 
 func (i chunkMapSourceInfo) Mode() fs.FileMode {
 	if i.dir {
@@ -1958,7 +2882,9 @@ func (chunkMapSourceDir) Stat() (fs.FileInfo, error) {
 }
 
 func (d chunkMapSourceDir) ReadDir(int) ([]fs.DirEntry, error) {
-	return []fs.DirEntry{chunkMapSourceDirent{chunkMapSourceInfo{name: d.fsys.name, chunks: d.fsys.chunks}}}, nil
+	return []fs.DirEntry{chunkMapSourceDirent{chunkMapSourceInfo{
+		name: d.fsys.name, size: d.fsys.size, chunks: d.fsys.chunks,
+	}}}, nil
 }
 
 func (fsys chunkMapSourceFS) Open(name string) (fs.File, error) {

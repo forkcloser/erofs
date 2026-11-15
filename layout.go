@@ -104,6 +104,8 @@ func (w *erofsWriter) planLayout(root *erofsEntry) {
 				e.layout = disk.LayoutChunkBased
 				if e.contiguous {
 					e.chunkBits = w.minChunkBits(e.size)
+				} else {
+					e.chunkBits = w.runChunkBits(e)
 				}
 			default:
 				// Full-image mode: decide inline vs plain, unless the image
