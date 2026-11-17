@@ -2099,17 +2099,21 @@ func (b *file) readInfo() (ino *inode, err error) {
 		}
 	}()
 
-	buf := blk.bytes()
-	// A compact inode needs only 32 bytes; the buffer is sized for an extended
-	// inode (64) because the layout is unknown until the format word is read. An
-	// inode living in the final bytes of the image therefore yields a short read
-	// that must not be fatal, exactly as loadAt tolerates for other structures.
-	n, err := b.img.meta.ReadAt(buf, addr)
+	// span is the inode's block from the inode on, and only the inode is
+	// read into it: a block is up to 64 KiB and a resolution reads thousands
+	// of inodes, so reading each one's block is gigabytes read from an image
+	// of kilobytes. A compact inode needs only 32 bytes; 64 are read
+	// because the layout is unknown until the format word is. An inode living
+	// in the final bytes of the image therefore yields a short read that must
+	// not be fatal, exactly as loadAt tolerates for other structures.
+	span := blk.bytes()
+
+	n, err := b.img.meta.ReadAt(span[:disk.SizeInodeExtended], addr)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
 
-	buf = buf[:n]
+	buf := span[:n]
 
 	if len(buf) < disk.SizeInodeCompact {
 		return nil, fmt.Errorf("inode %d truncated: %w", b.nid, ErrCorrupt)
@@ -2163,7 +2167,7 @@ func (b *file) readInfo() (ino *inode, err error) {
 			b.nid, size, b.img.size, ErrCorrupt)
 	}
 
-	if err := b.finishInfo(buf, xcnt); err != nil {
+	if err := b.finishInfo(span, n, addr, xcnt); err != nil {
 		b.info = nil
 
 		return nil, err
@@ -2172,12 +2176,10 @@ func (b *file) readInfo() (ino *inode, err error) {
 	return b.info, nil
 }
 
-// finishInfo sizes the inode's xattr body and judges a fast symlink's
-// inline target with its inode, as the kernel's erofs_fill_symlink does
-// (!i_size || strlen(link) != i_size), so no Stat, ReadDir or Open serves
-// an inode whose target is empty or holds a NUL. buf is the inode's block
-// from the inode on; a target running past it is refused where it is read.
-func (b *file) finishInfo(buf []byte, xcnt uint16) error {
+// finishInfo sizes the inode's xattr body and judges what the kernel judges
+// with the inode: its chunk format, and a fast symlink's target, which
+// span, n and addr are for (checkFastSymlink).
+func (b *file) finishInfo(span []byte, n int, addr int64, xcnt uint16) error {
 	ino := b.info
 
 	if xcnt > 0 {
@@ -2193,6 +2195,18 @@ func (b *file) finishInfo(buf []byte, xcnt uint16) error {
 		return err
 	}
 
+	return b.checkFastSymlink(span, n, addr)
+}
+
+// checkFastSymlink judges a fast symlink's inline target with its inode, as
+// the kernel's erofs_fill_symlink does (!i_size || strlen(link) != i_size),
+// so no Stat, ReadDir or Open serves an inode whose target is empty or
+// holds a NUL. span is the inode's block from the inode on, at addr, its
+// first n bytes read; a target is the one thing read into the rest of it,
+// and one running past it is refused where it is read.
+func (b *file) checkFastSymlink(span []byte, n int, addr int64) error {
+	ino := b.info
+
 	if ino.mode&fs.ModeSymlink == 0 || ino.inodeLayout != disk.LayoutFlatInline || ino.size < 0 {
 		return nil
 	}
@@ -2202,7 +2216,31 @@ func (b *file) finishInfo(buf []byte, xcnt uint16) error {
 	}
 
 	start := int64(ino.icsize) + int64(ino.xsize)
-	if end := start + ino.size; end <= int64(len(buf)) && bytes.IndexByte(buf[start:end], 0) >= 0 {
+
+	end := start + ino.size
+	if end < start {
+		return fmt.Errorf("inode %d: invalid fast symlink size %d: %w", b.nid, ino.size, ErrCorrupt)
+	}
+
+	if end > int64(len(span)) {
+		return nil
+	}
+
+	// What of the target the inode's read did not bring. An image that ends
+	// inside the target leaves it to the read of the link, as a target past
+	// the block is.
+	if from := max(start, int64(n)); from < end {
+		got, err := b.img.meta.ReadAt(span[from:end], addr+from)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+
+		if int64(got) < end-from {
+			return nil
+		}
+	}
+
+	if bytes.IndexByte(span[start:end], 0) >= 0 {
 		return fmt.Errorf("inode %d: invalid fast symlink target: %w", b.nid, ErrCorrupt)
 	}
 

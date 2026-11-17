@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"runtime"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -76,31 +77,33 @@ func (s *laidImage) whole() []byte {
 
 // The format's values the laid images are made of.
 const (
+	laidFlatPlain  = 0
 	laidFlatInline = 2
 	laidChunked    = 4
 
-	laidReg = 0o100644
-	laidDir = 0o040755
+	laidReg  = 0o100644
+	laidDir  = 0o040755
+	laidLink = 0o120777
 
-	laidFtReg = 1
-	laidFtDir = 2
+	laidFtReg  = 1
+	laidFtDir  = 2
+	laidFtLink = 7
 
 	// laidIndexes is the chunk format's bit for eight-byte indexes; without
 	// it the map is a four-byte block address a chunk.
 	laidIndexes = 0x20
 )
 
-// laidSuper writes a superblock without checksum at byte 1024 of head: block
-// size bits, block count, the metadata's and the shared xattrs' first block,
-// the root's nid, and the chunked-file feature.
-func laidSuper(head []byte, blkBits uint8, blocks, metaBlk uint32, rootNid uint16) {
+// laidSuper writes a superblock without checksum at byte 1024 of head: the
+// block size bits and the block count, the metadata starting at block 1
+// with the root at nid 0, and the chunked-file feature.
+func laidSuper(head []byte, blkBits uint8, blocks uint32) {
 	sb := head[1024:]
 	binary.LittleEndian.PutUint32(sb[0:], 0xe0f5e1e2)
 	sb[12] = blkBits
-	binary.LittleEndian.PutUint16(sb[14:], rootNid)
 	binary.LittleEndian.PutUint64(sb[16:], 1) // inos
 	binary.LittleEndian.PutUint32(sb[36:], blocks)
-	binary.LittleEndian.PutUint32(sb[40:], metaBlk)
+	binary.LittleEndian.PutUint32(sb[40:], 1)   // meta_blkaddr
 	binary.LittleEndian.PutUint32(sb[80:], 0x4) // INCOMPAT_CHUNKED_FILE
 }
 
@@ -179,7 +182,7 @@ func laidChunkedRoot(blocks int64) *laidImage {
 	laidExtended(head[bs:], laidChunked, laidDir, uint64(blocks)*bs, 0, 2)
 
 	size := (bs + 64 + blocks*4 + bs - 1) / bs * bs
-	laidSuper(head, 12, uint32(size/bs), 1, 0)
+	laidSuper(head, 12, uint32(size/bs))
 
 	return &laidImage{head: head, size: size}
 }
@@ -307,7 +310,7 @@ func laidChunkedFile(chunks int64, format uint32) *laidImage {
 	}
 
 	size := (laidMapOff + chunks*unit + bs - 1) / bs * bs
-	laidSuper(head, 12, uint32(size/bs), 1, 0)
+	laidSuper(head, 12, uint32(size/bs))
 
 	return &laidImage{head: head, size: size}
 }
@@ -524,7 +527,7 @@ func TestContractReaderReadStopsAtTheFirstChunkOutOfRun(t *testing.T) {
 	copy(src.head[start*4096:], mark)
 
 	src.size = (start + run) * 4096
-	laidSuper(src.head, 12, start+run, 1, 0)
+	laidSuper(src.head, 12, start+run)
 
 	if fsys, err = erofs.Open(src); err != nil {
 		t.Fatal(err)
@@ -550,4 +553,72 @@ func TestContractReaderReadStopsAtTheFirstChunkOutOfRun(t *testing.T) {
 	}
 
 	_ = f.Close()
+}
+
+// laidLinkLoop is an image of blocks of 1<<blkBits bytes whose root holds a
+// directory "a", which lists itself as "a", and a symlink "l" to target,
+// listed in the root and in "a": a target through "a" that ends in "l"
+// comes back to the link at every hop. Each inode starts a block: the root
+// in block 1, "a" in block 2, the link in block 3, its target in block 4.
+func laidLinkLoop(blkBits uint8, target string) *laidImage {
+	bs := 1 << blkBits
+	slots := uint64(bs / 32)
+
+	head := make([]byte, 4*bs+len(target))
+
+	ents := func(self uint64) []byte {
+		return laidDirBlock([]laidDirent{
+			{self, laidFtDir, "."}, {0, laidFtDir, ".."}, {slots, laidFtDir, "a"}, {2 * slots, laidFtLink, "l"},
+		})
+	}
+
+	root, a := ents(0), ents(slots)
+
+	laidCompact(head[bs:], laidFlatInline, laidDir, 3, uint32(len(root)), 0)
+	copy(head[bs+32:], root)
+
+	laidCompact(head[2*bs:], laidFlatInline, laidDir, 3, uint32(len(a)), 0)
+	copy(head[2*bs+32:], a)
+
+	laidCompact(head[3*bs:], laidFlatPlain, laidLink, 1, uint32(len(target)), 4)
+	copy(head[4*bs:], target)
+
+	laidSuper(head, blkBits, 5)
+
+	return &laidImage{head: head, size: int64(5 * bs)}
+}
+
+// TestContractReaderResolutionReadsInodesNotTheirBlocks: an inode is read
+// as the 64 bytes it is at most, never with the rest of its block, so what
+// a resolution reads does not grow with the block size. One Open at the
+// resolution's limit, 255 hops of 2047 components each, over an image of
+// 64 KiB blocks where every inode starts one, reads under 128 bytes a
+// component, an inode and its directory's four entries, and under two pages
+// a hop for the link and its target: 59 MiB in all, where reading each
+// inode's block is 32 GiB.
+func TestContractReaderResolutionReadsInodesNotTheirBlocks(t *testing.T) {
+	t.Parallel()
+
+	const (
+		hops       = 255
+		components = 2047
+		budget     = hops*components*128 + hops*2*4096
+	)
+
+	src := laidLinkLoop(16, strings.Repeat("/a", components-1)+"/l")
+
+	fsys, err := erofs.Open(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	src.bytes = 0
+
+	if _, err = fsys.Open("l"); !errors.Is(err, erofs.ErrLoop) {
+		t.Fatalf("Open of a link that leads to itself: %v; want ErrLoop", err)
+	}
+
+	if src.bytes > budget {
+		t.Errorf("one Open read %d bytes from a %d byte image; want under %d", src.bytes, src.size, budget)
+	}
 }
