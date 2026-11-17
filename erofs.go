@@ -2105,6 +2105,18 @@ func (b *file) readInfo() (ino *inode, err error) {
 			b.nid, inoType, b.ftype, ErrCorrupt)
 	}
 
+	// A directory is the exception to the size left open above: its entries
+	// are the image's own bytes. A chunk map may name one block for every
+	// chunk, so past the image's extent four bytes of map are one more block
+	// of entries for ReadDir to hold, and nothing in the image backs them.
+	if b.info.mode.IsDir() && b.img.size > 0 && b.info.size > b.img.size {
+		size := b.info.size
+		b.info = nil
+
+		return nil, fmt.Errorf("directory inode %d declares %d bytes, larger than the %d byte image: %w",
+			b.nid, size, b.img.size, ErrCorrupt)
+	}
+
 	if err := b.finishInfo(buf, xcnt); err != nil {
 		b.info = nil
 
