@@ -1,12 +1,14 @@
 package erofs_test
 
 // What an image can make the reader hold, read or walk, each clause held by
-// a measure: bytes allocated, bytes read, reads made. Every image
-// here is laid out by hand from the format's definitions, a few kilobytes
-// that are not zero, since no writer emits what these clauses refuse; the
-// rest of an image reads as zeros, as a sparse file's does.
+// a measure: bytes allocated, bytes read, reads made. But for the chains of
+// links, which the Writer makes, every image here is laid out by hand from
+// the format's definitions, a few kilobytes that are not zero, since no
+// writer emits what these clauses refuse; the rest of an image reads as
+// zeros, as a sparse file's does.
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -33,6 +35,8 @@ type laidImage struct {
 	size  int64
 	calls int64
 	bytes int64
+	// at counts the reads that start at each of the offsets it holds.
+	at map[int64]int64
 }
 
 func (s *laidImage) Size() int64 { return s.size }
@@ -59,6 +63,10 @@ func (s *laidImage) ReadAt(p []byte, off int64) (int, error) {
 
 	s.calls++
 	s.bytes += int64(n)
+
+	if _, counted := s.at[off]; counted {
+		s.at[off]++
+	}
 
 	if n < len(p) {
 		return n, io.EOF
@@ -673,6 +681,116 @@ func TestContractReaderReadFileLimit(t *testing.T) {
 			"ReadFile of a file of %d bytes whose data is past the image: %v; want ErrCorrupt, the limit letting it through",
 			limit,
 			err,
+		)
+	}
+}
+
+// TestContractReaderResolveFollows255Links: a resolution follows 255
+// symlinks and no more. A chain of 255 links to a file opens the file; a
+// chain of 256 is ErrLoop.
+func TestContractReaderResolveFollows255Links(t *testing.T) {
+	t.Parallel()
+
+	chain := func(links int) fs.FS {
+		img := buildImage(t, func(w *erofs.Writer) {
+			writeFile(t, w, "/f", []byte("the end"))
+
+			for i := range links {
+				target := "f"
+				if i < links-1 {
+					target = fmt.Sprintf("l%d", i+1)
+				}
+
+				if err := w.Symlink(target, fmt.Sprintf("/l%d", i)); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+
+		fsys, err := erofs.Open(bytes.NewReader(img))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return fsys
+	}
+
+	if data, err := fs.ReadFile(chain(255), "l0"); err != nil || string(data) != "the end" {
+		t.Errorf("a file behind 255 links: %q, %v; want it read", data, err)
+	}
+
+	if _, err := fs.ReadFile(chain(256), "l0"); !errors.Is(err, erofs.ErrLoop) {
+		t.Errorf("a file behind 256 links: %v; want ErrLoop", err)
+	}
+}
+
+// TestContractReaderResolveHoldsEveryHopToThePathLimit: the path a symlink
+// composes is held to 4096 bytes at every hop, and a longer one is
+// ErrInvalid, which is not ErrLoop. A relative target of 1001 bytes that
+// comes back to its link through a directory listing itself adds 1000
+// bytes to the path at each hop, so the fifth path is refused: the
+// resolution is four walks, of 501, 1001, 1501 and 2001 names, not the
+// 255 hops of an ever longer path the hop count alone would allow.
+func TestContractReaderResolveHoldsEveryHopToThePathLimit(t *testing.T) {
+	t.Parallel()
+
+	// Two reads a name, its directory's inode and entries, and at each hop
+	// the link's inode and target.
+	const budget = 2*(1+501+1001+1501+2001) + 2*5
+
+	src := laidLinkLoop(12, strings.Repeat("a/", 500)+"l")
+
+	fsys, err := erofs.Open(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	src.calls = 0
+
+	_, err = fsys.Open("l")
+	if !errors.Is(err, erofs.ErrInvalid) || errors.Is(err, erofs.ErrLoop) {
+		t.Errorf("Open of a link whose path grows at each hop: %v; want ErrInvalid for the path, not ErrLoop", err)
+	}
+
+	if src.calls > budget {
+		t.Errorf("Open made %d reads before refusing the path; want at most %d", src.calls, budget)
+	}
+}
+
+// TestContractReaderResolveLooksUpAtMost255Paths: one resolution looks up
+// at most 255 times 2048 names in all, 255 hops of the longest path there
+// is, the walk of the name it was given included. A name of 2048 components
+// ending in a link back to the same 2048 components reaches that budget one
+// path before it has followed its 256th link, and is ErrLoop there. Each
+// name looked up is one read of its directory's inode, the root's or
+// "a"'s, which is what is counted.
+func TestContractReaderResolveLooksUpAtMost255Paths(t *testing.T) {
+	t.Parallel()
+
+	const budget = 255 * 2048
+
+	name := strings.Repeat("a/", 2047) + "l"
+	src := laidLinkLoop(12, "/"+name)
+
+	fsys, err := erofs.Open(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The root's inode and "a"'s, each at the start of its block.
+	src.at = map[int64]int64{4096: 0, 2 * 4096: 0}
+
+	if _, err = fsys.Open(name); !errors.Is(err, erofs.ErrLoop) {
+		t.Fatalf("Open of a link that leads to itself: %v; want ErrLoop", err)
+	}
+
+	if lookups := src.at[4096] + src.at[2*4096]; lookups > budget {
+		t.Errorf("one Open looked up %d names; want at most %d", lookups, budget)
+	} else if lookups < budget-2048 {
+		t.Errorf(
+			"one Open looked up %d names: the walk ended a path before its budget of %d, by another bound",
+			lookups,
+			budget,
 		)
 	}
 }
