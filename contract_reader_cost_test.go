@@ -13,6 +13,8 @@ import (
 	"io"
 	"io/fs"
 	"runtime"
+	"slices"
+	"sync/atomic"
 	"testing"
 
 	"github.com/forkcloser/erofs"
@@ -24,10 +26,12 @@ var errLaidOffset = errors.New("laidImage: negative offset")
 
 // laidImage is an image as a sparse file holds it: head is every byte that
 // is not zero, and the rest up to size reads as zeros. It reports its
-// length, as *os.File and *bytes.Reader do.
+// length, as *os.File and *bytes.Reader do, and counts what is read from it.
 type laidImage struct {
-	head []byte
-	size int64
+	head  []byte
+	size  int64
+	calls int64
+	bytes int64
 }
 
 func (s *laidImage) Size() int64 { return s.size }
@@ -52,6 +56,9 @@ func (s *laidImage) ReadAt(p []byte, off int64) (int, error) {
 		copy(p[:n], s.head[off:])
 	}
 
+	s.calls++
+	s.bytes += int64(n)
+
 	if n < len(p) {
 		return n, io.EOF
 	}
@@ -69,11 +76,18 @@ func (s *laidImage) whole() []byte {
 
 // The format's values the laid images are made of.
 const (
-	laidChunked = 4
+	laidFlatInline = 2
+	laidChunked    = 4
 
+	laidReg = 0o100644
 	laidDir = 0o040755
 
 	laidFtReg = 1
+	laidFtDir = 2
+
+	// laidIndexes is the chunk format's bit for eight-byte indexes; without
+	// it the map is a four-byte block address a chunk.
+	laidIndexes = 0x20
 )
 
 // laidSuper writes a superblock without checksum at byte 1024 of head: block
@@ -88,6 +102,16 @@ func laidSuper(head []byte, blkBits uint8, blocks, metaBlk uint32, rootNid uint1
 	binary.LittleEndian.PutUint32(sb[36:], blocks)
 	binary.LittleEndian.PutUint32(sb[40:], metaBlk)
 	binary.LittleEndian.PutUint32(sb[80:], 0x4) // INCOMPAT_CHUNKED_FILE
+}
+
+// laidCompact writes a 32-byte compact inode: its layout, mode, i_nb (the
+// link count), size and i_u.
+func laidCompact(dst []byte, layout uint8, mode, nb uint16, size, iu uint32) {
+	binary.LittleEndian.PutUint16(dst[0:], uint16(layout)<<1)
+	binary.LittleEndian.PutUint16(dst[4:], mode)
+	binary.LittleEndian.PutUint16(dst[6:], nb)
+	binary.LittleEndian.PutUint32(dst[8:], size)
+	binary.LittleEndian.PutUint32(dst[16:], iu)
 }
 
 // laidExtended writes a 64-byte extended inode: its layout, mode, size, i_u
@@ -256,4 +280,274 @@ func TestContractReaderDirectoryIsHeldToItsImage(t *testing.T) {
 	if listed, err := ref.Dirents(root); err != nil || len(listed) != 3*60 {
 		t.Errorf("the reference on the directory one block over: %d entries, %v; want %d", len(listed), err, 3*60)
 	}
+}
+
+// laidChunkedFile is an image of 4 KiB blocks whose root holds one
+// chunk-based regular file "f" of chunks chunks, one block each. Its map
+// starts at byte laidMapOff of the image, right after its inode, and is the
+// zeros there: every chunk is block 0. format is the chunk format: 0 for a
+// block map, four bytes a chunk, laidIndexes for indexes, eight. The image
+// declares the map, as a sparse file would hold it.
+func laidChunkedFile(chunks int64, format uint32) *laidImage {
+	const bs = 4096
+
+	head := make([]byte, laidMapOff)
+
+	// Root at nid 0: an inline directory of ".", ".." and "f".
+	root := laidDirBlock([]laidDirent{{0, laidFtDir, "."}, {0, laidFtDir, ".."}, {3, laidFtReg, "f"}})
+	laidCompact(head[bs:], laidFlatInline, laidDir, 2, uint32(len(root)), 0)
+	copy(head[bs+32:], root)
+
+	// "f" at nid 3: an extended inode, its map right after it.
+	laidExtended(head[bs+96:], laidChunked, laidReg, uint64(chunks)*bs, format, 1)
+
+	unit := int64(4)
+	if format&laidIndexes != 0 {
+		unit = 8
+	}
+
+	size := (laidMapOff + chunks*unit + bs - 1) / bs * bs
+	laidSuper(head, 12, uint32(size/bs), 1, 0)
+
+	return &laidImage{head: head, size: size}
+}
+
+// laidMapOff is where the chunk map of laidChunkedFile's "f" starts: the
+// superblock's block, the root and its entries, then the file's inode.
+const laidMapOff = 4096 + 96 + 64
+
+// TestContractReaderStatHoldsNothingOfAChunkMap: Stat of a chunk-based file
+// judges every chunk of its map and holds none of it: what it allocates
+// does not grow with the map. DataRange, asked, then builds the ranges, one
+// a chunk here since no two follow each other, and allocates them once, at
+// their size. The map is a megabyte of zeros; a Stat that reads it whole
+// and builds its ranges to judge them allocates 35 MiB for it, and DataRange
+// as much again.
+//
+//nolint:paralleltest // measures the process's allocations against a budget; a parallel test's would count against it
+func TestContractReaderStatHoldsNothingOfAChunkMap(t *testing.T) {
+	const (
+		chunks = 1 << 18 // a block map of 1 MiB
+		budget = 128 << 10
+	)
+
+	src := laidChunkedFile(chunks, 0)
+
+	fsys, err := erofs.Open(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	src.bytes = 0
+	before := allocatedSoFar()
+
+	info, err := fs.Stat(fsys, "f")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if allocated := allocatedSoFar() - before; allocated > budget {
+		t.Errorf(
+			"Stat of a file with a %d byte chunk map allocated %d bytes; want under %d",
+			chunks*4,
+			allocated,
+			budget,
+		)
+	}
+
+	// Every chunk was judged: the whole map was read.
+	if src.bytes < chunks*4 {
+		t.Errorf("Stat read %d bytes of a %d byte chunk map", src.bytes, chunks*4)
+	}
+
+	before = allocatedSoFar()
+
+	ranges := info.(interface{ DataRange() []erofs.DataRange }).DataRange()
+
+	// A DataRange is 24 bytes.
+	if allocated := allocatedSoFar() - before; allocated > chunks*24+budget {
+		t.Errorf("DataRange allocated %d bytes for %d ranges of 24 bytes", allocated, len(ranges))
+	}
+
+	if len(ranges) != chunks {
+		t.Fatalf("DataRange: %d ranges; want one for each of the %d chunks", len(ranges), chunks)
+	}
+
+	for i, r := range ranges {
+		if r != (erofs.DataRange{Offset: 0, Size: 4096}) {
+			t.Fatalf("DataRange: range %d is %+v; want block 0", i, r)
+		}
+	}
+
+	// A chunk past the image is still refused at Stat, wherever it is in
+	// the map: here the last one, in the map's last piece.
+	bad := &laidImage{head: slices.Concat(src.head, make([]byte, chunks*4)), size: src.size}
+	binary.LittleEndian.PutUint32(bad.head[laidMapOff+(chunks-1)*4:], uint32(src.size/4096))
+
+	fsys, err = erofs.Open(bad)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err = fs.Stat(fsys, "f"); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Errorf("Stat of a file whose last chunk is past the image: %v; want ErrCorrupt", err)
+	}
+}
+
+// TestContractReaderAcceptsEOFOnAFullChunkMapRead: a read of a chunk map
+// that ends exactly at the image's last byte may come back as (len(p),
+// io.EOF), as a block read may, and the file is served. The map of 984
+// chunks here ends with the image's second block.
+func TestContractReaderAcceptsEOFOnAFullChunkMapRead(t *testing.T) {
+	t.Parallel()
+
+	const chunks = (2*4096 - laidMapOff) / 4
+
+	var atEnd atomic.Int64
+
+	fsys, err := erofs.Open(eofReaderAt{data: laidChunkedFile(chunks, 0).whole(), atEnd: &atEnd})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	atEnd.Store(0)
+
+	info, err := fs.Stat(fsys, "f")
+	if err != nil {
+		t.Fatalf("Stat of a file whose chunk map ends with the image: %v", err)
+	}
+
+	if atEnd.Load() == 0 {
+		t.Fatal("no read ended at the image's last byte; the case was not met")
+	}
+
+	if ranges := info.(interface{ DataRange() []erofs.DataRange }).DataRange(); len(ranges) != chunks {
+		t.Errorf("DataRange: %d ranges; want %d", len(ranges), chunks)
+	}
+}
+
+// TestContractReaderStatAllocatesNothingForAnAbsentChunkMap: behind a
+// reader that reports no length the image's extent is the superblock's
+// word, and a chunk map the superblock's extent holds but the reader does
+// not is refused at Stat without a buffer of its size: the source here ends
+// after the inode's block and declares a map of 64 MiB, the most a file may
+// have.
+//
+//nolint:paralleltest // measures the process's allocations against a budget; a parallel test's would count against it
+func TestContractReaderStatAllocatesNothingForAnAbsentChunkMap(t *testing.T) {
+	const (
+		chunks = 16 << 20 // a block map of 64 MiB
+		budget = 128 << 10
+	)
+
+	src := laidChunkedFile(chunks, 0)
+	src.size = 2 * 4096
+
+	fsys, err := erofs.Open(readAtOnly{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	before := allocatedSoFar()
+
+	if _, err := fs.Stat(fsys, "f"); err == nil {
+		t.Error("Stat served a file whose chunk map is not in the source")
+	}
+
+	if allocated := allocatedSoFar() - before; allocated > budget {
+		t.Errorf("Stat allocated %d bytes for a chunk map the source does not hold; want under %d", allocated, budget)
+	}
+}
+
+// TestContractReaderReadStopsAtTheFirstChunkOutOfRun: the first Read of a
+// file with chunk indexes learns whether the file is one run on its device,
+// to read it in one go, and stops at the first chunk that does not follow:
+// one byte of a file whose megabyte of indexes all name block 0 costs a
+// piece of the index, not the index. A file that is one run is still read
+// in one go, however long its index.
+//
+//nolint:paralleltest // measures the process's allocations against a budget; a parallel test's would count against it
+func TestContractReaderReadStopsAtTheFirstChunkOutOfRun(t *testing.T) {
+	const (
+		chunks = 1 << 17 // 1 MiB of indexes
+		budget = 128 << 10
+	)
+
+	src := laidChunkedFile(chunks, laidIndexes)
+
+	fsys, err := erofs.Open(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := fsys.Open("f")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	src.bytes = 0
+	before := allocatedSoFar()
+
+	var one [1]byte
+	if _, err = io.ReadFull(f, one[:]); err != nil {
+		t.Fatal(err)
+	}
+
+	if allocated := allocatedSoFar() - before; allocated > budget || src.bytes > budget {
+		t.Errorf(
+			"Read of one byte of a file with %d bytes of indexes allocated %d bytes and read %d; want each under %d",
+			chunks*8,
+			allocated,
+			src.bytes,
+			budget,
+		)
+	}
+
+	_ = f.Close()
+
+	// One run of 16384 chunks from block 34, the first after its index: the
+	// index is two pieces, and the file's first bytes are in the image's
+	// head.
+	const (
+		run   = 16384
+		start = 34
+		mark  = "one run"
+	)
+
+	src = laidChunkedFile(run, laidIndexes)
+	src.head = append(src.head, make([]byte, start*4096+len(mark)-laidMapOff)...)
+
+	for i := range run {
+		binary.LittleEndian.PutUint32(src.head[laidMapOff+i*8+4:], uint32(start+i))
+	}
+
+	copy(src.head[start*4096:], mark)
+
+	src.size = (start + run) * 4096
+	laidSuper(src.head, 12, start+run, 1, 0)
+
+	if fsys, err = erofs.Open(src); err != nil {
+		t.Fatal(err)
+	}
+
+	if f, err = fsys.Open("f"); err != nil {
+		t.Fatal(err)
+	}
+
+	buf := make([]byte, 16*4096)
+	if _, err = io.ReadFull(f, buf); err != nil || string(buf[:len(mark)]) != mark {
+		t.Fatalf("the first read of the run: %q, %v; want %q", buf[:len(mark)], err, mark)
+	}
+
+	src.calls = 0
+
+	if _, err = io.ReadFull(f, buf); err != nil {
+		t.Fatal(err)
+	}
+
+	if src.calls != 1 {
+		t.Errorf("a Read of 16 blocks of a file that is one run took %d reads; want 1", src.calls)
+	}
+
+	_ = f.Close()
 }
