@@ -622,3 +622,57 @@ func TestContractReaderResolutionReadsInodesNotTheirBlocks(t *testing.T) {
 		t.Errorf("one Open read %d bytes from a %d byte image; want under %d", src.bytes, src.size, budget)
 	}
 }
+
+// TestContractReaderReadFileLimit: io/fs.ReadFile refuses a file over
+// 128 MiB as ErrInvalid alone, before it allocates anything for it, and
+// takes a file of exactly 128 MiB. The file here is flat, its first block
+// the first past the image: once the limit has let it through, the read
+// fails as ErrCorrupt, and nothing is written to its 128 MiB.
+//
+//nolint:paralleltest // measures the process's allocations against a budget; a parallel test's would count against it
+func TestContractReaderReadFileLimit(t *testing.T) {
+	const limit = 128 << 20
+
+	open := func(size uint64) fs.FS {
+		head := make([]byte, laidMapOff)
+
+		root := laidDirBlock([]laidDirent{{0, laidFtDir, "."}, {0, laidFtDir, ".."}, {3, laidFtReg, "f"}})
+		laidCompact(head[4096:], laidFlatInline, laidDir, 2, uint32(len(root)), 0)
+		copy(head[4096+32:], root)
+
+		// "f" at nid 3: its data from block 2 of an image of two.
+		laidExtended(head[4096+96:], laidFlatPlain, laidReg, size, 2, 1)
+		laidSuper(head, 12, 2)
+
+		fsys, err := erofs.Open(&laidImage{head: head, size: 2 * 4096})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return fsys
+	}
+
+	over, at := open(limit+1), open(limit)
+
+	before := allocatedSoFar()
+
+	_, err := fs.ReadFile(over, "f")
+
+	allocated := allocatedSoFar() - before
+
+	if !errors.Is(err, erofs.ErrInvalid) || errors.Is(err, erofs.ErrCorrupt) {
+		t.Errorf("ReadFile of a file of %d bytes: %v; want ErrInvalid alone", limit+1, err)
+	}
+
+	if allocated > 64<<10 {
+		t.Errorf("ReadFile allocated %d bytes for a file over its limit", allocated)
+	}
+
+	if _, err = fs.ReadFile(at, "f"); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Errorf(
+			"ReadFile of a file of %d bytes whose data is past the image: %v; want ErrCorrupt, the limit letting it through",
+			limit,
+			err,
+		)
+	}
+}
