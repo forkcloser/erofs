@@ -794,3 +794,44 @@ func TestContractReaderResolveLooksUpAtMost255Paths(t *testing.T) {
 		)
 	}
 }
+
+// TestContractReaderRefusesAnImageWithoutAnExtent: an image whose extent
+// cannot be known is ErrCorrupt at Open. A superblock's block count is the
+// image's own statement of its size, and zero is not the size of an image
+// that holds a root directory: behind a reader that reports no length,
+// nothing such an image declares can be held to anything. Through a reader
+// that has a length the same image opens, and is held to that length: its
+// directory of the reader's two blocks is listed, and one of three is
+// ErrCorrupt.
+func TestContractReaderRefusesAnImageWithoutAnExtent(t *testing.T) {
+	t.Parallel()
+
+	noBlocks := func(blocks int64) *laidImage {
+		src := laidChunkedRoot(blocks)
+		binary.LittleEndian.PutUint32(src.head[1024+36:], 0)
+
+		return src
+	}
+
+	if _, err := erofs.Open(readAtOnly{noBlocks(2)}); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Errorf("Open of an image declaring no blocks, through a reader without a length: %v; want ErrCorrupt", err)
+	}
+
+	fsys, err := erofs.Open(noBlocks(2))
+	if err != nil {
+		t.Fatalf("Open of an image declaring no blocks, through a reader with a length: %v", err)
+	}
+
+	entries, err := fs.ReadDir(fsys, ".")
+	if err != nil || len(entries) != 2*60 {
+		t.Errorf("a directory of the reader's length: %d entries, %v; want %d", len(entries), err, 2*60)
+	}
+
+	if fsys, err = erofs.Open(noBlocks(3)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err = fs.ReadDir(fsys, "."); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Errorf("a directory one block over the reader's length: %v; want ErrCorrupt", err)
+	}
+}

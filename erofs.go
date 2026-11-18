@@ -247,8 +247,8 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 	i := image{
 		meta: r,
 	}
-	// Zero when neither the reader nor the superblock can say, in which case
-	// only representability is checked. See checkNid/chunkAddr/mapDev.
+	// Zero when the reader cannot say: the superblock's block count then
+	// stands for it, below, and an image with neither is refused there.
 	i.size, _ = imageSize(r)
 	if err = decodeSuperBlock(superBlock, &i.sb); err != nil {
 		return nil, err
@@ -373,16 +373,23 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 		i.size = declared
 	}
 
-	if i.size > 0 {
-		if off := i.metaStartPos(); off < 0 || off >= i.size {
-			return nil, fmt.Errorf("metadata starts at %d, outside the %d byte image: %w",
-				off, i.size, ErrInvalidSuperblock)
-		}
+	// Neither a length nor a block count. Zero is not the size of an image
+	// that holds a root directory, and every bound on what the image
+	// declares, here and on each read after, is against this extent: without
+	// one, nothing the image says can be held to anything.
+	if i.size <= 0 {
+		return nil, fmt.Errorf("superblock declares no blocks and the reader reports no length: %w",
+			ErrInvalidSuperblock)
+	}
 
-		if off := int64(i.sb.XattrBlkAddr) << i.sb.BlkSizeBits; off < 0 || off >= i.size {
-			return nil, fmt.Errorf("shared xattrs start at %d, outside the %d byte image: %w",
-				off, i.size, ErrInvalidSuperblock)
-		}
+	if off := i.metaStartPos(); off < 0 || off >= i.size {
+		return nil, fmt.Errorf("metadata starts at %d, outside the %d byte image: %w",
+			off, i.size, ErrInvalidSuperblock)
+	}
+
+	if off := int64(i.sb.XattrBlkAddr) << i.sb.BlkSizeBits; off < 0 || off >= i.size {
+		return nil, fmt.Errorf("shared xattrs start at %d, outside the %d byte image: %w",
+			off, i.size, ErrInvalidSuperblock)
 	}
 
 	if err := i.checkNid(uint64(i.sb.RootNid)); err != nil {
@@ -436,7 +443,7 @@ type deviceInfo struct {
 type image struct {
 	sb disk.SuperBlock
 
-	size         int64 // readable image length, or 0 when unknown
+	size         int64 // the image's extent, never zero: the reader's length, else the superblock's
 	meta         io.ReaderAt
 	devices      []deviceInfo // parsed device table entries
 	deviceIDMask uint16
@@ -2159,7 +2166,7 @@ func (b *file) readInfo() (ino *inode, err error) {
 	// are the image's own bytes. A chunk map may name one block for every
 	// chunk, so past the image's extent four bytes of map are one more block
 	// of entries for ReadDir to hold, and nothing in the image backs them.
-	if b.info.mode.IsDir() && b.img.size > 0 && b.info.size > b.img.size {
+	if b.info.mode.IsDir() && b.info.size > b.img.size {
 		size := b.info.size
 		b.info = nil
 
