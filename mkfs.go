@@ -822,6 +822,10 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 		fsys.hasBuildTime = true
 	}
 
+	// A *Stat's Ino is a nid, the root's 0 included, only when the source
+	// is an image: a Writer not yet closed hands 0 for every entry.
+	_, fromImage := src.(*image)
+
 	return fs.WalkDir(listedOnce{src}, ".", func(fpath string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -889,7 +893,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 			// subtree once per name, or never finish. The first name keeps
 			// it and the second is refused, the root included, which a
 			// cycle reaches again.
-			if info.IsDir() && sys.Ino != 0 {
+			if info.IsDir() && (fromImage || sys.Ino != 0) {
 				if prior, ok := fsys.copyDirs[sys.Ino]; ok {
 					return fmt.Errorf(
 						"mkfs: %s: directory already copied as %s, the source is not a tree: %w",
