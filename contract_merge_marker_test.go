@@ -84,8 +84,10 @@ func mergedLayers(t *testing.T, lower, upper fstest.MapFS) map[string]fs.FS {
 // are in, whichever side of the marker a name sorts on: a walk goes by name,
 // and ".bashrc", ".cache", ".ssh" and any name starting with "-" come before
 // ".wh..wh..opq". A name that is the whiteout prefix alone names nothing and
-// is a file like another. Both hold through the walk of a tree and through
-// the copy of an image's metadata.
+// is a file like another. "The markers themselves are not added to the
+// image": nor is what lies under a marker that is a directory. All of it
+// holds through the walk of a tree and through the copy of an image's
+// metadata.
 func TestContractMergeMarkerSparesItsOwnLayer(t *testing.T) {
 	t.Parallel()
 
@@ -125,6 +127,18 @@ func TestContractMergeMarkerSparesItsOwnLayer(t *testing.T) {
 			lower: fstest.MapFS{"a/keep": file("keep")},
 			upper: fstest.MapFS{".wh.": file("")},
 			want:  []string{".wh.", "a", "a/keep"},
+		},
+		// A marker is a name, whatever bears it: one that is a directory
+		// is applied and left out, with everything under it.
+		"a directory named as a whiteout, with entries": {
+			lower: fstest.MapFS{"keep/a": file("a"), "other": file("other")},
+			upper: fstest.MapFS{".wh.keep/x": file("x"), ".wh.keep/sub/y": file("y")},
+			want:  []string{"other"},
+		},
+		"a directory named as the opaque marker, with entries": {
+			lower: fstest.MapFS{"keep/a": file("a"), "keep/b": file("b")},
+			upper: fstest.MapFS{"keep/.wh..wh..opq/x": file("x"), "keep/new": file("new")},
+			want:  []string{"keep", "keep/new"},
 		},
 	} {
 		for route, fsys := range mergedLayers(t, tc.lower, tc.upper) {

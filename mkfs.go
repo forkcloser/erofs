@@ -178,7 +178,8 @@ func MetadataOnly() CopyOpt {
 // opaque markers (.wh..wh..opq) everything in their parent directory, as
 // earlier calls left them: what the source itself holds under those names
 // stays, wherever the marker sorts among them. The markers themselves are
-// not added to the image. A file named .wh. alone is not a marker.
+// not added to the image, nor is anything under a marker that is a
+// directory. A file named .wh. alone is not a marker.
 //
 // When using Merge with a source containing AUFS whiteout files, do not
 // pre-convert them; the Writer processes raw whiteout entries directly.
@@ -869,6 +870,13 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 		}
 
 		if fsys.copyMerge && fsys.marker(p) {
+			// A marker is not added, whatever it is, and nothing under one
+			// that is a directory: the walk would go on inside it and
+			// bring it back as the parent of its entries.
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+
 			return nil
 		}
 
