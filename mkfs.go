@@ -47,9 +47,13 @@ type Writer struct {
 	devices []uint64 // per-device block counts (one per MetadataOnly source)
 
 	// Per-CopyFrom state, reset at the start of each CopyFrom call.
-	copyMetadataOnly bool   // metadata-only for current CopyFrom
-	copyMerge        bool   // merge mode: apply whiteouts
-	copyDeviceID     uint16 // device ID assigned to current MetadataOnly CopyFrom
+	copyMetadataOnly bool // metadata-only for current CopyFrom
+	copyMerge        bool // merge mode: apply whiteouts
+	// copySeq numbers the CopyFrom calls. An entry records the one that
+	// placed it, so that a layer's markers remove what earlier layers
+	// placed and never the layer's own entries.
+	copySeq      uint64
+	copyDeviceID uint16 // device ID assigned to current MetadataOnly CopyFrom
 	// copySourceIsImage: the current metadata-only CopyFrom reads an EROFS
 	// image, registered as device copyDeviceID; the source's own device
 	// numbering (0 itself, 1.. its extra devices) shifts up by that id.
@@ -164,10 +168,11 @@ func MetadataOnly() CopyOpt {
 }
 
 // Merge enables overlay merge semantics for the current CopyFrom.
-// AUFS-style whiteout files (.wh.<name>) delete the named entry from
-// prior layers, and opaque markers (.wh..wh..opq) delete all children
-// of their parent directory. The whiteout entries themselves are not
-// added to the image.
+// AUFS-style whiteout files (.wh.<name>) delete the named entry, and
+// opaque markers (.wh..wh..opq) everything in their parent directory, as
+// earlier calls left them: what the source itself holds under those names
+// stays, wherever the marker sorts among them. The markers themselves are
+// not added to the image. A file named .wh. alone is not a marker.
 //
 // When using Merge with a source containing AUFS whiteout files, do not
 // pre-convert them; the Writer processes raw whiteout entries directly.
@@ -755,6 +760,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 	// Reset per-CopyFrom state.
 	fsys.copyMetadataOnly = false
 	fsys.copyMerge = false
+	fsys.copySeq++
 	fsys.copyDeviceID = 0
 	fsys.copySourceIsImage = false
 
@@ -842,21 +848,8 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 			p = "/"
 		}
 
-		// Merge mode: process whiteout markers.
-		if fsys.copyMerge && p != "/" {
-			base := path.Base(p)
-			if strings.HasPrefix(base, whiteoutPrefix) {
-				if base == opaqueWhiteout {
-					// Opaque directory: remove all prior children of parent.
-					fsys.removeChildren(path.Dir(p))
-				} else {
-					// File whiteout: remove the named entry.
-					target := path.Join(path.Dir(p), base[len(whiteoutPrefix):])
-					fsys.removeTree(target)
-				}
-
-				return nil
-			}
+		if fsys.copyMerge && fsys.marker(p) {
+			return nil
 		}
 
 		// Extract extended metadata from Sys().
@@ -1257,6 +1250,9 @@ type fsEntry struct {
 	// Tree structure — maintained during add/remove.
 	parent   *fsEntry
 	children []*fsEntry
+	// placed is the Writer's copySeq when the entry was placed, or placed
+	// again by a later layer.
+	placed uint64
 
 	// data location in spool file
 	spoolOff     int64
@@ -2107,12 +2103,13 @@ func (fsys *Writer) addChild(e *fsEntry) {
 	}
 
 	e.parent = parent
+	e.placed = fsys.copySeq
 	parent.children = append(parent.children, e)
 	fsys.byPath[e.path] = e
 }
 
-// removeTree marks an entry and all its descendants as removed.
-// Used by Merge to process whiteout deletions.
+// removeTree removes an entry and all its descendants, whoever placed them:
+// RemoveAll's.
 func (fsys *Writer) removeTree(p string) {
 	p = cleanPath(p)
 
@@ -2128,17 +2125,44 @@ func (fsys *Writer) removeTree(p string) {
 	}
 }
 
-// removeChildren marks all descendants of a directory as removed.
-// The directory itself is not removed.
-func (fsys *Writer) removeChildren(dir string) {
-	dir = cleanPath(dir)
-
-	e, ok := fsys.byPath[dir]
-	if !ok {
-		return
+// marker applies p when it is a marker of the layer being merged, a whiteout
+// (".wh.NAME") or the opaque marker, and reports whether it was one. A name
+// that is the prefix alone names nothing and is an ordinary file.
+func (fsys *Writer) marker(p string) bool {
+	base := path.Base(p)
+	if len(base) <= len(whiteoutPrefix) || !strings.HasPrefix(base, whiteoutPrefix) {
+		return false
 	}
 
-	fsys.removeSubtree(e)
+	if base == opaqueWhiteout {
+		if dir, ok := fsys.byPath[path.Dir(p)]; ok {
+			fsys.dropEarlier(dir, false)
+		}
+
+		return true
+	}
+
+	if target, ok := fsys.byPath[path.Join(path.Dir(p), base[len(whiteoutPrefix):])]; ok {
+		fsys.dropEarlier(target, true)
+	}
+
+	return true
+}
+
+// dropEarlier removes what earlier layers placed under e, and e itself when
+// self is set, sparing what the copy under way placed: a marker speaks of
+// the layers below its own, and the walk meets a layer's entries on either
+// side of its markers, by name.
+func (fsys *Writer) dropEarlier(e *fsEntry, self bool) {
+	if self && e.placed != fsys.copySeq {
+		fsys.unlinkEntry(e)
+	}
+
+	for _, c := range e.children {
+		if !c.removed {
+			fsys.dropEarlier(c, true)
+		}
+	}
 }
 
 // removeSubtree recursively marks all descendants of e as removed.
@@ -2304,6 +2328,7 @@ func (fsys *Writer) placeEntry(fe *fsEntry) *fsEntry {
 	*existing = *fe
 	existing.parent = savedParent
 	existing.children = savedChildren
+	existing.placed = fsys.copySeq
 
 	return existing
 }

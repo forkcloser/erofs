@@ -7,7 +7,6 @@ import (
 	"io"
 	"io/fs"
 	"math"
-	"path"
 	"slices"
 
 	"github.com/forkcloser/erofs/internal/builder"
@@ -231,23 +230,8 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		cur := queue[0]
 		queue = queue[1:]
 
-		// Merge mode: process whiteout markers.
-		if fsys.copyMerge && cur.path != "/" {
-			base := path.Base(cur.path)
-			if len(base) > len(whiteoutPrefix) && base[:len(whiteoutPrefix)] == whiteoutPrefix {
-				if base == opaqueWhiteout {
-					fsys.removeChildren(path.Dir(cur.path))
-				} else {
-					target := path.Dir(cur.path) + "/" + base[len(whiteoutPrefix):]
-					if path.Dir(cur.path) == "/" {
-						target = "/" + base[len(whiteoutPrefix):]
-					}
-
-					fsys.removeTree(target)
-				}
-
-				continue
-			}
+		if fsys.copyMerge && fsys.marker(cur.path) {
+			continue
 		}
 
 		// Bound the nid before multiplying. nid*32 wraps, so nid and
