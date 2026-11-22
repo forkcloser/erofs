@@ -720,11 +720,13 @@ func (img *image) checkNid(nid uint64) error {
 // again. Checking the extent first turns the bound into something the
 // image has to back with real bytes.
 func (img *image) chunkIndexFits(off, needed int64) bool {
-	if needed < 0 || needed > maxChunkIndexBytes {
-		return false
-	}
+	return needed <= maxChunkIndexBytes && img.chunkIndexInImage(off, needed)
+}
 
-	if off < 0 || off > math.MaxInt64-needed {
+// chunkIndexInImage reports whether the image holds needed bytes at off, as
+// far as its length is known.
+func (img *image) chunkIndexInImage(off, needed int64) bool {
+	if needed < 0 || off < 0 || off > math.MaxInt64-needed {
 		return false
 	}
 
@@ -2544,9 +2546,9 @@ func (b *file) buildDataRanges(ino *inode, dst []DataRange) ([]DataRange, error)
 	return nil, nil
 }
 
-// maxChunkIndexBytes is an upper bound on the chunk-index table we will
-// allocate for a single file. 64 MiB covers ~8 M chunks; no real EROFS image
-// should approach this, and it prevents allocation bombs from corrupt images.
+// maxChunkIndexBytes is the longest chunk map Stat and DataRange walk for one
+// file, the limit the package documentation names: 8 M chunk indexes, 16 M
+// block addresses. A map over it is ErrInvalid alone, never ErrCorrupt.
 const maxChunkIndexBytes = 64 << 20 // 64 MiB
 
 // buildChunkDataRanges parses chunk indexes into DataRange entries covering
@@ -2660,6 +2662,13 @@ func (b *file) eachChunk(ino *inode, emit func(DataRange)) error {
 
 	needed := int64(nchunks) * int64(unit)
 	if !b.img.chunkIndexFits(baseOffset, needed) {
+		// A map the image holds whole and the limit alone refuses is a
+		// sound file, not a bad image: only one the image cannot hold is.
+		if needed > maxChunkIndexBytes && b.img.chunkIndexInImage(baseOffset, needed) {
+			return fmt.Errorf("chunk map of nid %d is %d bytes, over the %d byte limit: %w",
+				ino.nid, needed, int64(maxChunkIndexBytes), ErrInvalid)
+		}
+
 		return fmt.Errorf("chunk index of nid %d lies past the end of the image: %w", ino.nid, ErrCorrupt)
 	}
 
