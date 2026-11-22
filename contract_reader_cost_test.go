@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"runtime"
 	"slices"
 	"strings"
@@ -193,6 +194,166 @@ func laidChunkedRoot(blocks int64) *laidImage {
 	laidSuper(head, 12, uint32(size/bs))
 
 	return &laidImage{head: head, size: size}
+}
+
+// laidRootOnDevice is an image of two 4 KiB blocks and its one extra device.
+// The root directory is chunk-based with indexes, as many mapped chunks of
+// one block each as asked, that name the device's blocks in turn; the device
+// holds three blocks, of twenty entries each after the first one's own two,
+// every one the empty regular file whose inode follows the root's map.
+func laidRootOnDevice(mapped int) (img, device *laidImage) {
+	const (
+		bs     = 4096
+		blocks = 3
+	)
+
+	// The root's 64 bytes, its map, then the file's inode on the next slot.
+	fileAt := (bs + 64 + mapped*8 + 31) / 32 * 32
+	head := make([]byte, fileAt+32)
+
+	laidSuper(head, 12, 2)
+
+	sb := head[1024:]
+	binary.LittleEndian.PutUint32(sb[80:], 0x4|0x8) // INCOMPAT_CHUNKED_FILE, INCOMPAT_DEVICE_TABLE
+	binary.LittleEndian.PutUint16(sb[86:], 1)       // extra_devices
+	binary.LittleEndian.PutUint16(sb[88:], 16)      // devt_slotoff, in slots of 128 bytes
+
+	binary.LittleEndian.PutUint32(head[16*128+64:], uint32(blocks)) // the slot's block count
+
+	laidExtended(head[bs:], laidChunked, laidDir, uint64(mapped)*bs, laidIndexes, 2)
+
+	for i := range mapped {
+		index := head[bs+64+i*8:]
+		binary.LittleEndian.PutUint16(index[2:], 1)                // device_id
+		binary.LittleEndian.PutUint32(index[4:], uint32(i%blocks)) // startblk_lo
+	}
+
+	laidCompact(head[fileAt:], laidFlatPlain, laidReg, 1, 0, 0)
+
+	held := make([]byte, blocks*bs)
+
+	for b := range blocks {
+		ents := make([]laidDirent, 0, 22)
+		if b == 0 {
+			ents = append(ents,
+				laidDirent{nid: 0, ftype: laidFtDir, name: "."},
+				laidDirent{nid: 0, ftype: laidFtDir, name: ".."})
+		}
+
+		for i := range 20 {
+			ents = append(ents, laidDirent{
+				nid: uint64((fileAt - bs) / 32), ftype: laidFtReg, name: fmt.Sprintf("%02d-%02d", b, i),
+			})
+		}
+
+		copy(held[b*bs:], laidDirBlock(ents))
+	}
+
+	return &laidImage{head: head, size: 2 * bs}, &laidImage{head: held, size: int64(len(held))}
+}
+
+// TestContractReaderDirectoryOnADevice: a directory's entries may be an
+// extra device's bytes, so what a directory is held to is what the image and
+// its devices hold together: one of three blocks on a device, in an image of
+// two, is listed and looked up in, as the kernel's readdir maps a
+// chunk-based directory's chunks to the device they name. It was refused for
+// declaring more bytes than the image. One that declares more than the image
+// and the device hold is ErrCorrupt.
+func TestContractReaderDirectoryOnADevice(t *testing.T) {
+	t.Parallel()
+
+	img, device := laidRootOnDevice(3)
+
+	fsys, err := erofs.Open(img, erofs.WithExtraDevices(device))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := fs.ReadDir(fsys, ".")
+	if err != nil || len(entries) != 3*20 {
+		t.Fatalf("a directory of three blocks on a device: %d entries, %v; want %d", len(entries), err, 3*20)
+	}
+
+	if info, statErr := fs.Stat(fsys, "02-19"); statErr != nil || !info.Mode().IsRegular() {
+		t.Errorf("the last name of the third block: %v, %v; want a regular file", info, statErr)
+	}
+
+	// Six blocks mapped, where the image holds two and the device three.
+	img, device = laidRootOnDevice(6)
+
+	if fsys, err = erofs.Open(img, erofs.WithExtraDevices(device)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err = fs.ReadDir(fsys, "."); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Errorf("a directory of six blocks over an image of two and a device of three: %v; want ErrCorrupt", err)
+	}
+}
+
+// unmeasured is a device whose reader reports no length.
+type unmeasured struct{ held io.ReaderAt }
+
+func (u unmeasured) ReadAt(p []byte, off int64) (int, error) { return u.held.ReadAt(p, off) }
+
+// TestContractReaderDirectoryOnADeviceOfNoLength: a device given through a
+// reader that reports no length gives no measure and adds nothing to what a
+// directory is held to: the root of three blocks on such a device, in an
+// image of two, is ErrCorrupt, and is read once the same device is given
+// with its length.
+func TestContractReaderDirectoryOnADeviceOfNoLength(t *testing.T) {
+	t.Parallel()
+
+	img, device := laidRootOnDevice(3)
+
+	fsys, err := erofs.Open(img, erofs.WithExtraDevices(unmeasured{device}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err = fs.Stat(fsys, "."); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Errorf("a directory of three blocks on a device of no length, in an image of two: %v; want ErrCorrupt", err)
+	}
+
+	if fsys, err = erofs.Open(img, erofs.WithExtraDevices(device)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err = fs.Stat(fsys, "."); err != nil {
+		t.Errorf("the same directory, the device given with its length: %v", err)
+	}
+}
+
+// TestContractReaderDirectoryBoundIsNotTheImagesWord: opened with none of
+// its devices, an image is all there is, and what its device table says of
+// a device adds nothing to what a directory is held to: a root of three
+// blocks in an image of two is ErrCorrupt whether the slot declares no
+// blocks past the image's end, four billion of them, or the image's own two
+// over again.
+func TestContractReaderDirectoryBoundIsNotTheImagesWord(t *testing.T) {
+	t.Parallel()
+
+	for _, slot := range []struct {
+		name           string
+		blocks, mapped uint32
+	}{
+		{"no blocks, mapped past the end", 0, 100},
+		{"every block there can be", math.MaxUint32, 100},
+		{"the image's own blocks", 2, 0},
+	} {
+		img, _ := laidRootOnDevice(3)
+
+		binary.LittleEndian.PutUint32(img.head[16*128+64:], slot.blocks)
+		binary.LittleEndian.PutUint32(img.head[16*128+68:], slot.mapped) // mapped_blkaddr
+
+		fsys, err := erofs.Open(img)
+		if err != nil {
+			t.Fatalf("%s: Open: %v", slot.name, err)
+		}
+
+		if _, err = fs.Stat(fsys, "."); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Errorf("%s: a directory of three blocks in an image of two: %v; want ErrCorrupt", slot.name, err)
+		}
+	}
 }
 
 // TestContractReaderDirectoryIsHeldToItsImage: a directory's entries are its
