@@ -18,7 +18,21 @@ func entryFromSys(info fs.FileInfo) (*builder.Entry, error) {
 	case *builder.Entry:
 		return sys, nil
 	case *syscall.Stat_t:
-		return statEntry(sys.Uid, sys.Gid, sys.Dev, sys.Ino, sys.Nlink, sys.Rdev, sys.Mtimespec.Sec, sys.Mtimespec.Nsec)
+		rdev, err := onDiskDev(info, sys)
+		if err != nil {
+			return nil, err
+		}
+
+		return statEntry(
+			sys.Uid,
+			sys.Gid,
+			sys.Dev,
+			sys.Ino,
+			sys.Nlink,
+			rdev,
+			sys.Mtimespec.Sec,
+			sys.Mtimespec.Nsec,
+		), nil
 	default:
 		//nolint:nilnil // nil is no platform stat: each caller then picks its own default entry
 		return nil, nil
