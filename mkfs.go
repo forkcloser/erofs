@@ -2315,6 +2315,15 @@ func (fsys *Writer) placeEntry(fe *fsEntry) *fsEntry {
 
 	savedParent := existing.parent
 	savedChildren := existing.children
+	// A directory that stops being one takes its entries with it: under a
+	// file they would stay registered, answer Stat, and be written by Close
+	// as the entries of something that has none.
+	if existing.mode&disk.StatTypeMask == disk.StatTypeDir && fe.mode&disk.StatTypeMask != disk.StatTypeDir {
+		fsys.removeSubtree(existing)
+
+		savedChildren = nil
+	}
+
 	*existing = *fe
 	existing.parent = savedParent
 	existing.children = savedChildren
