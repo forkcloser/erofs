@@ -235,14 +235,18 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 
 	var superBlock [disk.SizeSuperBlock]byte
 
-	n, err := r.ReadAt(superBlock[:], disk.SuperBlockOffset)
-	if err != nil {
+	// The count before the error: a reader may say io.EOF with its last
+	// bytes, and one that ends inside the superblock holds no image, which
+	// is not the reader's end of file to hand up.
+	switch n, err := r.ReadAt(superBlock[:], disk.SuperBlockOffset); {
+	case n == disk.SizeSuperBlock:
+	case err != nil && !errors.Is(err, io.EOF):
 		return nil, err
+	default:
+		return nil, fmt.Errorf("%w: the image ends %d bytes into it", ErrInvalidSuperblock, n)
 	}
 
-	if n != disk.SizeSuperBlock {
-		return nil, fmt.Errorf("%w: read %d bytes", ErrInvalidSuperblock, n)
-	}
+	var err error
 
 	i := image{
 		meta: r,
@@ -324,8 +328,14 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 			var slotBuf [disk.SizeDeviceSlot]byte
 
 			offset := devTableOffset + int64(idx)*disk.SizeDeviceSlot
-			if _, err := r.ReadAt(slotBuf[:], offset); err != nil {
+
+			switch n, err := r.ReadAt(slotBuf[:], offset); {
+			case n == disk.SizeDeviceSlot:
+			case err != nil && !errors.Is(err, io.EOF):
 				return nil, fmt.Errorf("failed to read device slot %d at offset %d: %w", idx, offset, err)
+			default:
+				return nil, fmt.Errorf("device slot %d at offset %d lies past the end of the image: %w",
+					idx, offset, ErrCorrupt)
 			}
 
 			var slot disk.DeviceSlot
