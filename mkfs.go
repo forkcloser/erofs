@@ -161,6 +161,12 @@ func Create(out io.WriteSeeker, opts ...CreateOpt) *Writer {
 // MetadataOnly configures the current CopyFrom to emit only metadata.
 // Regular files with pre-existing chunk mappings use chunk-based layout
 // referencing an external device; file data is not copied.
+//
+// The device is the source's, and CopyFrom registers one for the image Open
+// returned and for a source with a DeviceBlocks() uint64 method. From any
+// other source, a subtree of an image behind fs.Sub among them, a file whose
+// DataRange places data is refused, ErrInvalid: the result declares no
+// device for that range to name.
 func MetadataOnly() CopyOpt {
 	return func(w *Writer) {
 		w.copyMetadataOnly = true
@@ -2720,6 +2726,14 @@ func (fsys *Writer) chunksFromRanges(ranges []DataRange, fileSize int64) ([]buil
 				r.Offset,
 				blockSize,
 				ErrInvalid,
+			)
+		}
+		// A source that declared no device has none registered for this
+		// copy: its ranges would keep the id they are given below, and name
+		// whatever device an earlier copy registered first, or none.
+		if fsys.copyDeviceID == 0 {
+			return nil, fmt.Errorf(
+				"DataRange[%d]: the source places data on a device and declares none (DeviceBlocks): %w", i, ErrInvalid,
 			)
 		}
 		// Non-EROFS sources register exactly one device via DeviceBlocks();
