@@ -267,6 +267,17 @@ func (fsys *Writer) Create(name string) (*File, error) {
 		return nil, err
 	}
 
+	// Where the data goes comes first: a Create that fails there must leave
+	// neither the file nor the directories made for it, which Close would
+	// write as if they had been asked for.
+	if fsys.dataFile != nil {
+		if err := fsys.alignDataOff(); err != nil {
+			return nil, err
+		}
+	} else if err := fsys.ensureSpool(); err != nil {
+		return nil, err
+	}
+
 	if err := fsys.ensureParent(name); err != nil {
 		return nil, err
 	}
@@ -283,17 +294,9 @@ func (fsys *Writer) Create(name string) (*File, error) {
 	}
 
 	if fsys.dataFile != nil {
-		if err := fsys.alignDataOff(); err != nil {
-			return nil, err
-		}
-
 		f.dataStartOff = fsys.dataOff
 		e.dataStartOff = fsys.dataOff
 	} else {
-		if err := fsys.ensureSpool(); err != nil {
-			return nil, err
-		}
-
 		f.dataStartOff = fsys.spoolOff
 		e.spoolOff = fsys.spoolOff
 		e.dataStartOff = fsys.spoolOff
