@@ -416,6 +416,29 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 		return nil, err
 	}
 
+	// What can back a directory: the image, and the devices the caller gave,
+	// by their readers' lengths. Nothing the device table says adds to it: a
+	// flat window is the image again, and a slot's block count is the
+	// image's word, which would let an image lift its own bound.
+	i.backing = i.size
+
+	if !flatdev {
+		for _, dev := range i.devices {
+			// A reader of no known length gives no measure, and adds none.
+			if dev.size <= 0 {
+				continue
+			}
+
+			if i.backing > math.MaxInt64-dev.size {
+				i.backing = math.MaxInt64
+
+				break
+			}
+
+			i.backing += dev.size
+		}
+	}
+
 	return &i, nil
 }
 
@@ -444,6 +467,7 @@ type image struct {
 	sb disk.SuperBlock
 
 	size         int64 // the image's extent, never zero: the reader's length, else the superblock's
+	backing      int64 // the image's extent and the given devices' lengths, the most that can back a directory
 	meta         io.ReaderAt
 	devices      []deviceInfo // parsed device table entries
 	deviceIDMask uint16
@@ -2163,15 +2187,21 @@ func (b *file) readInfo() (ino *inode, err error) {
 	}
 
 	// A directory is the exception to the size left open above: its entries
-	// are the image's own bytes. A chunk map may name one block for every
-	// chunk, so past the image's extent four bytes of map are one more block
-	// of entries for ReadDir to hold, and nothing in the image backs them.
-	if b.info.mode.IsDir() && b.info.size > b.img.size {
+	// are bytes of the image or of an extra device its chunks name. A chunk
+	// map may name one block for every chunk, so past what the image and the
+	// devices given hold four bytes of map are one more block of entries for
+	// ReadDir to hold, and nothing backs them.
+	if b.info.mode.IsDir() && b.info.size > b.img.backing {
 		size := b.info.size
 		b.info = nil
 
-		return nil, fmt.Errorf("directory inode %d declares %d bytes, larger than the %d byte image: %w",
-			b.nid, size, b.img.size, ErrCorrupt)
+		return nil, fmt.Errorf(
+			"directory inode %d declares %d bytes, more than the %d the image and the devices given hold: %w",
+			b.nid,
+			size,
+			b.img.backing,
+			ErrCorrupt,
+		)
 	}
 
 	if err := b.finishInfo(span, n, addr, xcnt); err != nil {

@@ -74,12 +74,12 @@ where the kernel reads what fits; an image whose superblock announces
 compression is `ErrNotImplemented` even when no inode is compressed, where the
 kernel mounts it; a shared extended attribute block address past the end of
 the image is refused at `Open`, where the kernel fails only when an inode uses
-it; a directory declaring more bytes than its image's extent is `ErrCorrupt`,
-its entries being the image's own bytes, where the kernel reads the blocks a
-chunk map names however often it names one. Apart from those, an image whose
-superblock declares no blocks is `ErrCorrupt` at `Open` when its reader
-reports no length: its extent cannot be known, and nothing it declares can be
-held to one.
+it; a directory declaring more bytes than its image and the extra devices
+given to `Open` hold is `ErrCorrupt`, its entries being their bytes, where the
+kernel reads the blocks a chunk map names however often it names one. Apart from those, an
+image whose superblock declares no blocks is `ErrCorrupt` at `Open` when its
+reader reports no length: its extent cannot be known, and nothing it declares
+can be held to one.
 
 ## Features
 
