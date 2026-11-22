@@ -752,6 +752,17 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 	if err := fsys.checkNoOpenFile("call CopyFrom"); err != nil {
 		return err
 	}
+	// The source's root becomes the image's, and the kernel mounts no image
+	// whose root inode is not a directory. Asked before anything else: what
+	// follows takes the source's block size, device and build time.
+	root, err := fs.Stat(src, ".")
+	if err != nil {
+		return fmt.Errorf("mkfs: the source's root: %w", err)
+	}
+
+	if !root.IsDir() {
+		return fmt.Errorf("mkfs: the source's root: %w", ErrNotDirectory)
+	}
 	// Reset per-CopyFrom state.
 	fsys.copyMetadataOnly = false
 	fsys.copyMerge = false
