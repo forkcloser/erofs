@@ -1956,8 +1956,11 @@ func (img *image) resolve(op, name string, follow bool) (nid uint64, ftype fs.Fi
 		name = rest
 	}
 
+	// The walk ended at the root, which has no name of its own: it is ".",
+	// asked for directly or reached through a link, as a file reached
+	// through a link bears its own name and not the path that was asked.
 	if basename == "" {
-		basename = original
+		basename = "."
 	}
 
 	return nid, ftype, basename, nil
