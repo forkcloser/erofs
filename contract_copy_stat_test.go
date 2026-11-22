@@ -1,4 +1,4 @@
-//go:build freebsd || linux
+//go:build linux
 
 package erofs_test
 
@@ -13,10 +13,10 @@ import (
 	"github.com/forkcloser/erofs/internal/corpus"
 )
 
-// TestContractCopyFromHostStatRdev: a device whose source stat is the
-// platform's (syscall.Stat_t) keeps its rdev in the image, in the encoding
-// Linux's dev_t and i_rdev share, and one whose rdev does not fit the
-// 32 bits i_rdev holds is refused as ErrInvalid.
+// TestContractCopyFromHostStatRdev: a device whose source stat is Linux's
+// (syscall.Stat_t) keeps its rdev in the image, a dev_t there and i_rdev
+// sharing one encoding as far as i_rdev goes, and one whose major or minor
+// i_rdev cannot hold is refused as ErrInvalid.
 func TestContractCopyFromHostStatRdev(t *testing.T) {
 	t.Parallel()
 

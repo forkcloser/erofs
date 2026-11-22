@@ -196,7 +196,10 @@ package's `*Stat`, as an image opened here hands out; a source with none of
 them still contributes mode, size and `ModTime`. Two names that share a source
 inode become one inode with two names in the image when the source reports
 more than one link for it; a file's link count is computed from the names the
-image holds, a directory's from its subdirectories.
+image holds, a directory's from its subdirectories. A device keeps the major
+and minor numbers it has on the host: a `*syscall.Stat_t`'s `Rdev` is read in
+the host's own layout and stored in the kernel's; one whose major is over 4095
+or whose minor is over 1048575 is refused, `ErrInvalid`.
 
 ## Limits
 
