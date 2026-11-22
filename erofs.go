@@ -554,28 +554,23 @@ func (img *image) ReadFile(name string) ([]byte, error) {
 	return buf, nil
 }
 
-// readAll fills buf, treating a short read as corruption rather than as a
-// hole to pad with zeros.
-//
-// file.Read only clears io.EOF when it filled the buffer, so a file whose data
-// range runs past the end of the image returns (partial, io.EOF). Callers that
-// waved io.EOF through therefore handed back a zero-padded buffer and a nil
-// error, which is the worst possible answer: a consumer validating a config or
-// a manifest sees attacker-chosen zeros where it should see a failure.
+// errEndsEarly is the error for data that stops before the size its inode
+// declares. A device's end of file is never the file's: no read path hands
+// it up as io.EOF, or as a short answer with no error.
+func errEndsEarly(size int64) error {
+	return fmt.Errorf("data ends before the declared size of %d bytes: %w", size, ErrCorrupt)
+}
+
+// readAll fills buf, the file's whole size, or fails: Read never ends
+// before the size without an error.
 func readAll(f *file, buf []byte) error {
 	if len(buf) == 0 {
 		return nil
 	}
 
-	if _, err := io.ReadFull(f, buf); err != nil {
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			return fmt.Errorf("data ends before the declared size of %d bytes: %w", len(buf), ErrCorrupt)
-		}
+	_, err := io.ReadFull(f, buf)
 
-		return err
-	}
-
-	return nil
+	return err
 }
 
 func (img *image) ReadDir(name string) ([]fs.DirEntry, error) {
@@ -1490,15 +1485,18 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 		entryPos := baseOffset + int64(cn*unit)
 
 		var entryBuf [8]byte
-		if n, err := img.meta.ReadAt(entryBuf[:unit], entryPos); err != nil {
+		// The count before the error, as for a block below: an entry the
+		// reader ends inside is the image's fault, not the file's end.
+		switch n, err := img.meta.ReadAt(entryBuf[:unit], entryPos); {
+		case n == unit:
+		case err != nil && !errors.Is(err, io.EOF):
 			return nil, fmt.Errorf("failed to read chunk entry at %d: %w", entryPos, err)
-		} else if n != unit {
+		default:
 			return nil, fmt.Errorf(
-				"short read of chunk entry at %d: read %d bytes, expected %d: %w",
+				"the image ends inside the chunk map of nid %d, at %d: %w",
+				fi.nid,
 				entryPos,
-				n,
-				unit,
-				io.ErrUnexpectedEOF,
+				ErrCorrupt,
 			)
 		}
 
@@ -1983,7 +1981,6 @@ func (b *file) Stat() (fs.FileInfo, error) {
 	return b.statInfo()
 }
 
-//nolint:gocognit // the read path perf_audit_test.go measures: the whole-file fast path, else the block loop
 func (b *file) Read(p []byte) (int, error) {
 	fi, err := b.readInfo()
 	if err != nil {
@@ -2006,8 +2003,13 @@ func (b *file) Read(p []byte) (int, error) {
 		n, err := sr.ReadAt(p, b.offset)
 
 		b.offset += int64(n)
-		if errors.Is(err, io.EOF) && n == len(p) {
+
+		switch {
+		case n == len(p):
 			err = nil
+		case errors.Is(err, io.EOF):
+			// p ends at the file's size at most: the device ended first.
+			err = errEndsEarly(fi.size)
 		}
 
 		return n, err
@@ -2022,11 +2024,7 @@ func (b *file) Read(p []byte) (int, error) {
 
 		blk, err := b.img.loadBlock(fi, b.offset)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				// b.offset already advanced by each block copied above.
-				err = io.EOF
-			}
-
+			// b.offset already counts the blocks copied above.
 			return n, err
 		}
 
@@ -2062,6 +2060,11 @@ func (b *file) WriteTo(w io.Writer) (int64, error) {
 		n, err := io.Copy(w, io.NewSectionReader(sr, b.offset, fi.size-b.offset))
 		b.offset += n
 
+		// io.Copy takes the device's end of file for the section's.
+		if err == nil && b.offset < fi.size {
+			err = errEndsEarly(fi.size)
+		}
+
 		return n, err
 	}
 
@@ -2070,10 +2073,6 @@ func (b *file) WriteTo(w io.Writer) (int64, error) {
 	for b.offset < fi.size {
 		blk, err := b.img.loadBlock(fi, b.offset)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return total, nil
-			}
-
 			return total, err
 		}
 
@@ -2773,10 +2772,8 @@ func (d *dir) ReadDir(n int) ([]fs.DirEntry, error) {
 	for pos < fi.size {
 		b, err := d.img.loadBlock(fi, pos)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-
+			// A block the directory's size covers and the device does not
+			// hold: an error, never the end of the listing.
 			return nil, err
 		}
 
@@ -2966,11 +2963,8 @@ func (d *dir) lookup(target string) (uint64, fs.FileMode, error) {
 
 		b, err = d.img.loadBlock(fi, pos)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				hi = mid
-				continue
-			}
-
+			// As in ReadDir: a block that cannot be read is an error, not
+			// a block with no names in it.
 			if lastBlk != nil {
 				d.img.putBlock(lastBlk)
 			}
