@@ -980,9 +980,21 @@ func (w *erofsWriter) writeDataBlocks(out io.Writer) error {
 				err     error
 			)
 
-			limited := io.LimitReader(e.data, expected)
+			// A source's file is opened here, where it is read, and seen as
+			// what it is: the copy below knows an *os.File.
+			data := e.data
+			if s, ok := data.(*sourceFile); ok {
+				f, ferr := s.file()
+				if ferr != nil {
+					return fmt.Errorf("write data for %s: %w", e.path, ferr)
+				}
+
+				data = f
+			}
+
+			limited := io.LimitReader(data, expected)
 			// Use io.Copy for *os.File sources to enable copy_file_range.
-			if _, ok := e.data.(*os.File); ok {
+			if _, ok := data.(*os.File); ok {
 				written, err = io.Copy(out, limited)
 			} else {
 				written, err = io.CopyBuffer(onlyWriter{out}, limited, w.copyBuf)
