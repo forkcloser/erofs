@@ -537,6 +537,10 @@ func (img *image) ReadFile(name string) ([]byte, error) {
 		return nil, err
 	}
 
+	if contentless(ftype) {
+		return []byte{}, nil
+	}
+
 	if fi.size < 0 || fi.size > maxReadFileSize {
 		return nil, fmt.Errorf(
 			"file size %d exceeds ReadFile limit %d; use Open and io.Copy for large files: %w",
@@ -1981,10 +1985,21 @@ func (b *file) Stat() (fs.FileInfo, error) {
 	return b.statInfo()
 }
 
+// contentless reports a file type that has no content in the image: a FIFO,
+// a socket, a device. Its inode's size and start block mean nothing, and
+// reading through them would hand out whatever bytes of the image they name.
+func contentless(t fs.FileMode) bool {
+	return t&(fs.ModeNamedPipe|fs.ModeSocket|fs.ModeDevice|fs.ModeCharDevice) != 0
+}
+
 func (b *file) Read(p []byte) (int, error) {
 	fi, err := b.readInfo()
 	if err != nil {
 		return 0, err
+	}
+
+	if contentless(b.ftype) {
+		return 0, io.EOF
 	}
 
 	// Whole-file fast path. The block loop below issues one ReadAt per
@@ -2052,7 +2067,7 @@ func (b *file) WriteTo(w io.Writer) (int64, error) {
 		return 0, err
 	}
 
-	if b.offset >= fi.size {
+	if b.offset >= fi.size || contentless(b.ftype) {
 		return 0, nil
 	}
 
@@ -2757,6 +2772,18 @@ type dir struct {
 
 	// consumed is how many have been returned in the current block
 	consumed uint16
+}
+
+// Read fails: a directory's blocks are its entries, which ReadDir decodes,
+// and the embedded file would hand them out raw.
+func (d *dir) Read([]byte) (int, error) {
+	return 0, &fs.PathError{Op: "read", Path: d.name, Err: ErrIsDirectory}
+}
+
+// WriteTo fails as Read does; without it io.Copy would find the embedded
+// file's.
+func (d *dir) WriteTo(io.Writer) (int64, error) {
+	return 0, &fs.PathError{Op: "read", Path: d.name, Err: ErrIsDirectory}
 }
 
 //nolint:gocognit // the dirent walk perf_audit_test.go measures: one block at a time, each name checked where it is sliced
