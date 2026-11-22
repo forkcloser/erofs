@@ -59,11 +59,13 @@ type Writer struct {
 	// of that entry. It is created fresh per CopyFrom: a source's inode
 	// numbers mean nothing outside that source.
 	copyLinks map[hardlinkKey]*fsEntry
-	// copyDirs maps a source directory's identity to the first path that
-	// named it, during one CopyFrom: a second name is refused, since a
-	// hard-linked directory or a cycle is not a tree. The full-image walk's
-	// counterpart of copyFromImage's expanded set.
-	copyDirs map[hardlinkKey]string
+	// copyDirs maps a directory of a source image, by its nid, to the first
+	// path that named it, during one CopyFrom: a second name is refused,
+	// since a hard-linked directory or a cycle is not a tree. The full-image
+	// walk's counterpart of copyFromImage's expanded set. A host's
+	// directories are not in it: one that two paths reach, as under a bind
+	// mount, is a directory at each, as mkfs.erofs has it.
+	copyDirs map[uint64]string
 
 	// openFile is the file returned by the most recent Create that has not
 	// been closed. Data is appended to one shared stream, so at most one
@@ -725,10 +727,10 @@ func (l listedOnce) ReadDir(name string) ([]fs.DirEntry, error) {
 // Opens files for data when Entry.Data is nil.
 // Reads symlink targets via readLinker interface when Entry.LinkTarget is empty.
 // If src implements blockSizer, the image block size is set accordingly.
-// A directory reachable twice by inode identity, a hard link to it or a
-// cycle through it, is refused as ErrCorrupt whatever the source: an image's
-// nid, or a host's device and inode, where a bind mount of a directory
-// under itself is one. So is a directory that lists a name twice: a lookup
+// A directory an EROFS image names twice, a hard link to it or a cycle
+// through it, is refused as ErrCorrupt. A host directory that two paths
+// reach, as under a bind mount, is copied at each, as mkfs.erofs copies it.
+// A directory that lists a name twice is refused whatever the source: a lookup
 // finds one of the two entries, and the copy would hold that one's content
 // under the other's metadata.
 // A hole in a file of an EROFS image stays a hole in the copy, with its
@@ -758,7 +760,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 
 	fsys.copyLinks = make(map[hardlinkKey]*fsEntry)
 
-	fsys.copyDirs = make(map[hardlinkKey]string)
+	fsys.copyDirs = make(map[uint64]string)
 	for _, opt := range opts {
 		opt(fsys)
 	}
@@ -820,6 +822,10 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 		fsys.hasBuildTime = true
 	}
 
+	// A *Stat's Ino is a nid, the root's 0 included, only when the source
+	// is an image: a Writer not yet closed hands 0 for every entry.
+	_, fromImage := src.(*image)
+
 	return fs.WalkDir(listedOnce{src}, ".", func(fpath string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -880,6 +886,24 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 				Rdev:    uint32(sys.Rdev), // #nosec G115 -- checked against math.MaxUint32 above
 				Xattrs:  sys.Xattrs,
 				Ino:     sys.Ino,
+			}
+
+			// A directory the image names twice, a hard link to it or a
+			// cycle through it, is not a tree: the copy would hold its
+			// subtree once per name, or never finish. The first name keeps
+			// it and the second is refused, the root included, which a
+			// cycle reaches again.
+			if info.IsDir() && (fromImage || sys.Ino != 0) {
+				if prior, ok := fsys.copyDirs[sys.Ino]; ok {
+					return fmt.Errorf(
+						"mkfs: %s: directory already copied as %s, the source is not a tree: %w",
+						cleanPath(p),
+						prior,
+						ErrCorrupt,
+					)
+				}
+
+				fsys.copyDirs[sys.Ino] = cleanPath(p)
 			}
 		}
 
@@ -1798,24 +1822,6 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 		be = &builder.Entry{}
 	}
 
-	// A directory the source names twice, a hard link to it or a cycle
-	// through it, is not a tree: the copy would hold its subtree once per
-	// name, or never finish. The first name keeps it and the second is
-	// refused, the root included, which a cycle reaches again.
-	if typ == disk.StatTypeDir && be.Ino != 0 && fsys.copyDirs != nil {
-		key := hardlinkKey{be.Dev, be.Ino}
-		if prior, ok := fsys.copyDirs[key]; ok {
-			return fmt.Errorf(
-				"mkfs: %s: directory already copied as %s, the source is not a tree: %w",
-				p,
-				prior,
-				ErrCorrupt,
-			)
-		}
-
-		fsys.copyDirs[key] = p
-	}
-
 	if typ == disk.StatTypeSymlink {
 		if err := checkSymlinkTarget(p, be.LinkTarget); err != nil {
 			return err
@@ -2035,10 +2041,9 @@ func checkNameLen(name string) error {
 // shows up here: a source whose directory graph is not a tree — an EROFS
 // image with a directory reachable from itself, say — yields ever-deeper
 // paths, and CopyFrom walks it through fs.WalkDir, which has no cycle
-// detection for any fs.FS. A source whose FileInfo carries an inode
-// identity is refused at the revisit (copyDirs); for one that carries none,
-// refusing the path is what stops the walk with an error instead of letting
-// it run until memory is gone.
+// detection for any fs.FS. An image is refused at the revisit (copyDirs);
+// for any other source, refusing the path is what stops the walk with an
+// error instead of letting it run until memory is gone.
 func checkPathLen(name string) error {
 	if len(name) > maxPathLen {
 		return fmt.Errorf(

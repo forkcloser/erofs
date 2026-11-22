@@ -537,6 +537,15 @@ const direntNameMax = 255
 func buildCyclicImage(t *testing.T, nameLen int) []byte {
 	t.Helper()
 
+	return buildCycle(t, nameLen, false)
+}
+
+// buildCycle is buildCyclicImage, or with toRoot an image whose root holds
+// a dirent that points back at the root itself: a cycle through no other
+// directory.
+func buildCycle(t *testing.T, nameLen int, toRoot bool) []byte {
+	t.Helper()
+
 	d := strings.Repeat("d", nameLen)
 	e := strings.Repeat("e", nameLen)
 
@@ -577,11 +586,83 @@ func buildCyclicImage(t *testing.T, nameLen int) []byte {
 		t.Fatal(err)
 	}
 
+	if toRoot {
+		eNid, dNid = dNid, uint64(i.sb.RootNid)
+	}
+
 	if patchDirentNid(buf, eNid, dNid) == 0 {
 		t.Fatal("could not construct a directory cycle")
 	}
 
 	return buf
+}
+
+// TestUntrustedDirectoryCycleThroughTheRoot: a root that holds itself is
+// refused at the first return like any other cycle, in both modes, though
+// the root of an image this package writes is nid 0 and 0 is what a source
+// with no inode identity reports.
+func TestUntrustedDirectoryCycleThroughTheRoot(t *testing.T) {
+	t.Parallel()
+
+	buf := buildCycle(t, 1, true)
+
+	for _, metadataOnly := range []bool{false, true} {
+		img, err := Open(bytes.NewReader(buf))
+		if err != nil {
+			t.Fatalf("cyclic image failed to open: %v", err)
+		}
+
+		if root := img.(*image).sb.RootNid; root != 0 {
+			t.Fatalf("the premise: the root is nid %d, want 0", root)
+		}
+
+		var opts []CopyOpt
+		if metadataOnly {
+			opts = append(opts, MetadataOnly())
+		}
+
+		err = Create(&seekBuf{}).CopyFrom(img, opts...)
+		if !errors.Is(err, ErrCorrupt) {
+			t.Errorf("CopyFrom (metadata only: %t) = %v, want ErrCorrupt", metadataOnly, err)
+		}
+	}
+}
+
+// TestCopyFromAWriterNotClosed: a Writer not yet closed is a source whose
+// entries carry no inode identity; its directories are not taken for one
+// directory named twice.
+func TestCopyFromAWriterNotClosed(t *testing.T) {
+	t.Parallel()
+
+	source := Create(&seekBuf{})
+
+	for _, dir := range []string{"/a", "/a/b", "/c"} {
+		if err := source.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out := &seekBuf{}
+	w := Create(out)
+
+	if err := w.CopyFrom(source); err != nil {
+		t.Fatalf("CopyFrom a Writer not closed: %v", err)
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	img, err := Open(bytes.NewReader(out.buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, dir := range []string{"a", "a/b", "c"} {
+		if info, err := fs.Stat(img, dir); err != nil || !info.IsDir() {
+			t.Errorf("%s in the copy: %v", dir, err)
+		}
+	}
 }
 
 // TestUntrustedDirectoryCycleTerminates covers a dirent graph that is not a
