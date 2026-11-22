@@ -75,6 +75,57 @@ func setXattr(stat *Stat, nid uint64, name, value string) error {
 	return nil
 }
 
+// sharedXattr reads the entry at addr in the shared xattr area: its header,
+// then what follows it, the rest of the name and the value in one string,
+// e_name_len bytes of the first. They run on for as long as the header
+// says, across blocks: the kernel reads them a block at a time (xattr.c:
+// erofs_xattr_copy_to_buffer), and mkfs.erofs lays the area out as one
+// buffer with no regard for where a block ends.
+func (img *image) sharedXattr(addr int64) (entry disk.XattrEntry, body string, err error) {
+	blk, err := img.loadAt(addr, int64(1<<img.sb.BlkSizeBits))
+	if err != nil {
+		return entry, "", err
+	}
+
+	raw := blk.bytes()
+	if len(raw) < disk.SizeXattrEntry {
+		img.putBlock(blk)
+
+		return entry, "", fmt.Errorf("the image ends inside the entry at %d: %w", addr, ErrCorrupt)
+	}
+
+	entry.Unmarshal(raw)
+	raw = raw[disk.SizeXattrEntry:]
+
+	need := int(entry.NameLen) + int(entry.ValueLen)
+	if len(raw) >= need {
+		body = string(raw[:need])
+
+		img.putBlock(blk)
+
+		return entry, body, nil
+	}
+
+	// At most a name of 255 bytes and a value of 65535.
+	long := make([]byte, 0, need)
+	long = append(long, raw...)
+
+	img.putBlock(blk)
+
+	for len(long) < need {
+		blk, err = img.loadAt(addr+disk.SizeXattrEntry+int64(len(long)), int64(need-len(long)))
+		if err != nil {
+			return entry, "", err
+		}
+
+		long = append(long, blk.bytes()...)
+
+		img.putBlock(blk)
+	}
+
+	return entry, string(long), nil
+}
+
 // loadXattrs reads the extended attributes for the file's inode and
 // populates the given Stat's Xattrs map.
 //
@@ -138,22 +189,15 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 		// widened before scaling: the multiply would otherwise wrap in uint32.
 		sharedAddr := int64(b.img.sb.XattrBlkAddr)<<b.img.sb.BlkSizeBits + int64(xattrAddr)*4
 
-		var sblk *block
+		var (
+			xattrEntry disk.XattrEntry
+			body       string
+		)
 
-		sblk, err = b.img.loadAt(sharedAddr, int64(1<<b.img.sb.BlkSizeBits))
+		xattrEntry, body, err = b.img.sharedXattr(sharedAddr)
 		if err != nil {
-			return fmt.Errorf("failed to read shared xattr body for nid %d: %w", b.nid, err)
+			return fmt.Errorf("shared xattr for nid %d: %w", b.nid, err)
 		}
-
-		sb := sblk.bytes()
-		if len(sb) < disk.SizeXattrEntry {
-			b.img.putBlock(sblk)
-			return fmt.Errorf("shared xattr block too small for nid %d: %w", b.nid, ErrCorrupt)
-		}
-
-		var xattrEntry disk.XattrEntry
-		xattrEntry.Unmarshal(sb)
-		sb = sb[disk.SizeXattrEntry:]
 
 		var prefix string
 		if xattrEntry.NameIndex&disk.XattrLongPrefixFlag != 0 {
@@ -162,28 +206,15 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 
 			prefix, err = b.img.getLongPrefix(longPrefixIndex)
 			if err != nil {
-				b.img.putBlock(sblk)
 				return fmt.Errorf("failed to get long prefix for shared xattr nid %d: %w", b.nid, err)
 			}
 		} else if prefix, err = xattrIndex(xattrEntry.NameIndex).prefix(); err != nil {
-			b.img.putBlock(sblk)
 			return fmt.Errorf("shared xattr for nid %d: %w", b.nid, err)
 		}
 
-		if len(sb) < int(xattrEntry.NameLen)+int(xattrEntry.ValueLen) {
-			b.img.putBlock(sblk)
-			return fmt.Errorf("shared xattr too long for nid %d: %w", b.nid, ErrCorrupt)
-		}
-
-		name := prefix + string(sb[:xattrEntry.NameLen])
-
-		sb = sb[xattrEntry.NameLen:]
-		if err = setXattr(stat, b.nid, name, string(sb[:xattrEntry.ValueLen])); err != nil {
-			b.img.putBlock(sblk)
+		if err = setXattr(stat, b.nid, prefix+body[:xattrEntry.NameLen], body[xattrEntry.NameLen:]); err != nil {
 			return err
 		}
-
-		b.img.putBlock(sblk)
 
 		xb = xb[4:]
 	}
