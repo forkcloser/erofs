@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/forkcloser/erofs"
@@ -159,4 +160,64 @@ func lstatNode(t *testing.T, p string, n corpus.Node) corpus.Node {
 	}
 
 	return n
+}
+
+// TestContractCopyFromAHostDirectoryReachedTwice: a host directory that two
+// paths reach, which is what a bind mount shows (one device and inode under
+// both), is a directory at each path of the copy, with its content under
+// both, in both modes: mkfs.erofs never matches a directory by its identity
+// and gives each path its own. The copy was refused as ErrCorrupt, "the
+// source is not a tree", for a tree that is one.
+func TestContractCopyFromAHostDirectoryReachedTwice(t *testing.T) {
+	t.Parallel()
+
+	shared := func() *fstest.MapFile {
+		return &fstest.MapFile{Mode: fs.ModeDir | 0o755, Sys: &syscall.Stat_t{Dev: 5, Ino: 7, Nlink: 2}}
+	}
+
+	src := fstest.MapFS{
+		"data":        shared(),
+		"data/f":      &fstest.MapFile{Data: []byte("content\n"), Mode: 0o644},
+		"mnt":         &fstest.MapFile{Mode: fs.ModeDir | 0o755},
+		"mnt/bound":   shared(),
+		"mnt/bound/f": &fstest.MapFile{Data: []byte("content\n"), Mode: 0o644},
+		"mnt/other":   &fstest.MapFile{Mode: fs.ModeDir | 0o755},
+		"mnt/other/g": &fstest.MapFile{Data: []byte("g\n"), Mode: 0o644},
+	}
+
+	for _, metadataOnly := range []bool{false, true} {
+		var opts []erofs.CopyOpt
+		if metadataOnly {
+			opts = append(opts, erofs.MetadataOnly())
+		}
+
+		out := &testBuffer{}
+		w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+		if err := errors.Join(w.CopyFrom(src, opts...), w.Close()); err != nil {
+			t.Fatalf("CopyFrom%s: %v", copyMode(metadataOnly), err)
+		}
+
+		copied := openImage(t, corpus.Image{Name: "host-twice", Img: out.Bytes()})
+
+		for _, name := range []string{"data", "mnt/bound"} {
+			if info, err := fs.Stat(copied, name); err != nil || !info.IsDir() {
+				t.Errorf("CopyFrom%s: %s: %v, %v, want a directory", copyMode(metadataOnly), name, info, err)
+			}
+		}
+
+		for _, name := range []string{"data/f", "mnt/bound/f"} {
+			if metadataOnly {
+				if _, err := fs.Stat(copied, name); err != nil {
+					t.Errorf("CopyFrom%s: %s: %v", copyMode(metadataOnly), name, err)
+				}
+
+				continue
+			}
+
+			if data, err := fs.ReadFile(copied, name); err != nil || string(data) != "content\n" {
+				t.Errorf("CopyFrom%s: %s holds %q, %v", copyMode(metadataOnly), name, data, err)
+			}
+		}
+	}
 }
