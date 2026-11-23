@@ -168,8 +168,13 @@ func TestContractCopyLeavesOutASourcesHiddenAttributes(t *testing.T) {
 		t.Run(hidden, func(t *testing.T) {
 			t.Parallel()
 
+			// The same on the file and on the root, which the copy takes
+			// by a path of its own.
 			handed := map[string]string{"user.ok": "1", hidden: "x"}
-			src := fstest.MapFS{"f": &fstest.MapFile{Data: []byte("f"), Mode: 0o644, Sys: &erofs.Stat{Xattrs: handed}}}
+			src := fstest.MapFS{
+				".": &fstest.MapFile{Mode: fs.ModeDir | 0o755, Sys: &erofs.Stat{Xattrs: handed}},
+				"f": &fstest.MapFile{Data: []byte("f"), Mode: 0o644, Sys: &erofs.Stat{Xattrs: handed}},
+			}
 
 			out := &testBuffer{}
 			w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
@@ -187,17 +192,20 @@ func TestContractCopyLeavesOutASourcesHiddenAttributes(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			in, err := ref.Resolve("f", 0)
-			if err != nil {
-				t.Fatal(err)
-			}
+			for _, p := range []string{"f", "."} {
+				in, err := ref.Resolve(p, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
 
-			if len(in.Xattrs) != 1 || !maps.Equal(xattrsOf(in), map[string]string{"user.ok": "1"}) {
-				t.Errorf(
-					"the image stores %d entries, listing %v; want user.ok alone",
-					len(in.Xattrs),
-					corpus.Keys(xattrsOf(in)),
-				)
+				if len(in.Xattrs) != 1 || !maps.Equal(xattrsOf(in), map[string]string{"user.ok": "1"}) {
+					t.Errorf(
+						"the image stores %d entries on %s, listing %v; want user.ok alone",
+						len(in.Xattrs),
+						p,
+						corpus.Keys(xattrsOf(in)),
+					)
+				}
 			}
 
 			// The one call that refuses.
