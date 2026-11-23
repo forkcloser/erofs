@@ -35,8 +35,11 @@ package erofs_test
 //     on Device are the content verbatim; a hole entry has Offset -1 and
 //     stands for zeros.
 //   - The README: a symlink target is resolved from the image root, as
-//     under a kernel mount; an xattr with an undefined name index (7 and
-//     up) or a duplicated key is refused; index 0 is a name stored whole.
+//     under a kernel mount; an xattr name an inode lists twice is
+//     refused.
+//   - The package documentation: an xattr the kernel lists on no mount
+//     (name index 0, 5 or 7 and up, a long prefix past the table or built
+//     on such an index) is left out.
 //   - The format and the kernel's reader, through the reference: what
 //     every field means, what reads as what, and what is refused.
 
@@ -504,10 +507,7 @@ func checkInfo(t *testing.T, name string, info fs.FileInfo, in *erofsspec.Inode)
 		return
 	}
 
-	wantXattrs := map[string]string{}
-	for _, x := range in.Xattrs {
-		wantXattrs[x.Name()] = string(x.Value)
-	}
+	wantXattrs := xattrsOf(in)
 
 	for field, pair := range map[string][2]any{
 		"Mode":    {st.Mode, info.Mode()},
@@ -1216,7 +1216,7 @@ func judge(ref, got verdict) string {
 			// inode's and as invalid where it is a path's, a bound it
 			// states, kept as a documented divergence.
 			return ""
-		case got.class == "corrupt" && (ref.dupXattr || ref.undefinedXattr || ref.badTarget || ref.extentsOut || ref.direntType || ref.nidHigh || ref.nidOut || !ref.complete):
+		case got.class == "corrupt" && (ref.dupXattr || ref.badTarget || ref.extentsOut || ref.direntType || ref.nidHigh || ref.nidOut || !ref.complete):
 			return ""
 		case (got.class == "corrupt" || got.class == "invalid") && ref.sharedOut:
 			return ""
@@ -1272,7 +1272,6 @@ type verdict struct {
 	longSymlink    bool // a symlink target over the package's 4096-byte bound: the kernel reads it, the reader refuses
 	sharedOut      bool // the superblock's shared-xattr start past the image: the kernel fails on use, the reader at Open
 	dupXattr       bool // an inode names one xattr twice, which the README says is refused
-	undefinedXattr bool // an xattr index with no prefix (7 and up, or a long prefix past the table), refused likewise
 	badTarget      bool // a symlink whose stored target is empty or holds a NUL, which the package refuses
 	unsortedDir    bool // a directory block out of name order: what a lookup finds there is the search's, not the format's
 	direntType     bool // a dirent whose type disagrees with its inode's mode: the kernel serves both, the reader refuses
@@ -2320,19 +2319,14 @@ func referenceVerdict(img, blob []byte) verdict {
 		xattrs := map[string]string{}
 
 		for _, x := range in.Xattrs {
-			name := x.Name()
-
-			switch {
-			case x.Unresolved && x.Index == 5:
-				// Index 5 is the format's "lustre." (erofs_fs.h), which the
-				// kernel has no handler for: its listxattr hides the
-				// attribute. The package lists it under the format's
-				// spelling, as erofs-utils does; the dump takes that
-				// spelling, the divergence being the kernel's silence.
-				name = "lustre." + x.Suffix
-			case x.Unresolved && x.Index != 0:
-				v.undefinedXattr = true
+			// An index with no handler in the kernel (0, 5, 7 and up, a
+			// long prefix past the table or built on one): its listxattr
+			// leaves the entry out, and so does the package.
+			if x.Unresolved {
+				continue
 			}
+
+			name := x.Name()
 
 			if _, dup := xattrs[name]; dup {
 				v.dupXattr = true

@@ -1931,7 +1931,10 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 		}
 	}
 
-	for name, value := range be.Xattrs {
+	// A source's attribute the kernel would list on no mount is left out,
+	// as an image's own is, and fails no copy: Setxattr alone refuses one.
+	xattrs := listedXattrs(be.Xattrs)
+	for name, value := range xattrs {
 		if err := validateXattr(name, value); err != nil {
 			return fmt.Errorf("mkfs: %s: %w", p, err)
 		}
@@ -1955,7 +1958,7 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 		root.mtime = be.Mtime
 
 		root.mtimeNs = be.MtimeNs
-		root.xattrs = be.Xattrs
+		root.xattrs = xattrs
 
 		return nil
 	}
@@ -1988,7 +1991,7 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 		mtimeNs:    be.MtimeNs,
 		size:       size,
 		rdev:       be.Rdev,
-		xattrs:     be.Xattrs,
+		xattrs:     xattrs,
 		linkTarget: be.LinkTarget,
 		chunks:     be.Chunks,
 		contiguous: be.Contiguous,

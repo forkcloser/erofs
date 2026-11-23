@@ -9,16 +9,44 @@ import (
 	"github.com/forkcloser/erofs/internal/disk"
 )
 
-// xattrSplit splits a full xattr name into (NameIndex, suffix). The prefixes
-// are the ones xattrIndex spells, so the two directions cannot drift.
+// xattrSplit splits a full xattr name into (NameIndex, suffix), by the
+// prefixes the kernel lists. Index 0 with the name whole: it has none of
+// them, and stored so no mount would show it.
 func xattrSplit(name string) (uint8, string) {
-	for idx := xattrIndex(1); idx <= xattrIndexLast; idx++ {
-		if p := idx.String(); strings.HasPrefix(name, p) {
-			return uint8(idx), name[len(p):]
+	for idx := uint8(1); idx <= lastListedIndex; idx++ {
+		if p, ok := builtinPrefix(idx); ok && strings.HasPrefix(name, p) {
+			return idx, name[len(p):]
 		}
 	}
 
 	return 0, name
+}
+
+// listedXattrs is attrs without the names the kernel serves under no prefix:
+// attrs itself when it holds none, which is nearly always, and else a map of
+// its own, attrs being the source's.
+func listedXattrs(attrs map[string]string) map[string]string {
+	hidden := 0
+
+	for name := range attrs {
+		if idx, _ := xattrSplit(name); idx == 0 {
+			hidden++
+		}
+	}
+
+	if hidden == 0 {
+		return attrs
+	}
+
+	listed := make(map[string]string, len(attrs)-hidden)
+
+	for name, value := range attrs {
+		if idx, _ := xattrSplit(name); idx != 0 {
+			listed[name] = value
+		}
+	}
+
+	return listed
 }
 
 // On-disk xattr field limits. erofs_xattr_entry stores the name suffix
@@ -39,11 +67,20 @@ const (
 // beyond xattr_isize".
 func validateXattr(name, value string) error {
 	idx, suffix := xattrSplit(name)
-	// Linux refuses an empty name and a bare namespace prefix ("user.",
-	// "trusted.") with EINVAL, and neither can be addressed by getxattr once
-	// stored; the two POSIX ACL names are whole names the format indexes,
-	// and carry no suffix by design.
-	if suffix == "" && (idx == 0 || strings.HasSuffix(xattrIndex(idx).String(), ".")) {
+	// The format would store it, under index 0, and the kernel would list
+	// it on no mount and find it for no getxattr: an attribute written to
+	// be lost.
+	if idx == 0 {
+		return fmt.Errorf(
+			"xattr name %q has none of the prefixes the kernel serves (user., trusted., security., "+
+				"system.posix_acl_access, system.posix_acl_default): %w", name, ErrInvalid,
+		)
+	}
+	// Linux refuses a bare namespace prefix ("user.", "trusted.") with
+	// EINVAL, and it cannot be addressed by getxattr once stored; the two
+	// POSIX ACL names are whole names the format indexes, and carry no
+	// suffix by design.
+	if prefix, _ := builtinPrefix(idx); suffix == "" && strings.HasSuffix(prefix, ".") {
 		return fmt.Errorf("xattr name %q has nothing after its prefix: %w", name, ErrInvalid)
 	}
 
