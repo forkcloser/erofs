@@ -2033,6 +2033,21 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 		fsys.copyLinks[hardlinkKey{be.Dev, be.Ino}] = fe
 	}
 
+	// From here the entry is in the tree and what is left can fail: its
+	// chunks placed on the copy's devices, its data read into a data file.
+	// Left there, Close would write it with a size its data does not have.
+	if err := fsys.settle(p, fe, be, typ, size); err != nil {
+		fsys.unlinkEntry(fe)
+
+		return err
+	}
+
+	return nil
+}
+
+// settle finishes an entry add has placed: its chunks on the copy's devices
+// when metadata-only, its data kept for Close or read into the data file.
+func (fsys *Writer) settle(p string, fe *fsEntry, be *builder.Entry, typ uint16, size uint64) error {
 	if fsys.copyMetadataOnly {
 		fe.metadataOnly = true
 		if err := fsys.remapChunkDevices(p, fe.chunks); err != nil {
@@ -2040,11 +2055,15 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 		}
 	}
 
-	// Write regular file data.
-	// Skip entirely in metadata-only mode.
-	needData := typ == disk.StatTypeReg && size > 0 && be.Data != nil &&
-		!fsys.copyMetadataOnly
-	if needData && be.ChunksOfData {
+	// A regular file's data, when the copy stores it: none of it in
+	// metadata-only mode.
+	if typ != disk.StatTypeReg || size == 0 || be.Data == nil || fsys.copyMetadataOnly {
+		fe.fileClosed = true
+
+		return nil
+	}
+
+	if be.ChunksOfData {
 		fe.fileClosed = true
 
 		if fsys.dataFile != nil {
@@ -2056,52 +2075,52 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 		return nil
 	}
 
-	if needData {
-		// Data is stored locally; clear any source chunk mappings.
-		fe.chunks = nil
-		fe.contiguous = false
+	// Data is stored locally; clear any source chunk mappings.
+	fe.chunks = nil
+	fe.contiguous = false
 
-		if fsys.dataFile != nil {
-			// Data file mode: copy through File for block-aligned padding and chunk recording.
-			if err := fsys.alignDataOff(); err != nil {
-				return err
-			}
-
-			f := &File{fs: fsys, entry: fe}
-			f.dataStartOff = fsys.dataOff
-			fe.dataStartOff = fsys.dataOff
-
-			// As Close reads it without a data file: the size the source
-			// declared and no more, a reader that goes on being one that
-			// never ends, and an error for less.
-			written, err := f.ReadFrom(io.LimitReader(be.Data, info.Size()))
-			// The source's file is done with here, read or not.
-			if c, ok := be.Data.(io.Closer); ok {
-				_ = c.Close()
-			}
-
-			if err != nil {
-				return err
-			}
-
-			if written != info.Size() {
-				return fmt.Errorf("mkfs: %s: short read: got %d bytes, expected %d: %w",
-					p, written, info.Size(), io.ErrUnexpectedEOF)
-			}
-
-			if err := f.Close(); err != nil {
-				return err
-			}
-		} else {
-			// Spool mode: keep a direct reference to avoid copying.
-			fe.directData = be.Data
-			fe.fileClosed = true
-		}
-	} else {
-		fe.fileClosed = true
+	if fsys.dataFile != nil {
+		return fsys.toDataFile(p, fe, be.Data, size)
 	}
 
+	// Spool mode: keep a direct reference to avoid copying.
+	fe.directData = be.Data
+	fe.fileClosed = true
+
 	return nil
+}
+
+// toDataFile reads fe's data into the data file, through a File for the
+// padding to a block and the chunks. As Close reads it without a data file:
+// the size the source declared and no more, a reader that goes on being one
+// that never ends, and an error for less.
+func (fsys *Writer) toDataFile(p string, fe *fsEntry, data io.Reader, size uint64) error {
+	if err := fsys.alignDataOff(); err != nil {
+		return err
+	}
+
+	f := &File{fs: fsys, entry: fe}
+	f.dataStartOff = fsys.dataOff
+	fe.dataStartOff = fsys.dataOff
+
+	declared := int64(size) // #nosec G115 -- add took it from an int64 that was not negative
+
+	written, err := f.ReadFrom(io.LimitReader(data, declared))
+	// The source's file is done with here, read or not.
+	if c, ok := data.(io.Closer); ok {
+		_ = c.Close()
+	}
+
+	if err != nil {
+		return err
+	}
+
+	if written != declared {
+		return fmt.Errorf("mkfs: %s: short read: got %d bytes, expected %d: %w",
+			p, written, declared, io.ErrUnexpectedEOF)
+	}
+
+	return f.Close()
 }
 
 // checkNoOpenFile reports an error when a file from Create is still open.
