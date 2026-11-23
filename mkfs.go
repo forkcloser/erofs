@@ -756,7 +756,9 @@ func (l listedOnce) ReadDir(name string) ([]fs.DirEntry, error) {
 // files are first opened then, by name: one that cannot be opened, or has
 // become shorter, fails Close; one that has grown is copied as it was
 // found, its first bytes; and a name that holds another file by then is
-// read as that file, under the metadata of the first.
+// read as that file, under the metadata of the first. With a data file the
+// same is so at once: a file shorter than it was found fails CopyFrom, and
+// one that has grown is copied to the size it was found with.
 // Reads symlink targets via readLinker interface when Entry.LinkTarget is empty.
 // If src implements blockSizer, the image block size is set accordingly.
 // A directory an EROFS image names twice, a hard link to it or a cycle
@@ -2069,7 +2071,10 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 			f.dataStartOff = fsys.dataOff
 			fe.dataStartOff = fsys.dataOff
 
-			_, err := f.ReadFrom(be.Data)
+			// As Close reads it without a data file: the size the source
+			// declared and no more, a reader that goes on being one that
+			// never ends, and an error for less.
+			written, err := f.ReadFrom(io.LimitReader(be.Data, info.Size()))
 			// The source's file is done with here, read or not.
 			if c, ok := be.Data.(io.Closer); ok {
 				_ = c.Close()
@@ -2077,6 +2082,11 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 
 			if err != nil {
 				return err
+			}
+
+			if written != info.Size() {
+				return fmt.Errorf("mkfs: %s: short read: got %d bytes, expected %d: %w",
+					p, written, info.Size(), io.ErrUnexpectedEOF)
 			}
 
 			if err := f.Close(); err != nil {
