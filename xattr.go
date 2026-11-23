@@ -118,11 +118,28 @@ func (img *image) sharedXattr(addr int64) (entry disk.XattrEntry, body string, e
 	return entry, string(long), nil
 }
 
+// xattrsListable refuses the attributes of an inode in an image that says
+// its shared entries are in the metabox: Open takes no image with one, and
+// the kernel, with none, fails the listing of every inode that has an xattr
+// body, whether or not it names a shared entry (xattr.c:
+// erofs_xattr_iter_shared begins with the metabox's buffer).
+func (img *image) xattrsListable(nid uint64) error {
+	if img.sb.FeatureCompat&disk.FeatureCompatSharedEAInMetabox != 0 {
+		return fmt.Errorf("xattrs of nid %d: shared entries in a metabox the image does not have: %w", nid, ErrCorrupt)
+	}
+
+	return nil
+}
+
 // loadXattrs reads the extended attributes for the file's inode and
 // populates the given Stat's Xattrs map.
 //
 //nolint:gocognit // the xattr body decoded field by field, shared then inline, over one block cursor
 func loadXattrs(b *file, stat *Stat) (err error) {
+	if err = b.img.xattrsListable(b.nid); err != nil {
+		return err
+	}
+
 	ino := b.info
 	// #nosec G115 -- readInfo bounded the nid through checkNid
 	addr := b.img.metaStartPos() + int64(ino.nid*disk.SizeInodeCompact) + int64(ino.icsize)

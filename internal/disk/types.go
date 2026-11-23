@@ -73,6 +73,9 @@ const (
 	// FeatureCompatSBChksum says the superblock carries a CRC-32C of its
 	// block in Checksum (EROFS_FEATURE_COMPAT_SB_CHKSUM).
 	FeatureCompatSBChksum = 0x00000001
+	// FeatureCompatSharedEAInMetabox says the shared xattr entries are read
+	// through the metabox inode (EROFS_FEATURE_COMPAT_SHARED_EA_IN_METABOX).
+	FeatureCompatSharedEAInMetabox = 0x00000008
 	// FeatureCompatIshareXattrs says IshareXattrPrefixID names a long xattr
 	// prefix; the kernel refuses the superblock when the id is not below
 	// XattrPrefixCount (EROFS_FEATURE_COMPAT_ISHARE_XATTRS).
