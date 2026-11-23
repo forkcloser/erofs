@@ -420,6 +420,81 @@ func TestContractRemovingWhatACopyPlaced(t *testing.T) {
 	}
 }
 
+// TestContractAMarkerOverAFilesFirstNameLeavesItUnderItsOther: a file whose
+// first name a merged layer's marker takes, or RemoveAll, or a file put
+// where its directory was, goes on under its other name, outside: the name
+// that went is gone from its directory, and the file has one name.
+func TestContractAMarkerOverAFilesFirstNameLeavesItUnderItsOther(t *testing.T) {
+	t.Parallel()
+
+	file := func(content string) *fstest.MapFile { return &fstest.MapFile{Data: []byte(content)} }
+
+	for name, tc := range map[string]struct {
+		take func(w *erofs.Writer) error
+		want []string
+	}{
+		"an opaque marker in its directory": {
+			func(w *erofs.Writer) error {
+				return w.CopyFrom(fstest.MapFS{"d/.wh..wh..opq": file(""), "d/new": file("new")}, erofs.Merge())
+			},
+			[]string{"d/", "d/new", "e/", "e/other"},
+		},
+		"a whiteout of the name": {
+			func(w *erofs.Writer) error {
+				return w.CopyFrom(fstest.MapFS{"d/.wh.first": file("")}, erofs.Merge())
+			},
+			[]string{"d/", "d/sibling", "e/", "e/other"},
+		},
+		"a whiteout of its directory": {
+			func(w *erofs.Writer) error {
+				return w.CopyFrom(fstest.MapFS{".wh.d": file("")}, erofs.Merge())
+			},
+			[]string{"e/", "e/other"},
+		},
+		"RemoveAll of its directory": {
+			func(w *erofs.Writer) error { return w.RemoveAll("/d") },
+			[]string{"e/", "e/other"},
+		},
+		"a file where its directory was": {
+			func(w *erofs.Writer) error { return w.CopyFrom(fstest.MapFS{"d": file("now a file")}) },
+			[]string{"d", "e/", "e/other"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			out := &testBuffer{}
+			w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+			writeFile(t, w, "/d/first", []byte("content"))
+			writeFile(t, w, "/d/sibling", []byte("sibling"))
+
+			if err := errors.Join(w.Link("/d/first", "/e/other"), tc.take(w)); err != nil {
+				t.Fatal(err)
+			}
+
+			if got := namesOf(t, w, out); !slices.Equal(got, tc.want) {
+				t.Fatalf("the image holds %v; want %v", got, tc.want)
+			}
+
+			fsys := openWithDevices(t, out.Bytes())
+
+			got, err := fs.ReadFile(fsys, "e/other")
+			if err != nil || string(got) != "content" {
+				t.Errorf("e/other reads %q, %v; want the file's content", got, err)
+			}
+
+			info, err := fs.Stat(fsys, "e/other")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if st, ok := info.Sys().(*erofs.Stat); !ok || st.Nlink != 1 {
+				t.Errorf("e/other has %+v; want a link count of 1", info.Sys())
+			}
+		})
+	}
+}
+
 // heapAfter is the heap in use once what can be collected is.
 func heapAfter() int64 {
 	var stats runtime.MemStats
@@ -463,6 +538,78 @@ func TestContractWriterHoldsNothingOfARemovedName(t *testing.T) {
 		}},
 		{"a directory removed with what it holds", rounds, bound, func(w *erofs.Writer) error {
 			return errors.Join(w.Mkdir("/d/x", 0o755), w.Mkdir("/d/x/y", 0o755), w.Link("/d/f", "/d/x/l"), w.RemoveAll("/d/x"))
+		}},
+		{"a file made and linked, its first name removed and then its other", rounds, bound, func(w *erofs.Writer) error {
+			f, err := w.Create("/d/first")
+			if err != nil {
+				return err
+			}
+
+			return errors.Join(f.Close(), w.Link("/d/first", "/d/other"), w.Remove("/d/first"), w.Remove("/d/other"))
+		}},
+		// The file goes on under another name and comes back, a third name
+		// made before and removed in between: what is removed while the
+		// names are in order.
+		{"a file handed on and back, a name removed in between", rounds, bound, func(w *erofs.Writer) error {
+			return errors.Join(
+				w.Link("/d/f", "/d/g"), w.Link("/d/f", "/d/h"), w.Remove("/d/f"),
+				w.Remove("/d/h"), w.Link("/d/g", "/d/f"), w.Remove("/d/g"),
+			)
+		}},
+		// The names linked after the file was handed on once, the file
+		// handed on again, and each of them removed: one name stays, and
+		// keeps the record of the others.
+		{"every name linked to a file handed on, then each removed", 1, boundAfterAll, func(w *erofs.Writer) error {
+			if err := errors.Join(w.Link("/d/f", "/d/a"), w.Link("/d/f", "/d/g"), w.Remove("/d/f")); err != nil {
+				return err
+			}
+
+			// The file is under /d/a, the others in order; the names linked
+			// now wait, and join them when /d/a goes and /d/g takes the file.
+			for i := range rounds {
+				if err := w.Link("/d/a", "/d/x"+strconv.Itoa(i)); err != nil {
+					return err
+				}
+			}
+
+			if err := w.Remove("/d/a"); err != nil {
+				return err
+			}
+
+			for i := range rounds {
+				if err := w.Remove("/d/x" + strconv.Itoa(i)); err != nil {
+					return err
+				}
+			}
+
+			return w.Link("/d/g", "/d/f")
+		}},
+		// Each name removed is the one the file is under: it goes on under
+		// the next, and two names are left, one keeping the record of the
+		// other.
+		{"every name of a file but two removed in path order", 1, boundAfterAll, func(w *erofs.Writer) error {
+			names := make([]string, 0, rounds)
+
+			for i := range rounds {
+				names = append(names, "/d/g"+strconv.Itoa(i))
+			}
+
+			slices.Sort(names)
+
+			for _, name := range names {
+				if err := w.Link("/d/f", name); err != nil {
+					return err
+				}
+			}
+
+			// /d/f, then each /d/g…; /d/stays and the last of them stay.
+			for _, name := range append([]string{"/d/f"}, names[:len(names)-1]...) {
+				if err := w.Remove(name); err != nil {
+					return err
+				}
+			}
+
+			return nil
 		}},
 		// Not one name over and over: as many at once, then each removed,
 		// the directory that held them staying.

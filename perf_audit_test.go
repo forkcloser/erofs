@@ -5,6 +5,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -309,6 +310,24 @@ func BenchmarkPerfRemoveNamesOfOneInode(b *testing.B) {
 
 			if err := w.RemoveAll("/d"); err != nil {
 				b.Fatal(err)
+			}
+		}},
+		{"every name in path order", "/a", func(b *testing.B, w *Writer, n int) {
+			b.Helper()
+
+			order := make([]string, 0, n+1)
+			order = append(order, "/a")
+
+			for i := range n {
+				order = append(order, "/d/l"+strconv.Itoa(i))
+			}
+
+			slices.Sort(order)
+
+			for _, name := range order {
+				if err := w.Remove(name); err != nil {
+					b.Fatal(err)
+				}
 			}
 		}},
 	} {
