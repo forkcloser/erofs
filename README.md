@@ -187,6 +187,13 @@ Beyond `Create`, `Mkdir`, `Symlink` and `CopyFrom`:
   external data file for metadata-only images) and `WithTempDir` (where the
   spool lives otherwise). `CopyFrom` options: `MetadataOnly` and `Merge`.
 
+`CopyFrom` reads a source's file data when the image is written, at `Close`
+(at once, with a data file), one file open at a time: the source stays as it
+was until then. A host directory's files are first opened then, by name: one
+that cannot be opened, or has become shorter, fails `Close`; one that has
+grown is copied as it was found, its first bytes; and a name that holds
+another file by then is read as that file, under the metadata of the first.
+
 Paths given to the writer are cleaned: `x`, `/x` and `./x` name the same
 entry. The reader is stricter and follows the `fs.FS` convention exactly.
 

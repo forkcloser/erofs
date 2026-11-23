@@ -740,6 +740,13 @@ func (l listedOnce) ReadDir(name string) ([]fs.DirEntry, error) {
 
 // CopyFrom walks an fs.FS and adds all entries.
 // Opens files for data when Entry.Data is nil.
+// A file's data is read when the image is written, at Close, or at once
+// into a data file: until then the Writer holds the file's name in src and
+// no descriptor, so src stays as it was until Close. A host directory's
+// files are first opened then, by name: one that cannot be opened, or has
+// become shorter, fails Close; one that has grown is copied as it was
+// found, its first bytes; and a name that holds another file by then is
+// read as that file, under the metadata of the first.
 // Reads symlink targets via readLinker interface when Entry.LinkTarget is empty.
 // If src implements blockSizer, the image block size is set accordingly.
 // A directory an EROFS image names twice, a hard link to it or a cycle
@@ -1782,6 +1789,15 @@ func (fsys *Writer) addRegular(src fs.FS, fpath, p string, info fs.FileInfo, be 
 		}
 	}
 
+	later := &sourceFile{src: src, name: fpath}
+	// A file of the host is opened when its data is read, and only then.
+	// Any other may be an image's, with holes to keep, and is asked now.
+	if hostFile(info) {
+		be.Data = later
+
+		return fsys.add(p, &entryFileInfo{info: info, sys: be})
+	}
+
 	f, err := src.Open(fpath)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", fpath, err)
@@ -1805,9 +1821,72 @@ func (fsys *Writer) addRegular(src fs.FS, fpath, p string, info fs.FileInfo, be 
 		}
 	}
 
-	be.Data = f
+	if _, ok := f.(*file); ok {
+		// A file of an image holds no descriptor of its own.
+		be.Data = f
+
+		return fsys.add(p, &entryFileInfo{info: info, sys: be})
+	}
+	// Any other file is closed again, and opened when its data is read:
+	// kept open, a copy would hold one descriptor a file until Close.
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", fpath, err)
+	}
+
+	be.Data = later
 
 	return fsys.add(p, &entryFileInfo{info: info, sys: be})
+}
+
+// sourceFile is a file of the source a copy reads, opened when its data is
+// first asked for and closed when the writer has taken it: until then the
+// Writer holds a way to open it, not a descriptor.
+type sourceFile struct {
+	src  fs.FS
+	name string
+	f    fs.File
+}
+
+func (s *sourceFile) Read(p []byte) (int, error) {
+	f, err := s.file()
+	if err != nil {
+		return 0, err
+	}
+
+	return f.Read(p)
+}
+
+// Close closes the file if it was opened.
+func (s *sourceFile) Close() error {
+	if s.f == nil {
+		return nil
+	}
+
+	f := s.f
+	s.f = nil
+
+	return f.Close() //nolint:wrapcheck // the source's own error
+}
+
+// file is the source's file, opened on the first call, by name: what the
+// name holds by then is what is read, for as many bytes as the copy found,
+// as mkfs.erofs reads a file its scan measured. A file that grew gives its
+// first bytes; one that shrank comes up short where it is read. Nothing
+// here tells another file under the name from the first: every test of it
+// (a size, an inode number) refuses some source that nobody touched.
+func (s *sourceFile) file() (fs.File, error) {
+	if s.f != nil {
+		return s.f, nil
+	}
+
+	f, err := s.src.Open(s.name)
+	if err != nil {
+		return nil, fmt.Errorf("open it where it was copied from: %w", err)
+	}
+
+	s.f = f
+
+	return s.f, nil
 }
 
 // add adds a single entry. Mode and Size come from info; extended metadata
@@ -1960,7 +2039,13 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 			f.dataStartOff = fsys.dataOff
 			fe.dataStartOff = fsys.dataOff
 
-			if _, err := f.ReadFrom(be.Data); err != nil {
+			_, err := f.ReadFrom(be.Data)
+			// The source's file is done with here, read or not.
+			if c, ok := be.Data.(io.Closer); ok {
+				_ = c.Close()
+			}
+
+			if err != nil {
 				return err
 			}
 
