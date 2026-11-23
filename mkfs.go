@@ -580,8 +580,13 @@ func (fsys *Writer) Setxattr(name, attr, value string) error {
 		return err
 	}
 
-	if e.xattrs == nil {
-		e.xattrs = make(map[string]string)
+	// The map may be one a source handed, its own and shared by other
+	// entries of the copy: the first write goes to a map of the Writer's.
+	if !e.xattrsOwned {
+		owned := make(map[string]string, len(e.xattrs)+1)
+		maps.Copy(owned, e.xattrs)
+
+		e.xattrs, e.xattrsOwned = owned, true
 	}
 
 	e.xattrs[attr] = value
@@ -785,6 +790,9 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 	if !root.IsDir() {
 		return fmt.Errorf("mkfs: the source's root: %w", ErrNotDirectory)
 	}
+	// A copy hands the root a map of its source's, in place: whatever the
+	// root holds from here on is not known to be the Writer's.
+	fsys.root.xattrsOwned = false
 	// Reset per-CopyFrom state.
 	fsys.copyMetadataOnly = false
 	fsys.copyMerge = false
@@ -1248,21 +1256,24 @@ func (f *File) Chown(uid, gid int) error {
 
 // fsEntry is the in-memory representation of a filesystem entry held by Writer.
 type fsEntry struct {
-	path       string
-	mode       uint16
-	uid, gid   uint32
-	atime      uint64
-	atimeNs    uint32
-	mtime      uint64
-	mtimeNs    uint32
-	nlink      uint32
-	nlinkSet   bool // true if SetNlink was called
-	size       uint64
-	rdev       uint32
-	xattrs     map[string]string
-	linkTarget string
-	chunks     []builder.Chunk
-	contiguous bool // data blocks are contiguous; flat-plain is sufficient
+	path     string
+	mode     uint16
+	uid, gid uint32
+	atime    uint64
+	atimeNs  uint32
+	mtime    uint64
+	mtimeNs  uint32
+	nlink    uint32
+	nlinkSet bool // true if SetNlink was called
+	size     uint64
+	rdev     uint32
+	xattrs   map[string]string
+	// xattrsOwned: xattrs is a map the Writer made. One a source handed is
+	// read and never written.
+	xattrsOwned bool
+	linkTarget  string
+	chunks      []builder.Chunk
+	contiguous  bool // data blocks are contiguous; flat-plain is sufficient
 	// chunksOfData: the chunks lay the file out over directData, which
 	// leaves its holes out; Close stores that data in this image and
 	// places the chunks on it.
