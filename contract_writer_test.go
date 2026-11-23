@@ -698,8 +698,12 @@ func TestContractWriterSetxattr(t *testing.T) {
 		{"trusted.t", "1", true},
 		{"security.s", "1", true},
 		{"system.posix_acl_access", "\x02\x00\x00\x00", true},
-		{long, "v", true},
-		{long + "n", "v", false},
+		// A name with none of the prefixes the kernel serves could only be
+		// stored under an index no mount lists: refused, whatever its length.
+		{long, "v", false},
+		{"com.apple.provenance", "v", false},
+		{"lustre.lov", "v", false},
+		{"system.other", "v", false},
 		{"user.", "v", false},
 		{"", "v", false},
 	}
@@ -739,12 +743,16 @@ func TestContractWriterSetxattr(t *testing.T) {
 	}
 }
 
-// xattrsOf is an inode's xattrs by full name; a name stored twice shows
-// as the test's failure through the count.
+// xattrsOf is an inode's xattrs by full name, those the kernel lists: an
+// entry under an index with no handler is in the image and on no mount. A
+// name stored twice shows as the test's failure through the count.
 func xattrsOf(in *erofsspec.Inode) map[string]string {
 	m := map[string]string{}
+
 	for _, x := range in.Xattrs {
-		m[x.Name()] = string(x.Value)
+		if !x.Unresolved {
+			m[x.Name()] = string(x.Value)
+		}
 	}
 
 	return m

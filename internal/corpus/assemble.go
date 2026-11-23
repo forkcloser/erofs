@@ -600,12 +600,14 @@ func Assembled() []AssembledSet {
 			Tree: func() []Node {
 				return []Node{
 					{
-						Path:   "f",
-						Type:   '0',
-						Mode:   0o644,
-						Data:   []byte("f\n"),
-						Sec:    AssembledBuildTime,
-						Xattrs: map[string]string{"com.apple.provenance": "\x01\x02\x03", "user.k": "v"},
+						Path: "f",
+						Type: '0',
+						Mode: 0o644,
+						Data: []byte("f\n"),
+						Sec:  AssembledBuildTime,
+						// The entry under index 0 is in the image and in no
+						// tree: the kernel lists it on no mount.
+						Xattrs: map[string]string{"user.k": "v"},
 					},
 				}
 			},

@@ -1708,7 +1708,8 @@ func TestShortReadIsNotZeroFilled(t *testing.T) {
 // TestXattrPrefixAndDuplicates covers the two ways an image can put the same
 // xattr name in the map twice: an undefined name index, which used to map to
 // the empty prefix and let "security.capability" be spelled out in full, and a
-// plain repeat of a key, which the map silently took last-one-wins.
+// plain repeat of a key, which the map silently took last-one-wins. An entry
+// under an undefined index is left out, as the kernel lists it on no mount.
 func TestXattrPrefixAndDuplicates(t *testing.T) {
 	t.Parallel()
 
@@ -1771,10 +1772,13 @@ func TestXattrPrefixAndDuplicates(t *testing.T) {
 		t.Fatalf("tampered image failed to open: %v", err)
 	}
 
-	if _, err := fs.Stat(img, "f"); err == nil {
-		t.Error("Stat accepted an undefined xattr name index")
-	} else if !errors.Is(err, ErrInvalid) {
-		t.Errorf("err = %v, want it to wrap ErrInvalid", err)
+	hidden, err := fs.Stat(img, "f")
+	if err != nil {
+		t.Fatalf("Stat of a file with an entry under an undefined name index: %v", err)
+	}
+
+	if got := hidden.Sys().(*Stat).Xattrs; len(got) != 0 {
+		t.Errorf("an entry under an undefined name index is listed: %v", got)
 	}
 
 	// And a duplicate key must not be taken last-one-wins.
@@ -1789,11 +1793,11 @@ func TestXattrPrefixAndDuplicates(t *testing.T) {
 }
 
 // TestCopyFromImageXattrParity covers the copyFromImage fast path, the other
-// door an image's attributes come in through. The reader rejects an undefined
-// xattr name index and a duplicated key (TestXattrPrefixAndDuplicates); the
-// fast-path parser used to map the index to the empty prefix and take the
-// duplicate last-wins, so an image that the reader refused would still be
-// copied — spoofed security.capability included — by CopyFrom(MetadataOnly).
+// door an image's attributes come in through. The reader leaves out an entry
+// under an undefined name index and rejects a duplicated key
+// (TestXattrPrefixAndDuplicates); the fast-path parser used to map the index
+// to the empty prefix and take the duplicate last-wins, so a spoofed
+// security.capability would be copied by CopyFrom(MetadataOnly).
 func TestCopyFromImageXattrParity(t *testing.T) {
 	t.Parallel()
 
@@ -1851,13 +1855,59 @@ func TestCopyFromImageXattrParity(t *testing.T) {
 
 		buf[i-3] = 7
 
-		err := copyMeta(t, buf)
-		if err == nil {
-			t.Fatal("CopyFrom accepted an undefined xattr name index")
+		// The copy holds what a mount of the source shows: the file,
+		// without the entry no mount lists.
+		img, err := Open(bytes.NewReader(buf))
+		if err != nil {
+			t.Fatal(err)
 		}
 
-		if !errors.Is(err, ErrInvalid) {
-			t.Errorf("err = %v, want it to wrap ErrInvalid", err)
+		out := &seekBuf{}
+		w := Create(out, WithBuildTime(1000, 0))
+
+		if err = errors.Join(w.CopyFrom(img, MetadataOnly()), w.Close()); err != nil {
+			t.Fatalf("copy of an image with an entry under an undefined name index: %v", err)
+		}
+
+		copied, err := Open(bytes.NewReader(out.buf), WithExtraDevices(bytes.NewReader(buf)))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		info, err := fs.Stat(copied, "f")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if got := info.Sys().(*Stat).Xattrs; len(got) != 0 {
+			t.Errorf("the copy lists an entry under an undefined name index: %v", got)
+		}
+	})
+
+	// A hidden entry is read over, not skipped unread: one whose header
+	// claims more than its area holds is corrupt in a copy as in the reader.
+	t.Run("hiddenEntryPastItsArea", func(t *testing.T) {
+		t.Parallel()
+
+		for name, edit := range map[string]func(header []byte){
+			"a value of 65535 bytes": func(h []byte) { h[2], h[3] = 0xff, 0xff },
+			"a name of 255 bytes":    func(h []byte) { h[0] = 0xff },
+		} {
+			buf := build(t, map[string]string{"security.capability": "real"})
+
+			// e_name_len, e_name_index, e_value_size: the four bytes
+			// before the stored name.
+			i := bytes.Index(buf, []byte("capability"))
+			if i < 4 || buf[i-3] != 6 {
+				t.Fatal("could not locate the stored xattr entry")
+			}
+
+			buf[i-3] = 7
+			edit(buf[i-4 : i])
+
+			if err := copyMeta(t, buf); !errors.Is(err, ErrCorrupt) {
+				t.Errorf("%s on a hidden entry: the copy is %v, want ErrCorrupt", name, err)
+			}
 		}
 	})
 

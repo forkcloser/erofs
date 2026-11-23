@@ -63,14 +63,16 @@ corrupt or truncated one is refused as `ErrCorrupt`, an unsupported one as
 the test. The defects the differential found in the reader are listed in the
 commit that added `contract_test.go`.
 
-The reader is stricter than the kernel in seven places, the first six each a
-documented divergence of the differential: a dirent whose type disagrees with
-its inode's mode is `ErrCorrupt`, where the kernel serves each as it is; a
-dirent nid with bits 59 to 63 set is `ErrCorrupt`, where the kernel's shift
-drops them and reads another inode; an extended attribute with name index 5 is
-listed under `lustre.`, the format's prefix, where the kernel's handler table
-has no entry and hides it; a symlink target longer than 4096 bytes is refused,
-where the kernel reads what fits; an image whose superblock announces
+The reader is stricter than the kernel in the following places; all but the
+last are divergences the differential names: a dirent whose type disagrees
+with its inode's mode is `ErrCorrupt`, where the kernel serves each as it is;
+a dirent nid with bits 59 to 63 set is `ErrCorrupt`, where the kernel's shift
+drops them and reads another inode; a symlink target longer than 4096 bytes is
+refused, where the kernel reads what fits, and one that is empty or holds a
+NUL is `ErrCorrupt`, where the kernel makes a C string of it; an extended
+attribute name an inode lists twice is `ErrCorrupt`, where the kernel lists
+both and serves the first; a file whose map runs past its device is refused at
+`Stat`, where the kernel fails at the read; an image whose superblock announces
 compression is `ErrNotImplemented` even when no inode is compressed, where the
 kernel mounts it; a shared extended attribute block address past the end of
 the image is refused at `Open`, where the kernel fails only when an inode uses

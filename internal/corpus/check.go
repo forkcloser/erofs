@@ -287,10 +287,14 @@ func checkXattrs(tb testing.TB, in *erofsspec.Inode, n Node) {
 	got := map[string]string{}
 
 	for _, x := range in.Xattrs {
-		// Index 0 is a name stored whole; any other index without a prefix
-		// is one the corpus never writes.
-		if x.Unresolved && x.Index != 0 {
-			tb.Errorf("%s: xattr index %#x unresolved (%q)", n.Path, x.Index, x.Suffix)
+		// An entry the kernel lists on no mount is no part of the tree.
+		// Index 0 is the one such the corpus writes, on purpose.
+		if x.Unresolved {
+			if x.Index != 0 {
+				tb.Errorf("%s: xattr index %#x unresolved (%q)", n.Path, x.Index, x.Suffix)
+			}
+
+			continue
 		}
 
 		if _, dup := got[x.Name()]; dup {

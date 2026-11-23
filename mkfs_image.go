@@ -383,7 +383,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				return fmt.Errorf("xattrs for nid %d: %w", cur.nid, err)
 			}
 
-			xattrs, err = parseXattrsFromBuf(xb, span, sharedXattrOff, img.getLongPrefix)
+			xattrs, err = parseXattrsFromBuf(xb, span, sharedXattrOff, img.listedPrefix)
 			if err != nil {
 				return fmt.Errorf("xattrs for nid %d: %w", cur.nid, err)
 			}
@@ -994,10 +994,9 @@ func (*Writer) parseChunks(
 // longPrefix resolves long xattr prefix indexes (NameIndex with high bit set).
 //
 // The same rules as the reader's loadXattrs apply, because this is the
-// other door an image's attributes come in through: an unknown name index
-// is an error rather than the empty prefix (which let a hostile image spell
-// "security.capability" in full under an undefined index and collide with
-// the properly prefixed entry), and a name listed twice is an error rather
+// other door an image's attributes come in through: an entry the kernel
+// does not list is left out (prefixOf says which), so the copy holds what a
+// mount of the source shows, and a name listed twice is an error rather
 // than last-wins (which let the parser's iteration order pick which copy a
 // policy decision saw).
 //
@@ -1010,7 +1009,7 @@ func parseXattrsFromBuf(
 	buf []byte,
 	span func(off, n int64) ([]byte, error),
 	sharedOff int64,
-	longPrefix func(uint8) (string, error),
+	prefixOf func(uint8) (string, bool),
 ) (map[string]string, error) {
 	if len(buf) < disk.SizeXattrBodyHeader {
 		return nil, fmt.Errorf("xattr body of %d bytes too small: %w", len(buf), ErrCorrupt)
@@ -1058,13 +1057,10 @@ func parseXattrsFromBuf(
 			return nil, fmt.Errorf("shared xattr %d: %w", idx, err)
 		}
 
-		name, err := xattrName(xe, body[:xe.NameLen], longPrefix)
-		if err != nil {
-			return nil, fmt.Errorf("shared xattr %d: %w", idx, err)
-		}
-
-		if err := set(name, string(body[xe.NameLen:])); err != nil {
-			return nil, err
+		if prefix, listed := prefixOf(xe.NameIndex); listed {
+			if err := set(prefix+string(body[:xe.NameLen]), string(body[xe.NameLen:])); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -1083,18 +1079,14 @@ func parseXattrsFromBuf(
 			return nil, fmt.Errorf("inline xattr at pos %d too long: %w", pos, ErrCorrupt)
 		}
 
-		name, err := xattrName(xe, buf[pos:pos+int(xe.NameLen)], longPrefix)
-		if err != nil {
-			return nil, fmt.Errorf("inline xattr: %w", err)
+		if prefix, listed := prefixOf(xe.NameIndex); listed {
+			name := prefix + string(buf[pos:pos+int(xe.NameLen)])
+			if err := set(name, string(buf[pos+int(xe.NameLen):pos+entryLen])); err != nil {
+				return nil, err
+			}
 		}
 
-		pos += int(xe.NameLen)
-		value := string(buf[pos : pos+int(xe.ValueLen)])
-		pos += int(xe.ValueLen)
-
-		if err := set(name, value); err != nil {
-			return nil, err
-		}
+		pos += entryLen
 
 		// Round up to 4-byte boundary.
 		if rem := pos % 4; rem != 0 {
@@ -1107,37 +1099,6 @@ func parseXattrsFromBuf(
 	}
 
 	return xattrs, nil
-}
-
-// xattrName builds the full xattr name from an entry and its raw name bytes.
-// longPrefix resolves long prefix indexes when the high bit of NameIndex is
-// set. An index the format does not define is an error, as in the reader.
-func xattrName(xe disk.XattrEntry, rawName []byte, longPrefix func(uint8) (string, error)) (string, error) {
-	var prefix string
-
-	if xe.NameIndex&disk.XattrLongPrefixFlag != 0 {
-		// Long prefix: high bit set, low 7 bits index the prefix table.
-		index := xe.NameIndex & disk.XattrLongPrefixMask
-		if longPrefix == nil {
-			return "", fmt.Errorf("long xattr prefix %d without a prefix table: %w", index, ErrCorrupt)
-		}
-
-		p, err := longPrefix(index)
-		if err != nil {
-			return "", err
-		}
-
-		prefix = p
-	} else {
-		p, err := xattrIndex(xe.NameIndex).prefix()
-		if err != nil {
-			return "", err
-		}
-
-		prefix = p
-	}
-
-	return prefix + string(rawName), nil
 }
 
 // checkFlatHole holds a flat file at the null address to the blocks a copy

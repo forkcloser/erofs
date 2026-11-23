@@ -43,6 +43,14 @@
 // (use [io/fs.FS.Open] and io.Copy for larger ones). The writer stores
 // xattr names of at most 255 bytes after their prefix and values of at most
 // 65535 bytes, the on-disk field widths.
+//
+// Extended attributes are the ones a kernel mount shows: names under user.,
+// trusted., security. and the two POSIX ACL names. An entry stored under
+// any other name index (0, the format's lustre index 5, an undefined one) is
+// listed on no mount and is left out by the reader. A name that could only
+// be stored that way is refused by [Writer.Setxattr], as [ErrInvalid], and
+// left out by [Writer.CopyFrom], whose source may carry any: one attribute
+// fails no copy.
 package erofs
 
 import (
@@ -1229,7 +1237,12 @@ func (img *image) loadLongPrefixes() error {
 		}
 
 		// The base index names a built-in prefix the infix is appended to.
-		prefixes[i] = xattrIndex(data[0]).String() + string(data[1:])
+		// On an index the kernel lists nothing under, the prefix stays
+		// empty: listedPrefix reads that as a prefix whose entries are
+		// hidden.
+		if base, ok := builtinPrefix(data[0]); ok {
+			prefixes[i] = base + string(data[1:])
+		}
 	}
 
 	img.longPrefixes = prefixes
@@ -1277,21 +1290,6 @@ func (img *image) prefixSource(startOffset int64) (io.Reader, error) {
 	default:
 		return io.NewSectionReader(img.meta, startOffset, math.MaxInt64-startOffset), nil
 	}
-}
-
-// getLongPrefix returns the long xattr prefix at the given index, from the
-// table Open read.
-func (img *image) getLongPrefix(index uint8) (string, error) {
-	if int(index) >= len(img.longPrefixes) {
-		return "", fmt.Errorf(
-			"long xattr prefix index %d out of range (max %d): %w",
-			index,
-			len(img.longPrefixes)-1,
-			ErrCorrupt,
-		)
-	}
-
-	return img.longPrefixes[index], nil
 }
 
 // loadAt reads up to size bytes at addr, capped at one filesystem block.

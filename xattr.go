@@ -7,56 +7,48 @@ import (
 	"github.com/forkcloser/erofs/internal/disk"
 )
 
-/*
-#define EROFS_XATTR_INDEX_USER              1
-#define EROFS_XATTR_INDEX_POSIX_ACL_ACCESS  2
-#define EROFS_XATTR_INDEX_POSIX_ACL_DEFAULT 3
-#define EROFS_XATTR_INDEX_TRUSTED           4
-#define EROFS_XATTR_INDEX_LUSTRE            5
-#define EROFS_XATTR_INDEX_SECURITY          6
-*/
+// lastListedIndex is the highest name index the kernel lists (security.).
+// Untyped: a typed constant would make an enum of a uint8.
+const lastListedIndex = 6
 
-type xattrIndex uint8
-
-// xattrIndexLast is the highest name index the format defines (security.).
-// Untyped: a typed constant would turn xattrIndex into an enum.
-const xattrIndexLast = 6
-
-func (idx xattrIndex) String() string {
-	switch idx {
+// builtinPrefix is the prefix a name index stands for, and whether the
+// kernel lists and serves an entry that bears it (xattr.c: the handler map
+// of erofs_xattr_prefix). Every other index is stored like these and shown
+// by no mount: 0, 5 (the format's header calls it lustre, and no handler
+// takes it) and 7 up.
+func builtinPrefix(index uint8) (string, bool) {
+	switch index {
 	case 1:
-		return "user."
+		return "user.", true
 	case 2:
-		return "system.posix_acl_access"
+		return "system.posix_acl_access", true
 	case 3:
-		return "system.posix_acl_default"
+		return "system.posix_acl_default", true
 	case 4:
-		return "trusted."
-	case 5:
-		return "lustre."
-	case 6:
-		return "security."
+		return "trusted.", true
+	case lastListedIndex:
+		return "security.", true
 	default:
-		return ""
+		return "", false
 	}
 }
 
-// prefix returns the name prefix an index stands for.
-//
-// Index 0 means the name is stored whole, with no prefix. Everything from 7 up
-// is undefined by the format, and mapping it to the empty prefix the way
-// String does is what let a hostile image spell out "security.capability" in
-// full under an unknown index and collide with the properly prefixed entry.
-func (idx xattrIndex) prefix() (string, error) {
-	if idx == 0 {
-		return "", nil
+// listedPrefix is the name prefix an entry's e_name_index stands for, a
+// long prefix's when bit 7 is set, and whether the kernel lists the entry
+// (xattr.c: erofs_listxattr_foreach). One it does not list (an index with
+// no handler, a long prefix past the table or built on such an index) is
+// read over and left out: no mount shows it, and getxattr cannot name it.
+func (img *image) listedPrefix(nameIndex uint8) (string, bool) {
+	if nameIndex&disk.XattrLongPrefixFlag == 0 {
+		return builtinPrefix(nameIndex)
 	}
 
-	if p := idx.String(); p != "" {
-		return p, nil
+	i := int(nameIndex & disk.XattrLongPrefixMask)
+	if i >= len(img.longPrefixes) || img.longPrefixes[i] == "" {
+		return "", false
 	}
 
-	return "", fmt.Errorf("unknown xattr name index %d: %w", uint8(idx), ErrCorrupt)
+	return img.longPrefixes[i], true
 }
 
 // setXattr records one attribute, rejecting a name already present.
@@ -199,21 +191,10 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 			return fmt.Errorf("shared xattr for nid %d: %w", b.nid, err)
 		}
 
-		var prefix string
-		if xattrEntry.NameIndex&disk.XattrLongPrefixFlag != 0 {
-			// Long prefix: highest bit set
-			longPrefixIndex := xattrEntry.NameIndex & disk.XattrLongPrefixMask
-
-			prefix, err = b.img.getLongPrefix(longPrefixIndex)
-			if err != nil {
-				return fmt.Errorf("failed to get long prefix for shared xattr nid %d: %w", b.nid, err)
+		if prefix, listed := b.img.listedPrefix(xattrEntry.NameIndex); listed {
+			if err = setXattr(stat, b.nid, prefix+body[:xattrEntry.NameLen], body[xattrEntry.NameLen:]); err != nil {
+				return err
 			}
-		} else if prefix, err = xattrIndex(xattrEntry.NameIndex).prefix(); err != nil {
-			return fmt.Errorf("shared xattr for nid %d: %w", b.nid, err)
-		}
-
-		if err = setXattr(stat, b.nid, prefix+body[:xattrEntry.NameLen], body[xattrEntry.NameLen:]); err != nil {
-			return err
 		}
 
 		xb = xb[4:]
@@ -250,24 +231,7 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 		pos += disk.SizeXattrEntry
 		xb = xb[disk.SizeXattrEntry:]
 
-		var prefix string
-
-		if xattrEntry.NameIndex&disk.XattrLongPrefixFlag != 0 {
-			// Long prefix: highest bit set
-			longPrefixIndex := xattrEntry.NameIndex & disk.XattrLongPrefixMask
-
-			var err error
-
-			prefix, err = b.img.getLongPrefix(longPrefixIndex)
-			if err != nil {
-				return fmt.Errorf("failed to get long prefix for inline xattr nid %d: %w", b.nid, err)
-			}
-		} else {
-			var err error
-			if prefix, err = xattrIndex(xattrEntry.NameIndex).prefix(); err != nil {
-				return fmt.Errorf("inline xattr for nid %d: %w", b.nid, err)
-			}
-		}
+		prefix, listed := b.img.listedPrefix(xattrEntry.NameIndex)
 
 		if len(xb) < int(xattrEntry.NameLen) {
 			if err := reload(); err != nil {
@@ -324,8 +288,10 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 			xb = xb[xattrEntry.ValueLen:]
 		}
 
-		if err := setXattr(stat, b.nid, name, value); err != nil {
-			return err
+		if listed {
+			if err := setXattr(stat, b.nid, name, value); err != nil {
+				return err
+			}
 		}
 
 		// Round up to next 4 byte boundary
