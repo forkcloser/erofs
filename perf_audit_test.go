@@ -5,6 +5,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"strconv"
 	"testing"
 )
 
@@ -230,6 +231,114 @@ func BenchmarkPerfWriteWideDirs(b *testing.B) {
 
 		if err := w.Close(); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkPerfRemoveLinkedNames covers the removal of the first name of
+// many multiply-linked files at once, as a layer's marker or RemoveAll does
+// over a directory of them: each removal hands its inode to another name,
+// and the whole must grow with their number, not with its square.
+func BenchmarkPerfRemoveLinkedNames(b *testing.B) {
+	for _, n := range []int{2000, 16000} {
+		b.Run(strconv.Itoa(n), func(b *testing.B) {
+			b.ReportAllocs()
+
+			for range b.N {
+				b.StopTimer()
+
+				w := Create(&seekBuf{}, WithBuildTime(1000, 0))
+
+				for i := range n {
+					name := "/d/f" + strconv.Itoa(i)
+
+					f, err := w.Create(name)
+					if err != nil {
+						b.Fatal(err)
+					}
+
+					if err = f.Close(); err != nil {
+						b.Fatal(err)
+					}
+
+					if err = w.Link(name, "/e/l"+strconv.Itoa(i)); err != nil {
+						b.Fatal(err)
+					}
+				}
+
+				b.StartTimer()
+
+				if err := w.RemoveAll("/d"); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkPerfRemoveNamesOfOneInode covers the removal of the many names
+// of one file: the later names with their directory, the later names one at
+// a time, and every name with the directory that holds them all. Each must
+// grow with their number, not with its square.
+func BenchmarkPerfRemoveNamesOfOneInode(b *testing.B) {
+	for _, shape := range []struct {
+		name   string
+		first  string
+		remove func(b *testing.B, w *Writer, n int)
+	}{
+		{"later names with their directory", "/first", func(b *testing.B, w *Writer, _ int) {
+			b.Helper()
+
+			if err := w.RemoveAll("/d"); err != nil {
+				b.Fatal(err)
+			}
+		}},
+		{"later names in turn", "/first", func(b *testing.B, w *Writer, n int) {
+			b.Helper()
+
+			for i := range n {
+				if err := w.Remove("/d/l" + strconv.Itoa(i)); err != nil {
+					b.Fatal(err)
+				}
+			}
+		}},
+		{"every name with its directory", "/d/first", func(b *testing.B, w *Writer, _ int) {
+			b.Helper()
+
+			if err := w.RemoveAll("/d"); err != nil {
+				b.Fatal(err)
+			}
+		}},
+	} {
+		for _, n := range []int{20000, 80000} {
+			b.Run(shape.name+"/"+strconv.Itoa(n), func(b *testing.B) {
+				b.ReportAllocs()
+
+				for range b.N {
+					b.StopTimer()
+
+					w := Create(&seekBuf{}, WithBuildTime(1000, 0))
+
+					f, err := w.Create(shape.first)
+					if err != nil {
+						b.Fatal(err)
+					}
+
+					if err = f.Close(); err != nil {
+						b.Fatal(err)
+					}
+
+					for i := range n {
+						if err = w.Link(shape.first, "/d/l"+strconv.Itoa(i)); err != nil {
+							b.Fatal(err)
+						}
+					}
+
+					b.StartTimer()
+
+					shape.remove(b, w, n)
+				}
+			})
 		}
 	}
 }
