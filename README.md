@@ -64,7 +64,7 @@ the test. The defects the differential found in the reader are listed in the
 commit that added `contract_test.go`.
 
 The reader is stricter than the kernel in the following places; all but the
-last are divergences the differential names: a dirent whose type disagrees
+last two are divergences the differential names: a dirent whose type disagrees
 with its inode's mode is `ErrCorrupt`, where the kernel serves each as it is;
 a dirent nid with bits 59 to 63 set is `ErrCorrupt`, where the kernel's shift
 drops them and reads another inode; a symlink target longer than 4096 bytes is
@@ -78,7 +78,13 @@ kernel mounts it; a shared extended attribute block address past the end of
 the image is refused at `Open`, where the kernel fails only when an inode uses
 it; a directory declaring more bytes than its image and the extra devices
 given to `Open` hold is `ErrCorrupt`, its entries being their bytes, where the
-kernel reads the blocks a chunk map names however often it names one. Apart from those, an
+kernel reads the blocks a chunk map names however often it names one; in an
+image opened with its extra devices, a flat file whose blocks run over an edge
+of a device's mapped range, out of it or into it, is `ErrCorrupt` by every
+path, where the kernel translates the one address a read begins at and reads
+on from there, so that the device answering for the far side depends on where
+its reads begin (opened with none of them, the image is one device and the
+file is read straight through, as the kernel reads it). Apart from those, an
 image whose superblock declares no blocks is `ErrCorrupt` at `Open` when its
 reader reports no length: its extent cannot be known, and nothing it declares
 can be held to one.

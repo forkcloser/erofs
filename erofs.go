@@ -317,6 +317,7 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 	// is read. Devices given must match the count, as the kernel refuses
 	// the mount ("extra devices don't match").
 	flatdev := len(o.extraDevices) == 0 && ondiskExtraDevices > 0
+	i.flatdev = flatdev
 
 	if !flatdev && int(ondiskExtraDevices) != len(o.extraDevices) {
 		return nil, fmt.Errorf(
@@ -503,10 +504,13 @@ type deviceInfo struct {
 type image struct {
 	sb disk.SuperBlock
 
-	size         int64 // the image's extent, never zero: the reader's length, else the superblock's
-	backing      int64 // the image's extent and the given devices' lengths, the most that can back a directory
-	meta         io.ReaderAt
-	devices      []deviceInfo // parsed device table entries
+	size    int64 // the image's extent, never zero: the reader's length, else the superblock's
+	backing int64 // the image's extent and the given devices' lengths, the most that can back a directory
+	meta    io.ReaderAt
+	devices []deviceInfo // parsed device table entries
+	// flatdev: none of the extra devices was given, and each slot's reader
+	// is a window of the image (Open).
+	flatdev      bool
 	deviceIDMask uint16
 	blkPool      sync.Pool
 	longPrefixes []string // the long xattr prefix table, read at Open
@@ -871,6 +875,34 @@ func (img *image) locateRange(pa, n int64) (uint16, int64, error) {
 		return 0, 0, fmt.Errorf("data range [%d, +%d) is out of range: %w", pa, n, ErrCorrupt)
 	}
 
+	if dev, off, err := img.onMappedDevice(pa, n); err != nil || dev > 0 {
+		return dev, off, err
+	}
+
+	if err := img.checkImageRange(pa, n); err != nil {
+		return 0, 0, err
+	}
+
+	return 0, pa, nil
+}
+
+// onMappedDevice is the extra device whose mapped range holds a range of
+// the primary device's addresses, by its one-based index, and the range's
+// offset on it; zero when no device's range does.
+//
+// A range lies whole on one device: erofs_map_dev translates the one address
+// a read begins at, so a range over the edge of a mapped range has no device
+// of its own, and is refused from either side.
+//
+// With none of the extra devices given there is one device, the image, and
+// no range of it is another's: the kernel translates no address of the
+// primary device then (erofs_map_dev: extra_devices && !flatdev), and a run
+// through a slot's range is read straight from the image.
+func (img *image) onMappedDevice(pa, n int64) (uint16, int64, error) {
+	if img.flatdev {
+		return 0, 0, nil
+	}
+
 	for i, dev := range img.devices {
 		if dev.mappedBlkAddr == 0 {
 			continue
@@ -890,13 +922,16 @@ func (img *image) locateRange(pa, n int64) (uint16, int64, error) {
 			// #nosec G115 -- the device count is a uint16 on disk
 			return uint16(i + 1), pa - startOff, nil
 		}
+
+		if pa < startOff && pa+n > startOff {
+			return 0, 0, fmt.Errorf(
+				"data range [%d, +%d) runs into device %d's mapped range: %w",
+				pa, n, i+1, ErrCorrupt,
+			)
+		}
 	}
 
-	if err := img.checkImageRange(pa, n); err != nil {
-		return 0, 0, err
-	}
-
-	return 0, pa, nil
+	return 0, 0, nil
 }
 
 // deviceReader is the reader of a device locate or locateRange named: the
@@ -1396,7 +1431,10 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 		// dataBlock marks a flat file's data block, addressed on the primary
 		// device but possibly living on an extra one by its mapped range;
 		// inline data sits in the inode's own block, always the image's.
+		// Its addr counts from the file's start block, and head is the
+		// length of the blocks that start block begins.
 		dataBlock bool
+		head      int64
 	)
 
 	blockSize := int(1 << img.sb.BlkSizeBits)
@@ -1426,13 +1464,8 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 			return img.holeBlock(blockOffset, blockEnd), nil
 		}
 
-		// #nosec G115 -- bn is a block index below nblocks, checked above
-		pa, err := img.blockAddr(fi.nid, fi.startBlock()+uint64(bn))
-		if err != nil {
-			return nil, err
-		}
-
-		addr = pa
+		addr = int64(bn) << img.sb.BlkSizeBits
+		head = fi.size
 		dataBlock = true
 	case disk.LayoutFlatInline:
 		// If on the last block, validate
@@ -1460,13 +1493,8 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 				return nil, fmt.Errorf("inline data cross block boundary for nid %d: %w", fi.nid, ErrCorrupt)
 			}
 		} else {
-			// #nosec G115 -- bn is a block index below nblocks, checked above
-			pa, err := img.blockAddr(fi.nid, fi.startBlock()+uint64(bn))
-			if err != nil {
-				return nil, err
-			}
-
-			addr = pa
+			addr = int64(bn) << img.sb.BlkSizeBits
+			head = int64(nblocks-1) << img.sb.BlkSizeBits
 			blockOffset = int(pos % int64(blockSize))
 			dataBlock = true
 		}
@@ -1627,12 +1655,16 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 	reader := img.meta
 
 	if dataBlock {
-		dev, off, err := img.locateRange(start, length)
+		// The whole head is placed, never this block alone: a block placed
+		// alone lands wherever its own address falls, and a file running
+		// past the end of a mapped range was read from two devices, where
+		// Stat refuses it.
+		dev, off, err := img.locateStart(fi, head)
 		if err != nil {
 			return nil, fmt.Errorf("nid %d: %w", fi.nid, err)
 		}
 
-		start, reader = off, img.deviceReader(dev)
+		start, reader = off+start, img.deviceReader(dev)
 	} else if err := img.checkImageRange(start, length); err != nil {
 		return nil, fmt.Errorf("nid %d: %w", fi.nid, err)
 	}
