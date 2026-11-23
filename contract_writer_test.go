@@ -698,6 +698,12 @@ func TestContractWriterSetxattr(t *testing.T) {
 		{"trusted.t", "1", true},
 		{"security.s", "1", true},
 		{"system.posix_acl_access", "\x02\x00\x00\x00", true},
+		{"system.posix_acl_default", "\x02\x00\x00\x00", true},
+		// The two ACL names are whole names: the kernel reads an ACL
+		// under the empty name alone, so one with anything after it
+		// could be read by no call.
+		{"system.posix_acl_accessx", "v", false},
+		{"system.posix_acl_default.more", "v", false},
 		// A name with none of the prefixes the kernel serves could only be
 		// stored under an index no mount lists: refused, whatever its length.
 		{long, "v", false},

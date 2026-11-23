@@ -1364,7 +1364,7 @@ func viewOf(img []byte, extra [][]byte) (map[string]copyView, error) {
 			content = string(b)
 		}
 
-		xattrs := xattrsOf(in)
+		xattrs := copiedXattrs(in)
 
 		// A directory's size is the writer's layout of its names, not the
 		// source's field: the names themselves are held by the path set.
@@ -1409,6 +1409,23 @@ func viewOf(img []byte, extra [][]byte) (map[string]copyView, error) {
 	}
 
 	return out, nil
+}
+
+// copiedXattrs is xattrsOf less what a copy leaves out of the names the
+// kernel lists: a POSIX ACL name with something after it, which the kernel
+// lists, prefix and name, and serves to no call.
+func copiedXattrs(in *erofsspec.Inode) map[string]string {
+	m := xattrsOf(in)
+
+	for name := range m {
+		for _, acl := range []string{"system.posix_acl_access", "system.posix_acl_default"} {
+			if len(name) > len(acl) && strings.HasPrefix(name, acl) {
+				delete(m, name)
+			}
+		}
+	}
+
+	return m
 }
 
 // copyAgrees holds a copy to its source: the same paths, each with the
