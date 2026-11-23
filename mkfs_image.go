@@ -387,6 +387,10 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			if err != nil {
 				return fmt.Errorf("xattrs for nid %d: %w", cur.nid, err)
 			}
+			// As for any source: a name the Writer could only store hidden
+			// (an ACL's with something after it is the one an image can
+			// still list) is left out.
+			xattrs = listedXattrs(xattrs)
 		}
 
 		trailingAddr := inodeAddr + int64(icSize) + int64(xattrSize)

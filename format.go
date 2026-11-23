@@ -12,9 +12,20 @@ import (
 // xattrSplit splits a full xattr name into (NameIndex, suffix), by the
 // prefixes the kernel lists. Index 0 with the name whole: it has none of
 // them, and stored so no mount would show it.
+//
+// A prefix that ends in a dot takes what follows it. The two POSIX ACL
+// names are whole names: the kernel reads an ACL under its index with the
+// empty name alone (xattr.c: erofs_get_acl), so one stored with anything
+// after it would be listed and served to no call.
 func xattrSplit(name string) (uint8, string) {
 	for idx := uint8(1); idx <= lastListedIndex; idx++ {
-		if p, ok := builtinPrefix(idx); ok && strings.HasPrefix(name, p) {
+		p, ok := builtinPrefix(idx)
+
+		switch {
+		case !ok:
+		case name == p:
+			return idx, ""
+		case strings.HasSuffix(p, ".") && strings.HasPrefix(name, p):
 			return idx, name[len(p):]
 		}
 	}
