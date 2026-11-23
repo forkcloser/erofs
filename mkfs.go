@@ -43,6 +43,12 @@ type Writer struct {
 	wErr         error               // sticky error: once set, all subsequent ops return it
 	root         *fsEntry            // root directory
 	byPath       map[string]*fsEntry // path → entry (all types)
+	// aliases lists, for an entry that holds an inode with other names, the
+	// entries that are those names: what removing it must hand the inode
+	// to. Only such entries have a key. A name removed since stays listed,
+	// marked removed, as it stays among its directory's children, until the
+	// inode's last other name goes or a promotion passes over the list.
+	aliases map[*fsEntry][]*fsEntry
 
 	devices []uint64 // per-device block counts (one per MetadataOnly source)
 
@@ -431,8 +437,7 @@ func (fsys *Writer) Link(oldname, newname string) error {
 		linkTo: target,
 	}
 	fsys.addChild(e)
-
-	target.extraLinks++
+	fsys.aliased(target, e)
 
 	return nil
 }
@@ -1312,6 +1317,17 @@ type fsEntry struct {
 
 	removed      bool // true if removed by a whiteout in a merge layer
 	metadataOnly bool // from a metadata-only CopyFrom; use chunk-based layout
+}
+
+// underRemoved reports whether a directory above e has been removed.
+func (e *fsEntry) underRemoved() bool {
+	for d := e.parent; d != nil; d = d.parent {
+		if d.removed {
+			return true
+		}
+	}
+
+	return false
 }
 
 // inSubtreeOf reports whether e is d or lies beneath it.
@@ -2318,8 +2334,14 @@ func (fsys *Writer) unlinkEntry(e *fsEntry) {
 	e.removed = true
 	delete(fsys.byPath, e.path)
 
-	if e.linkTo != nil {
-		e.linkTo.extraLinks--
+	if target := e.linkTo; target != nil {
+		// The name stays in the target's list, marked removed: taken out
+		// here, each name of an inode cost the list's length, and all of
+		// them its square. promoteAlias passes over it.
+		target.extraLinks--
+		if target.extraLinks == 0 {
+			delete(fsys.aliases, target)
+		}
 
 		return
 	}
@@ -2329,46 +2351,31 @@ func (fsys *Writer) unlinkEntry(e *fsEntry) {
 	}
 }
 
-// promoteAlias hands e's inode to one of its surviving aliases. Aliases are
-// found by scanning the tree: they are rare, and keeping a back-reference
-// list on every entry would tax the common case for the exceptional one.
-// The lowest path wins so the outcome — and thus the image — is
-// deterministic regardless of link creation order.
+// promoteAlias hands target's inode to one of its surviving aliases, which
+// the Writer keeps listed: found by a walk of the tree, removing every
+// target under a directory cost the square of their number. The lowest
+// path wins, so the outcome, and thus the image, is the same whatever
+// order the links were made in.
 //
-//nolint:gocognit // the alias search and the heir's takeover belong together
+// A name under a removed directory survives nothing: a directory is removed
+// before what it holds, and such a name made the heir, every name of one
+// inode in a removed directory would take the inode in its turn.
 func (fsys *Writer) promoteAlias(target *fsEntry) {
-	var (
-		aliases []*fsEntry
-		walk    func(*fsEntry)
-	)
+	names := slices.DeleteFunc(fsys.aliases[target], func(a *fsEntry) bool {
+		return a.removed || a.underRemoved()
+	})
+	delete(fsys.aliases, target)
 
-	walk = func(d *fsEntry) {
-		for _, c := range d.children {
-			if c.removed {
-				continue
-			}
-
-			if c.linkTo == target {
-				aliases = append(aliases, c)
-			}
-
-			if c.mode&disk.StatTypeMask == disk.StatTypeDir {
-				walk(c)
-			}
-		}
-	}
-	walk(fsys.root)
-
-	if len(aliases) == 0 {
+	if len(names) == 0 {
 		target.extraLinks = 0
 
 		return
 	}
 
-	slices.SortFunc(aliases, func(a, b *fsEntry) int {
+	heir := slices.MinFunc(names, func(a, b *fsEntry) int {
 		return cmp.Compare(a.path, b.path)
 	})
-	heir := aliases[0]
+	rest := slices.DeleteFunc(names, func(a *fsEntry) bool { return a == heir })
 
 	// The heir takes over the inode wholesale, keeping only its own name
 	// and place in the tree.
@@ -2379,20 +2386,18 @@ func (fsys *Writer) promoteAlias(target *fsEntry) {
 	heir.removed = false
 
 	// #nosec G115 -- each alias was counted into target.extraLinks, a uint32
-	heir.extraLinks = uint32(len(aliases) - 1)
-	for _, a := range aliases[1:] {
+	heir.extraLinks = uint32(len(rest))
+	for _, a := range rest {
 		a.linkTo = heir
+	}
+
+	if len(rest) > 0 {
+		fsys.aliases[heir] = rest
 	}
 	// The old target is now a dead husk: nothing points at it and it owns
 	// nothing. Zero the link count so a stale reference cannot double-count.
 	target.extraLinks = 0
 	target.children = nil
-	// A CopyFrom in progress may still meet further names for this inode.
-	for k, v := range fsys.copyLinks {
-		if v == target {
-			fsys.copyLinks[k] = heir
-		}
-	}
 }
 
 // addAlias registers p as another name for target's inode — what Link does,
@@ -2422,10 +2427,19 @@ func (fsys *Writer) addAlias(p string, target *fsEntry) error {
 		linkTo: target,
 	}
 	fsys.addChild(e)
-
-	target.extraLinks++
+	fsys.aliased(target, e)
 
 	return nil
+}
+
+// aliased records alias as one more name of target's inode.
+func (fsys *Writer) aliased(target, alias *fsEntry) {
+	if fsys.aliases == nil {
+		fsys.aliases = make(map[*fsEntry][]*fsEntry)
+	}
+
+	fsys.aliases[target] = append(fsys.aliases[target], alias)
+	target.extraLinks++
 }
 
 // placeEntry attaches a freshly built entry to the tree, replacing any
