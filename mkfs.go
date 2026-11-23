@@ -1083,11 +1083,7 @@ func (fsys *Writer) Stat(name string) (fs.FileInfo, error) {
 		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
 	}
 
-	if e.linkTo != nil {
-		e = e.linkTo // hardlink: stat the shared inode
-	}
-
-	return &writerFileInfo{entry: e}, nil
+	return infoOf(e), nil
 }
 
 // Open opens the named file for reading. For regular files, the file must
@@ -1129,7 +1125,7 @@ func (fsys *Writer) Open(name string) (fs.File, error) {
 		switch {
 		case size == 0:
 		case e.holedInDataFile:
-			return &readFile{entry: e, reader: io.NewSectionReader(
+			return &readFile{entry: e, path: name, reader: io.NewSectionReader(
 				chunkedData{fsys.dataFile, e.chunks, int64(fsys.resolveBlockSize())}, 0, size,
 			)}, nil
 		case e.reopen != nil:
@@ -1138,23 +1134,27 @@ func (fsys *Writer) Open(name string) (fs.File, error) {
 				return nil, fmt.Errorf("mkfs: open %s where it was copied from: %w", name, err)
 			}
 
-			return &readFile{entry: e, reader: &copiedBytes{src: src, left: size}, source: src}, nil
+			return &readFile{entry: e, path: name, reader: &copiedBytes{src: src, left: size}, source: src}, nil
 		case e.metadataOnly || e.directData != nil:
 			// Neither the spool nor the data file holds it: reading them
 			// at this entry's offset, zero, reads another file's bytes.
 			return nil, fmt.Errorf("mkfs: open %s: its data is with its source, which gave no way to open it again: %w",
 				name, ErrNotImplemented)
 		case fsys.dataFile != nil:
-			return &readFile{entry: e, reader: io.NewSectionReader(fsys.dataFile, e.dataStartOff, size)}, nil
+			return &readFile{
+				entry:  e,
+				path:   name,
+				reader: io.NewSectionReader(fsys.dataFile, e.dataStartOff, size),
+			}, nil
 		case fsys.spool != nil:
-			return &readFile{entry: e, reader: io.NewSectionReader(fsys.spool, e.dataStartOff, size)}, nil
+			return &readFile{entry: e, path: name, reader: io.NewSectionReader(fsys.spool, e.dataStartOff, size)}, nil
 		}
 
-		return &readFile{entry: e}, nil
+		return &readFile{entry: e, path: name}, nil
 
 	default:
 		// Symlinks, devices, etc.: stat-only, no readable data.
-		return &readFile{entry: e}, nil
+		return &readFile{entry: e, path: name}, nil
 	}
 }
 
@@ -1499,12 +1499,25 @@ func (fi *entryFileInfo) ModTime() time.Time { return fi.info.ModTime() }
 func (fi *entryFileInfo) IsDir() bool        { return fi.info.IsDir() }
 func (fi *entryFileInfo) Sys() any           { return fi.sys }
 
-// writerFileInfo implements fs.FileInfo for an fsEntry.
+// writerFileInfo implements fs.FileInfo for an fsEntry: name is the name
+// the info was asked or listed under, and entry the one that holds the
+// file, which for a file's second name is another's (linkTo).
 type writerFileInfo struct {
 	entry *fsEntry
+	name  string
 }
 
-func (fi *writerFileInfo) Name() string { return path.Base(fi.entry.path) }
+// infoOf is the info of the file e names, under e's name.
+func infoOf(e *fsEntry) *writerFileInfo {
+	fi := &writerFileInfo{entry: e, name: path.Base(e.path)}
+	if e.linkTo != nil {
+		fi.entry = e.linkTo
+	}
+
+	return fi
+}
+
+func (fi *writerFileInfo) Name() string { return fi.name }
 
 // Size reports e.size as fs.FileInfo spells it.
 // #nosec G115 -- e.size fits int64: File counts it in an int64, and add and copyFromImage bound it
@@ -1580,14 +1593,16 @@ func (e *fsEntry) linkCount() uint32 {
 
 // readFile implements fs.File for reading back a finalized file's data.
 type readFile struct {
-	entry  *fsEntry
+	entry *fsEntry
+	// path is the name the file was opened under, one of the entry's.
+	path   string
 	reader io.Reader // nil for empty files or non-regular types
 	source io.Closer // the file a copied entry was opened again as, or nil
 	closed bool
 }
 
 func (f *readFile) Stat() (fs.FileInfo, error) {
-	return &writerFileInfo{entry: f.entry}, nil
+	return &writerFileInfo{entry: f.entry, name: path.Base(f.path)}, nil
 }
 
 func (f *readFile) Read(p []byte) (int, error) {
@@ -1611,7 +1626,7 @@ func (f *readFile) Close() error {
 
 	if f.source != nil {
 		if err := f.source.Close(); err != nil {
-			return fmt.Errorf("mkfs: close %s where it was copied from: %w", f.entry.path, err)
+			return fmt.Errorf("mkfs: close %s where it was copied from: %w", f.path, err)
 		}
 	}
 
@@ -1660,7 +1675,7 @@ type readDir struct {
 }
 
 func (d *readDir) Stat() (fs.FileInfo, error) {
-	return &writerFileInfo{entry: d.entry}, nil
+	return infoOf(d.entry), nil
 }
 
 func (d *readDir) Read([]byte) (int, error) {
@@ -1735,7 +1750,7 @@ func (de *dirEntry) Name() string { return path.Base(de.entry.path) }
 func (de *dirEntry) IsDir() bool  { return de.entry.mode&disk.StatTypeMask == disk.StatTypeDir }
 
 func (de *dirEntry) Type() fs.FileMode          { return disk.EroFSModeToGoFileMode(de.entry.mode).Type() }
-func (de *dirEntry) Info() (fs.FileInfo, error) { return &writerFileInfo{entry: de.entry}, nil }
+func (de *dirEntry) Info() (fs.FileInfo, error) { return infoOf(de.entry), nil }
 
 // addRegular adds the regular file at fpath (p once normalized) whose data
 // the source did not hand over in be: as chunk indexes in metadata-only
