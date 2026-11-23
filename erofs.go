@@ -434,6 +434,25 @@ func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
 		return nil, err
 	}
 
+	// The kernel reads the packed inode, when the image has one, and the
+	// root at mount, and mounts nothing when either cannot be read or the
+	// root is no directory (super.c: erofs_fc_fill_super). An image it does
+	// not mount is not opened to fail at every call. Read before a
+	// directory is bounded below: the bound is this package's, applied
+	// where a directory is used, and the mount holds the root to none.
+	i.backing = math.MaxInt64
+
+	if i.sb.FeatureIncompat&disk.FeatureIncompatFragments != 0 && i.sb.PackedNid > 0 {
+		if _, err := (&file{img: &i, name: ".packed", nid: i.sb.PackedNid}).readInfo(); err != nil {
+			return nil, fmt.Errorf("packed inode: %w", err)
+		}
+	}
+
+	root := &file{img: &i, name: ".", nid: uint64(i.sb.RootNid), ftype: fs.ModeDir}
+	if _, err := root.readInfo(); err != nil {
+		return nil, fmt.Errorf("root inode: %w", err)
+	}
+
 	// What can back a directory: the image, and the devices the caller gave,
 	// by their readers' lengths. Nothing the device table says adds to it: a
 	// flat window is the image again, and a slot's block count is the
@@ -2120,6 +2139,16 @@ func (b *file) directReader(ino *inode) *io.SectionReader {
 	return b.direct
 }
 
+// wrongType is the error for an inode whose type is not the one it was
+// reached as. No directory entry gives the root its type: the mount does.
+func (b *file) wrongType(inoType fs.FileMode) error {
+	if b.ftype == fs.ModeDir && b.nid == uint64(b.img.sb.RootNid) {
+		return fmt.Errorf("inode %d has type %v where the root must be a directory: %w", b.nid, inoType, ErrCorrupt)
+	}
+
+	return fmt.Errorf("inode %d has type %v but its dirent says %v: %w", b.nid, inoType, b.ftype, ErrCorrupt)
+}
+
 func (b *file) readInfo() (ino *inode, err error) {
 	if b.info != nil {
 		return b.info, nil
@@ -2209,8 +2238,7 @@ func (b *file) readInfo() (ino *inode, err error) {
 	if inoType := b.info.mode.Type(); b.ftype != inoType {
 		b.info = nil
 
-		return nil, fmt.Errorf("inode %d has type %v but its dirent says %v: %w",
-			b.nid, inoType, b.ftype, ErrCorrupt)
+		return nil, b.wrongType(inoType)
 	}
 
 	// A directory is the exception to the size left open above: its entries
