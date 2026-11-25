@@ -646,12 +646,8 @@ func (fsys *Writer) Remove(name string) error {
 		return err
 	}
 
-	if e.mode&disk.StatTypeMask == disk.StatTypeDir {
-		for _, c := range e.children {
-			if !c.removed {
-				return &fs.PathError{Op: "remove", Path: name, Err: ErrDirNotEmpty}
-			}
-		}
+	if len(e.children) > 0 {
+		return &fs.PathError{Op: "remove", Path: name, Err: ErrDirNotEmpty}
 	}
 
 	fsys.unlinkEntry(e)
@@ -1298,9 +1294,13 @@ type fsEntry struct {
 	linkTo     *fsEntry
 	extraLinks uint32
 
-	// Tree structure — maintained during add/remove.
+	// Tree structure — maintained during add/remove. children holds the
+	// entries under a directory and none that was removed; at is the
+	// entry's place among its parent's, which lets a removed name leave
+	// the list at once (detach).
 	parent   *fsEntry
 	children []*fsEntry
+	at       int
 	// placed is the Writer's copySeq when the entry was placed, or placed
 	// again by a later layer.
 	placed uint64
@@ -1315,7 +1315,10 @@ type fsEntry struct {
 	// Close (directData) or for good (metadataOnly).
 	reopen func() (fs.File, error)
 
-	removed      bool // true if removed by a whiteout in a merge layer
+	// removed: the name is gone from the tree. The entry may still be held:
+	// by the list of its inode's other names, by a copy's link map, by a
+	// caller's handle.
+	removed      bool
 	metadataOnly bool // from a metadata-only CopyFrom; use chunk-based layout
 }
 
@@ -1564,7 +1567,7 @@ func (e *fsEntry) linkCount() uint32 {
 		var subdirs uint32
 
 		for _, c := range e.children {
-			if !c.removed && c.mode&disk.StatTypeMask == disk.StatTypeDir {
+			if c.mode&disk.StatTypeMask == disk.StatTypeDir {
 				subdirs++
 			}
 		}
@@ -1713,10 +1716,6 @@ func (d *readDir) ReadDir(n int) ([]fs.DirEntry, error) {
 func (d *readDir) collectChildren() []fs.DirEntry {
 	children := make([]fs.DirEntry, 0, len(d.entry.children))
 	for _, e := range d.entry.children {
-		if e.removed {
-			continue
-		}
-
 		children = append(children, &dirEntry{entry: e})
 	}
 
@@ -2246,9 +2245,21 @@ func (fsys *Writer) addChild(e *fsEntry) {
 	}
 
 	e.parent = parent
+	e.at = len(parent.children)
 	e.placed = fsys.copySeq
 	parent.children = append(parent.children, e)
 	fsys.byPath[e.path] = e
+}
+
+// detach takes e out of its parent's children: the last child takes its
+// place, the order of the list being no one's (ReadDir and Close sort).
+func detach(e *fsEntry) {
+	siblings := e.parent.children
+	last := len(siblings) - 1
+
+	siblings[e.at], siblings[last].at = siblings[last], e.at
+	siblings[last] = nil
+	e.parent.children = siblings[:last]
 }
 
 // removeTree removes an entry and all its descendants, whoever placed them:
@@ -2301,24 +2312,37 @@ func (fsys *Writer) dropEarlier(e *fsEntry, self bool) {
 		fsys.unlinkEntry(e)
 	}
 
+	fsys.dropEarlierUnder(e)
+}
+
+// dropEarlierUnder removes what earlier layers placed under e. It walks
+// e's children, so a child it removes keeps its place in the list until the
+// walk is done and the list is sifted: detached there, it would move the
+// last child under the walk.
+func (fsys *Writer) dropEarlierUnder(e *fsEntry) {
 	for _, c := range e.children {
-		if !c.removed {
-			fsys.dropEarlier(c, true)
+		if c.placed != fsys.copySeq {
+			fsys.dropName(c)
 		}
+
+		fsys.dropEarlierUnder(c)
+	}
+
+	e.children = slices.DeleteFunc(e.children, func(c *fsEntry) bool { return c.removed })
+	for i, c := range e.children {
+		c.at = i
 	}
 }
 
-// removeSubtree recursively marks all descendants of e as removed.
+// removeSubtree removes every descendant of e, which keeps none: the walk
+// is over e's children, so none is detached, and the list goes whole.
 func (fsys *Writer) removeSubtree(e *fsEntry) {
 	for _, c := range e.children {
-		if !c.removed {
-			fsys.unlinkEntry(c)
-
-			if c.mode&disk.StatTypeMask == disk.StatTypeDir {
-				fsys.removeSubtree(c)
-			}
-		}
+		fsys.dropName(c)
+		fsys.removeSubtree(c)
 	}
+
+	e.children = nil
 }
 
 // unlinkEntry drops one name. It is the single place an entry becomes
@@ -2331,6 +2355,14 @@ func (fsys *Writer) removeSubtree(e *fsEntry) {
 //     carry the inode (data, metadata, chunks) and the rest are
 //     repointed at it, so nothing downstream ever sees a dangling linkTo.
 func (fsys *Writer) unlinkEntry(e *fsEntry) {
+	fsys.dropName(e)
+	detach(e)
+}
+
+// dropName is unlinkEntry less the entry's place among its parent's
+// children, for a walk over those children, which empties or sifts the list
+// itself once it is done.
+func (fsys *Writer) dropName(e *fsEntry) {
 	e.removed = true
 	delete(fsys.byPath, e.path)
 
@@ -2379,9 +2411,9 @@ func (fsys *Writer) promoteAlias(target *fsEntry) {
 
 	// The heir takes over the inode wholesale, keeping only its own name
 	// and place in the tree.
-	heirPath, heirParent := heir.path, heir.parent
+	heirPath, heirParent, heirAt := heir.path, heir.parent, heir.at
 	*heir = *target
-	heir.path, heir.parent = heirPath, heirParent
+	heir.path, heir.parent, heir.at = heirPath, heirParent, heirAt
 	heir.linkTo = nil
 	heir.removed = false
 
@@ -2438,7 +2470,16 @@ func (fsys *Writer) aliased(target, alias *fsEntry) {
 		fsys.aliases = make(map[*fsEntry][]*fsEntry)
 	}
 
-	fsys.aliases[target] = append(fsys.aliases[target], alias)
+	// unlinkEntry leaves a removed name in the list, and the list is all
+	// that holds its entry then: once the removed outnumber the live they
+	// go, at a cost each removal has paid for, so that a name linked and
+	// removed over and over keeps nothing.
+	names := fsys.aliases[target]
+	if len(names) > 2*int(target.extraLinks) {
+		names = slices.DeleteFunc(names, func(a *fsEntry) bool { return a.removed })
+	}
+
+	fsys.aliases[target] = append(names, alias)
 	target.extraLinks++
 }
 
@@ -2464,19 +2505,17 @@ func (fsys *Writer) placeEntry(fe *fsEntry) *fsEntry {
 		return fe
 	}
 
-	savedParent := existing.parent
-	savedChildren := existing.children
 	// A directory that stops being one takes its entries with it: under a
 	// file they would stay registered, answer Stat, and be written by Close
 	// as the entries of something that has none.
 	if existing.mode&disk.StatTypeMask == disk.StatTypeDir && fe.mode&disk.StatTypeMask != disk.StatTypeDir {
 		fsys.removeSubtree(existing)
-
-		savedChildren = nil
 	}
 
+	savedParent, savedAt, savedChildren := existing.parent, existing.at, existing.children
+
 	*existing = *fe
-	existing.parent = savedParent
+	existing.parent, existing.at = savedParent, savedAt
 	existing.children = savedChildren
 	existing.placed = fsys.copySeq
 
@@ -2534,7 +2573,7 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 		var childDirs uint32
 
 		for _, c := range cur.fs.children {
-			if !c.removed && c.mode&disk.StatTypeMask == disk.StatTypeDir {
+			if c.mode&disk.StatTypeMask == disk.StatTypeDir {
 				childDirs++
 			}
 		}
@@ -2549,10 +2588,6 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 		}
 
 		for _, c := range cur.fs.children {
-			if c.removed {
-				continue
-			}
-
 			if c.linkTo != nil {
 				// Dirent-only alias: name here, inode on the target
 				// (nid/file type copied once the target has one).
