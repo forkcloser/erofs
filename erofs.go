@@ -225,6 +225,10 @@ func WithExtraDevices(devices ...io.ReaderAt) OpenOpt {
 // [fs.File] it opens is not: a file carries its own read offset and cached
 // inode, so share the FS, not the file.
 //
+// The returned FS keeps the extended attributes of the image's shared area
+// as it reads them, a mebibyte of them at most, for as long as it is held:
+// the label every file of a tree names is read once.
+//
 // Individual operations bound their own work, but the directory structure of
 // an image is not validated to be a tree. A corrupt or hostile image may
 // contain a directory that is reachable from itself, and a caller that walks
@@ -514,6 +518,13 @@ type image struct {
 	deviceIDMask uint16
 	blkPool      sync.Pool
 	longPrefixes []string // the long xattr prefix table, read at Open
+
+	// shared holds entries of the shared xattr area as decoded, by the
+	// reference that names them, sharedHeld what they count for
+	// (sharedEntryAt); sharedMu guards both.
+	sharedMu   sync.RWMutex
+	shared     map[uint32]sharedEntry
+	sharedHeld int
 }
 
 func (img *image) Open(name string) (fs.File, error) {

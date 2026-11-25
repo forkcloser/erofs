@@ -228,7 +228,9 @@ The writer stores xattr names of at most 255 bytes after their prefix and
 values of at most 65535 bytes. `Chown` refuses negative ids.
 
 The `fs.FS` from `Open` is safe for concurrent use; the files it opens and a
-`Writer` are not.
+`Writer` are not. It keeps the extended attributes of the image's shared area
+as it reads them, a mebibyte of them at most: the label every file of a tree
+names is read once.
 
 ## Releasing
 
