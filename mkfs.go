@@ -1925,9 +1925,9 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 	if err := checkPathLen(p); err != nil {
 		return err
 	}
-	// A source is held to what the API is held to: the kernel's lookup
-	// could not reach a longer name whoever wrote it.
-	if err := checkNameLen(p); err != nil {
+	// A source is held to what the API is held to: a name is no more one
+	// the image can hold for coming from a source.
+	if err := checkNames(p); err != nil {
 		return err
 	}
 
@@ -2124,7 +2124,7 @@ func (fsys *Writer) checkPath(name string) error {
 		return err
 	}
 
-	if err := checkNameLen(name); err != nil {
+	if err := checkNames(name); err != nil {
 		return err
 	}
 
@@ -2157,16 +2157,24 @@ func checkSymlinkTarget(name, target string) error {
 	return nil
 }
 
-// checkNameLen rejects a path with a component over EROFS_NAME_LEN bytes:
-// the dirent would be written, but the kernel's lookup answers ENAMETOOLONG
-// before reading it, so the entry could never be reached.
-func checkNameLen(name string) error {
+// checkNames rejects a path with a component an image cannot hold as that
+// name. One over EROFS_NAME_LEN bytes would be written, but the kernel's
+// lookup answers ENAMETOOLONG before reading it, so the entry could never
+// be reached. One with a NUL is another name once written: the last name
+// of a directory block ends at its first NUL, for the kernel and for this
+// reader, so "a\x00b" beside "a" is "a" twice; and anywhere else this
+// reader refuses the directory that holds it.
+func checkNames(name string) error {
 	for component := range strings.SplitSeq(strings.Trim(name, "/"), "/") {
 		if len(component) > maxNameLen {
 			return fmt.Errorf(
 				"mkfs: name %q is %d bytes, over the %d byte limit: %w",
 				component, len(component), maxNameLen, ErrInvalid,
 			)
+		}
+
+		if strings.IndexByte(component, 0) >= 0 {
+			return fmt.Errorf("mkfs: name %q holds a NUL byte: %w", component, ErrInvalid)
 		}
 	}
 

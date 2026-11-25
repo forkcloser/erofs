@@ -224,8 +224,10 @@ The reader accepts block sizes from 512 bytes to 64 KiB. Compressed inodes,
 report `ErrInvalid`: symlink targets and paths of at most 4096 bytes, 255
 symlink hops per resolution, a chunk-index map of at most 64 MiB per file,
 and `fs.ReadFile` refusing files over 128 MiB (open and `io.Copy` those).
-The writer stores xattr names of at most 255 bytes after their prefix and
-values of at most 65535 bytes. `Chown` refuses negative ids.
+The writer refuses, `ErrInvalid`, a file name over 255 bytes, which no lookup
+would reach, and one with a NUL, which would read back as another name. It
+stores xattr names of at most 255 bytes after their prefix and values of at
+most 65535 bytes. `Chown` refuses negative ids.
 
 The `fs.FS` from `Open` is safe for concurrent use; the files it opens and a
 `Writer` are not.
