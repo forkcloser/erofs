@@ -67,6 +67,11 @@ func setXattr(stat *Stat, nid uint64, name, value string) error {
 	return nil
 }
 
+// sharedXattrFirst is the first read of a shared entry: its header and the
+// name and value of most entries, a label or a capability. A block, read
+// for each reference of each inode, is up to 64 KiB for those few bytes.
+const sharedXattrFirst = 128
+
 // sharedXattr reads the entry at addr in the shared xattr area: its header,
 // then what follows it, the rest of the name and the value in one string,
 // e_name_len bytes of the first. They run on for as long as the header
@@ -74,7 +79,7 @@ func setXattr(stat *Stat, nid uint64, name, value string) error {
 // erofs_xattr_copy_to_buffer), and mkfs.erofs lays the area out as one
 // buffer with no regard for where a block ends.
 func (img *image) sharedXattr(addr int64) (entry disk.XattrEntry, body string, err error) {
-	blk, err := img.loadAt(addr, int64(1<<img.sb.BlkSizeBits))
+	blk, err := img.loadAt(addr, sharedXattrFirst)
 	if err != nil {
 		return entry, "", err
 	}
