@@ -1349,9 +1349,7 @@ func exerciseUntrusted(t *testing.T, buf []byte) {
 // TestUntrustedNidStaysInBounds covers a dirent nid large enough that
 // metaStartPos + nid*32 wraps to a negative int64. The offset was handed to
 // the caller's io.ReaderAt untouched: an error for *bytes.Reader and *os.File,
-// a panic for a slice-backed one. readInfo's recover() turned its own panic
-// into an error but did nothing about the offset already having escaped, and
-// loadBlock, openDirect and buildChunkDataRanges have no such net at all.
+// a panic for a slice-backed one.
 func TestUntrustedNidStaysInBounds(t *testing.T) {
 	t.Parallel()
 

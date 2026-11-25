@@ -819,8 +819,7 @@ func (img *image) walkChunkMap(
 // phys is assembled from two on-disk fields with no upper bound of their own,
 // and the shift is by up to BlkSizeBits (16), so the product overflows int64
 // and lands negative. Same exposure as checkNid: the value reaches the
-// caller's reader, and buildChunkDataRanges and openDirect — unlike readInfo —
-// have no recover() between it and the caller.
+// caller's reader.
 func (img *image) chunkAddr(phys uint64) (int64, error) {
 	if phys > uint64(math.MaxInt64)>>img.sb.BlkSizeBits {
 		return 0, fmt.Errorf("chunk block address %d is out of range: %w", phys, ErrCorrupt)
@@ -978,8 +977,7 @@ func (img *image) locate(deviceID uint16, pa int64) (uint16, int64, error) {
 	// physical address comes straight off disk, and a wildly out-of-range one
 	// reaches the caller's io.ReaderAt untouched. *bytes.Reader and *os.File
 	// answer with an error, but a slice-backed reader indexes with it and
-	// panics — and unlike readInfo, neither loadBlock nor openDirect has a
-	// recover() in between. A device's extent is not knowable here.
+	// panics. A device's extent is not knowable here.
 	if pa < 0 || (img.size > 0 && pa >= img.size) {
 		return 0, 0, fmt.Errorf("physical address %d is outside the image: %w", pa, ErrCorrupt)
 	}
@@ -2209,14 +2207,8 @@ func (b *file) readInfo() (ino *inode, err error) {
 	}
 
 	// The block is scratch space for decoding: nothing in the returned inode
-	// points into it, so it always goes straight back to the pool. Deferring
-	// the put before the recover keeps it to exactly one, panic or not.
+	// points into it, so it always goes straight back to the pool.
 	defer b.img.putBlock(blk)
-	defer func() {
-		if v := recover(); v != nil {
-			err = fmt.Errorf("file format error: %v: %w", v, ErrCorrupt)
-		}
-	}()
 
 	// span is the inode's block from the inode on, and only the inode is
 	// read into it: a block is up to 64 KiB and a resolution reads thousands
@@ -2782,7 +2774,7 @@ func (b *file) eachChunk(ino *inode, emit func(DataRange)) error {
 		phys := uint64(blkLo)
 		// DataRange.Offset is public: a MetadataOnly consumer preads it
 		// against an external device, so an unrepresentable address must not
-		// reach it. Unlike readInfo, nothing here has a recover().
+		// reach it.
 		byteOffset, err := b.img.chunkAddr(phys)
 		if err != nil {
 			return false, err
