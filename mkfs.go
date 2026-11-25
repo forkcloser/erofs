@@ -761,6 +761,15 @@ func (l listedOnce) ReadDir(name string) ([]fs.DirEntry, error) {
 // A directory that lists a name twice is refused whatever the source: a lookup
 // finds one of the two entries, and the copy would hold that one's content
 // under the other's metadata.
+// A copy is the size of the tree it copies, not of its source: an EROFS
+// image may store once what many of its files name, and the copy stores it
+// for each of them. With its data, a file is written at its logical size,
+// whatever blocks its chunks share; a directory gets every name it lists,
+// whatever block its entries share with another directory's. An attribute
+// the image keeps once, in its shared area, is written with each file that
+// carries it: the Writer, as it is today, shares none.
+// Nothing here bounds a copy by the bytes of its source: what the caller
+// writes to does.
 // A hole in a file of an EROFS image stays a hole in the copy, with its
 // data as well as metadata-only: the copy stores what the source stores.
 // With its data that holds when src opens this package's own files: the
