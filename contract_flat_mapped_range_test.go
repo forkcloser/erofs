@@ -277,3 +277,90 @@ func TestContractAFlatFileThroughASlotsRangeIsReadWithoutItsDevices(t *testing.T
 		})
 	}
 }
+
+// TestContractAChunkOfThePrimaryDeviceWithoutItsDevices: a chunk that names
+// device 0 at an address inside a slot's range. Given the devices, the
+// kernel translates the address to the slot's device (erofs_map_dev); given
+// none, it translates no address of the primary device, and the chunk is
+// the image's at its own address. The bytes were right either way, the
+// slot's reader being a window of the image; DataRange named the slot's
+// device, which the caller had not given.
+func TestContractAChunkOfThePrimaryDeviceWithoutItsDevices(t *testing.T) {
+	t.Parallel()
+
+	img, err := os.ReadFile("internal/corpus/testdata/small-blobdev-512.erofs")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Nid 48's three chunk indexes, of two blocks each, name device 1 at
+	// blocks 0, 2 and 4: device 0 at the same blocks of the slot's range,
+	// which starts at block 13.
+	const (
+		indexes = flatInode + 64
+		first   = 13
+	)
+
+	for i := range 3 {
+		binary.LittleEndian.PutUint16(img[indexes+8*i+2:], 0)
+		binary.LittleEndian.PutUint32(img[indexes+8*i+4:], uint32(first+2*i))
+	}
+
+	img = append(img, make([]byte, 70*512-len(img))...)
+	for at := first * 512; at < len(img); at++ {
+		img[at] = byte(at / 512)
+	}
+
+	blob := bytes.Repeat([]byte("B"), slotBlocks*512)
+
+	for _, tc := range []struct {
+		name   string
+		opts   []erofs.OpenOpt
+		device uint16
+		offset int64
+		want   []byte
+	}{
+		{"with none of its devices", nil, 0, first * 512, img[first*512 : first*512+3000]},
+		{
+			"with its device",
+			[]erofs.OpenOpt{erofs.WithExtraDevices(bytes.NewReader(blob))},
+			1, 0, blob[:3000],
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			fsys, err := erofs.Open(bytes.NewReader(img), tc.opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := fs.ReadFile(fsys, "multi")
+			if err != nil || !bytes.Equal(got, tc.want) {
+				t.Fatalf(
+					"ReadFile: %d bytes, %v; want the 3000 at %d of device %d",
+					len(got),
+					err,
+					tc.offset,
+					tc.device,
+				)
+			}
+
+			st, err := fs.Lstat(fsys, "multi")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ranges := st.(interface{ DataRange() []erofs.DataRange }).DataRange()
+			if len(ranges) == 0 || ranges[0].Offset != tc.offset {
+				t.Fatalf("its ranges: %+v; want them from %d of device %d", ranges, tc.offset, tc.device)
+			}
+
+			for _, r := range ranges {
+				if r.Device != tc.device {
+					t.Fatalf("its ranges: %+v; want every one on device %d", ranges, tc.device)
+				}
+			}
+		})
+	}
+}

@@ -947,7 +947,8 @@ func (img *image) deviceReader(dev uint16) io.ReaderAt {
 // bytes are on and their offset there, as erofs_map_dev does: an explicit
 // id names its device; on the primary device, an address inside an extra
 // device's mapped range (its uniaddr, the slot's mapped_blkaddr, and its
-// block count) is that device's, and the rest is the image's own, bounded.
+// block count) is that device's when the devices were given
+// (onMappedDevice), and the rest is the image's own, bounded.
 // DataRange exposes the result publicly, so both readers and the ranges go
 // through here and agree on where data lives.
 func (img *image) locate(deviceID uint16, pa int64) (uint16, int64, error) {
@@ -959,18 +960,9 @@ func (img *image) locate(deviceID uint16, pa int64) (uint16, int64, error) {
 		return deviceID, pa, nil
 	}
 
-	for i, dev := range img.devices {
-		if dev.mappedBlkAddr == 0 {
-			continue
-		}
-
-		startOff := int64(dev.mappedBlkAddr) << img.sb.BlkSizeBits
-		length := int64(dev.blocks) << img.sb.BlkSizeBits
-
-		if pa >= startOff && pa < startOff+length {
-			// #nosec G115 -- the device count is a uint16 on disk
-			return uint16(i + 1), pa - startOff, nil
-		}
+	// The one address, of no length: nothing of it can cross a range's edge.
+	if dev, off, err := img.onMappedDevice(pa, 0); err != nil || dev > 0 {
+		return dev, off, err
 	}
 
 	// Reads that land on the image itself can be bounded, and must be: a
