@@ -7,6 +7,8 @@ import (
 	"os"
 	"strconv"
 	"testing"
+
+	"github.com/forkcloser/erofs/internal/corpus"
 )
 
 // countingReaderAt counts ReadAt calls to quantify syscall amplification.
@@ -340,5 +342,51 @@ func BenchmarkPerfRemoveNamesOfOneInode(b *testing.B) {
 				}
 			})
 		}
+	}
+}
+
+// BenchmarkPerfStatSharedXattr measures Stat of the 60 files of a directory
+// that each name one label in the shared xattr area, as the files of a
+// labeled tree do, in images of 4 KiB and of 64 KiB blocks.
+func BenchmarkPerfStatSharedXattr(b *testing.B) {
+	for _, bits := range []uint8{12, 16} {
+		b.Run("blk"+strconv.Itoa(1<<bits), func(b *testing.B) {
+			const files = 60
+
+			l := corpus.Layout{
+				BlockBits: bits,
+				Shared:    []corpus.AXattr{{Index: 6, Suffix: "selinux", Value: []byte("system_u:object_r:usr_t:s0")}},
+			}
+
+			names := make([]string, files)
+			for i := range names {
+				names[i] = "f" + strconv.Itoa(100+i)
+				l.Entries = append(
+					l.Entries,
+					corpus.AEntry{Name: names[i], Mode: 0o100644, Nlink: 1, SharedIDs: []int{0}},
+				)
+			}
+
+			fsys, err := Open(bytes.NewReader(corpus.Assemble(l)))
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for range b.N {
+				for _, name := range names {
+					info, err := fs.Stat(fsys, name)
+					if err != nil {
+						b.Fatal(err)
+					}
+
+					if st, ok := info.Sys().(*Stat); !ok || len(st.Xattrs) != 1 {
+						b.Fatalf("%s: Sys() is %v", name, info.Sys())
+					}
+				}
+			}
+		})
 	}
 }
