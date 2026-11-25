@@ -2045,7 +2045,7 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 	// take part: their link count reflects child directories, not names.
 	if typ != disk.StatTypeDir && be.Ino != 0 && be.Nlink > 1 && fsys.copyLinks != nil {
 		key := hardlinkKey{be.Dev, be.Ino}
-		if prior, ok := fsys.copyLinks[key]; ok && !prior.removed {
+		if prior, ok := fsys.copyLinks[key]; ok {
 			if c, ok := be.Data.(io.Closer); ok {
 				_ = c.Close()
 			}
