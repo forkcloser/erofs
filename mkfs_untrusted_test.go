@@ -242,36 +242,43 @@ func TestUntrustedBlockCountIsRejected(t *testing.T) {
 
 // movedMeta serves an image whose metadata area sits far past its other
 // bytes, as a sparse file holds it for nothing: reads from to on come from
-// buf at from. It reports no size, so the image is as long as its
-// superblock declares, and nothing else is there to read.
+// buf at from, and what is between buf's end and to reads as zeros. It
+// reports no size, so the image is as long as its superblock declares.
 type movedMeta struct {
 	buf      []byte
 	from, to int64
 }
 
 func (m *movedMeta) ReadAt(p []byte, off int64) (int, error) {
-	if off >= m.to {
-		off = off - m.to + m.from
-	}
-
-	if off < 0 || off >= int64(len(m.buf)) {
+	if off < 0 {
 		return 0, io.EOF
 	}
 
-	n := copy(p, m.buf[off:])
-	if n < len(p) {
-		return n, io.EOF
+	for n := range p {
+		at := off + int64(n)
+		if at >= m.to {
+			at = at - m.to + m.from
+		}
+
+		switch {
+		case at < int64(len(m.buf)):
+			p[n] = m.buf[at]
+		case off+int64(n) < m.to:
+			p[n] = 0
+		default:
+			return n, io.EOF
+		}
 	}
 
-	return n, nil
+	return len(p), nil
 }
 
 // TestUntrustedDirectorySizeIsBounded covers a directory's i_size, which
 // sized the buffer the metadata-only copy read the directory into. The
-// size is held to the image's declared extent, and the metadata region to
-// 1 GiB, but the region may start anywhere: a superblock that puts it 4 GiB
-// in, on a source of a few kilobytes that reports no length, let the root
-// declare 2 GiB of entries and have them allocated before a byte was read.
+// size is held to the image's declared extent, which is the superblock's
+// word: a superblock that puts the metadata 4 GiB in, on a source of a few
+// kilobytes that reports no length, let the root declare 2 GiB of entries
+// and have them allocated before a byte was read.
 //
 //nolint:paralleltest // measures the process's TotalAlloc against a budget; a parallel test's allocations would count against it
 func TestUntrustedDirectorySizeIsBounded(t *testing.T) {
@@ -321,14 +328,239 @@ func TestUntrustedDirectorySizeIsBounded(t *testing.T) {
 	runtime.ReadMemStats(&after)
 	grew := after.TotalAlloc - before.TotalAlloc
 
-	if !errors.Is(err, ErrInvalid) {
-		t.Errorf("err = %v, want it to wrap ErrInvalid", err)
+	// The limit's own refusal: ErrCorrupt is ErrInvalid too, and a copy
+	// that never reached the directory answers with it.
+	if err == nil {
+		t.Fatal("a root declaring 2 GiB of entries was copied")
+	}
+
+	if !errors.Is(err, ErrInvalid) || errors.Is(err, ErrCorrupt) || !strings.Contains(err.Error(), "directory") {
+		t.Errorf("err = %v, want the directory limit's ErrInvalid", err)
 	}
 
 	t.Logf("rejected with %v (allocated %d bytes)", err, grew)
 
 	if grew > 64<<20 {
 		t.Errorf("allocated %d bytes for a root declaring 2 GiB of entries; want under 64 MiB", grew)
+	}
+}
+
+// errWindowSource is windowSource's own error.
+var errWindowSource = errors.New("windowSource: the source's own error")
+
+// windowSource is a source of any length whose byte at off is off's low
+// eight bits times three, and which counts what is read of it. Reads that
+// reach short come back a byte short with no error; reads that reach fails
+// fail.
+type windowSource struct {
+	calls, bytes int64
+	short, fails int64
+}
+
+const windowSourceSize = 1 << 20
+
+func (s *windowSource) ReadAt(p []byte, off int64) (int, error) {
+	s.calls++
+
+	if s.fails > 0 && off+int64(len(p)) > s.fails {
+		return 0, errWindowSource
+	}
+
+	n := len(p)
+	if s.short > 0 && off+int64(n) > s.short {
+		n--
+	}
+
+	for i := range p[:n] {
+		p[i] = byte(off+int64(i)) * 3
+	}
+
+	s.bytes += int64(n)
+
+	return n, nil
+}
+
+// TestUntrustedCopyWindowsKeepToTheirRoom covers what a metadata-only copy
+// holds of its source: every window it reads, so that none is read twice,
+// and no more than its room, which is 1 GiB for a copy and 128 KiB here.
+// Past it a range is read on its own, at its size, every time it is asked
+// for; what is held is still served with no read. It is held to the type
+// and not to a copy, against the package's rule for tests: the copy that
+// shows the room is one that holds 1 GiB.
+func TestUntrustedCopyWindowsKeepToTheirRoom(t *testing.T) {
+	t.Parallel()
+
+	src := &windowSource{}
+	w := newImageWindows(src, windowSourceSize, 2*copyWindow)
+
+	at := func(off, n int64) {
+		t.Helper()
+
+		got, err := w.span(off, n)
+		if err != nil {
+			t.Fatalf("span(%d, %d): %v", off, n, err)
+		}
+
+		for i, b := range got {
+			if want := byte(off+int64(i)) * 3; b != want {
+				t.Fatalf("span(%d, %d): byte %d is %d, want %d", off, n, i, b, want)
+			}
+		}
+
+		if int64(len(got)) != n {
+			t.Fatalf("span(%d, %d) is %d bytes", off, n, len(got))
+		}
+	}
+
+	// Two windows, far apart: a read each, and the room is taken.
+	at(100, 64)
+	at(5*copyWindow+7, 32)
+
+	if src.calls != 2 || src.bytes != 2*copyWindow || w.held != 2*copyWindow {
+		t.Fatalf("two windows: %d reads of %d bytes, %d held; want 2 reads of %d, all held",
+			src.calls, src.bytes, w.held, 2*copyWindow)
+	}
+
+	// Held windows answer with no read.
+	at(200, 4096)
+	at(5*copyWindow, copyWindow)
+
+	if src.calls != 2 {
+		t.Fatalf("ranges of held windows took %d more reads", src.calls-2)
+	}
+
+	// A third window has no room: its range is read alone, each time.
+	at(9*copyWindow+1, 48)
+	at(9*copyWindow+1, 48)
+
+	if src.calls != 4 || src.bytes != 2*copyWindow+96 || w.held != 2*copyWindow {
+		t.Fatalf("past the room: %d reads, %d bytes read, %d held; want 4, %d and %d",
+			src.calls, src.bytes, w.held, 2*copyWindow+96, 2*copyWindow)
+	}
+
+	// So is a range that runs from a held window into one there is no
+	// room for, and one in a window there is no room for before a held one.
+	at(copyWindow-8, 16)
+	at(4*copyWindow+1, 48)
+	at(4*copyWindow, 48)
+
+	if src.calls != 7 || src.bytes != 2*copyWindow+208 {
+		t.Fatalf("beside held windows: %d reads, %d bytes read; want 7 and %d", src.calls, src.bytes, 2*copyWindow+208)
+	}
+
+	// Nothing is read for a range that is not in the image.
+	for _, r := range [][2]int64{{-1, 4}, {windowSourceSize - 4, 5}, {windowSourceSize, 1}, {0, windowSourceSize + 1}, {8, -1}} {
+		if _, err := w.span(r[0], r[1]); !errors.Is(err, ErrCorrupt) {
+			t.Errorf("span(%d, %d) = %v; want ErrCorrupt", r[0], r[1], err)
+		}
+	}
+
+	if src.calls != 7 {
+		t.Errorf("ranges outside the image took %d reads", src.calls-7)
+	}
+
+	// A read that follows the last would take two windows, and takes the
+	// one there is room for.
+	src = &windowSource{}
+	w = newImageWindows(src, windowSourceSize, 2*copyWindow)
+
+	at(10, 10)
+	at(copyWindow+10, 10)
+
+	if src.calls != 2 || src.bytes != 2*copyWindow || w.held != 2*copyWindow {
+		t.Fatalf("two windows in a row with room for two: %d reads of %d bytes, %d held; want 2 of %d, all held",
+			src.calls, src.bytes, w.held, 2*copyWindow)
+	}
+
+	// A range across two held windows is their bytes, with no read: here
+	// the windows of two reads.
+	at(copyWindow-8, 16)
+
+	if src.calls != 2 {
+		t.Errorf("a range across two held windows took %d more reads", src.calls-2)
+	}
+
+	// With room, a range is read as the windows it runs through, in one
+	// read where none of them is held, and they are held: a range across
+	// two windows, and one longer than a window, each asked for twice.
+	src = &windowSource{}
+	w = newImageWindows(src, windowSourceSize, copyHeld)
+
+	at(4*copyWindow-8, 16)
+	at(4*copyWindow-8, 16)
+
+	if src.calls != 1 || src.bytes != 2*copyWindow {
+		t.Fatalf(
+			"a range across two windows not held: %d reads of %d bytes; want 1 of %d",
+			src.calls,
+			src.bytes,
+			2*copyWindow,
+		)
+	}
+
+	at(8*copyWindow+5, 2*copyWindow+1)
+	at(8*copyWindow+5, 2*copyWindow+1)
+
+	if src.calls != 2 || src.bytes != 5*copyWindow || w.held != 5*copyWindow {
+		t.Fatalf("a range through three windows not held: %d reads, %d bytes, %d held; want 2 and %d of each",
+			src.calls, src.bytes, w.held, 5*copyWindow)
+	}
+
+	// A range from held windows into one not held reads that one, here
+	// with the four after it to the source's end, which following the last
+	// read earns; and a range through held windows and three between them
+	// reads the three. Each is the bytes of all its reads.
+	at(8*copyWindow+5, 3*copyWindow+1)
+	at(3*copyWindow+9, 5*copyWindow+80)
+
+	if src.calls != 4 || w.held != 13*copyWindow {
+		t.Errorf(
+			"ranges through held windows and others: %d reads, %d held; want 4 and %d",
+			src.calls,
+			w.held,
+			13*copyWindow,
+		)
+	}
+
+	// A window gigabytes into an image is held and found as the first is.
+	src = &windowSource{}
+	w = newImageWindows(src, 4<<30, copyHeld)
+
+	at(3<<30+5, 8)
+	at(5, 8)
+	at(3<<30+9, 8)
+	at(9, 8)
+
+	if src.calls != 2 || w.held != 2*copyWindow {
+		t.Errorf(
+			"two windows 3 GiB apart, each asked twice: %d reads, %d held; want 2 and %d",
+			src.calls,
+			w.held,
+			2*copyWindow,
+		)
+	}
+}
+
+// TestUntrustedCopyWindowsDoNotTakeAShortReadForRead covers a source that
+// answers a read short, or with an error of its own: the bytes it did not
+// give are not zeros of the image, and its error is not the image's fault.
+func TestUntrustedCopyWindowsDoNotTakeAShortReadForRead(t *testing.T) {
+	t.Parallel()
+
+	for _, room := range []int64{copyHeld, 0} {
+		// The window's read and the range's own both end at the third
+		// window's end, a byte past what the source gives.
+		short := newImageWindows(&windowSource{short: 3*copyWindow - 1}, windowSourceSize, room)
+
+		if _, err := short.span(3*copyWindow-64, 64); !errors.Is(err, ErrCorrupt) {
+			t.Errorf("room %d: a read that came back short: %v; want ErrCorrupt", room, err)
+		}
+
+		failing := newImageWindows(&windowSource{fails: 3*copyWindow - 1}, windowSourceSize, room)
+
+		if _, err := failing.span(3*copyWindow-64, 64); !errors.Is(err, errWindowSource) || errors.Is(err, ErrCorrupt) {
+			t.Errorf("room %d: a read that failed: %v; want the source's error and not ErrCorrupt", room, err)
+		}
 	}
 }
 

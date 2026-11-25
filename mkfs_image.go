@@ -3,6 +3,7 @@ package erofs
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -13,11 +14,24 @@ import (
 	"github.com/forkcloser/erofs/internal/disk"
 )
 
-// maxEagerMetaBytes caps the metadata region copyFromImage will read into
-// memory in one shot when the source's true size cannot be determined.
-// Images whose declared metadata exceeds this are rejected rather than
-// allowed to drive an unbounded allocation.
-const maxEagerMetaBytes = 1 << 30 // 1 GiB
+// maxDirBytes is the most a directory of a source image may declare as its
+// entries: a copy reads them whole, into one buffer i_size sizes.
+const maxDirBytes = 1 << 30 // 1 GiB
+
+// copyWindow is the unit copyFromImage reads its source in: one read takes
+// a window, and twice the read before it, up to copyAhead, when the reads
+// follow each other. copyHeld is how much of the source a copy holds: what
+// it reads it keeps, so nothing is read twice, and past copyHeld what the
+// tree names is read piece by piece.
+const (
+	copyWindow = 64 << 10
+	copyAhead  = 4 << 20
+	copyHeld   = 1 << 30
+)
+
+// copyPage is how many windows a page of imageWindows' table finds: 32 MiB
+// of the image, in 12 KiB.
+const copyPage = 1 << 9
 
 // maxQueuePrealloc caps the BFS queue's initial capacity. This is only a
 // sizing hint — the queue still grows to whatever the image legitimately
@@ -48,61 +62,214 @@ func imageSize(ra io.ReaderAt) (int64, bool) {
 	return 0, false
 }
 
-// newMetaReader returns an at() function backed by an eagerly-read
-// metadata buffer plus an on-demand block cache for data blocks
-// outside the metadata region.
+// imageWindows is copyFromImage's view of its source: the image read in
+// windows of copyWindow bytes, each when a byte of it is first asked for
+// and never again. The inodes of a tree are in the image where its writer
+// put them, among the data in one mkfs.erofs laid out, so what a copy reads
+// is what the tree names and not a region; and it reads them in the order
+// the tree lists them, which is not the image's, so what it read it keeps.
 //
-// The caller is responsible for validating metaStart and totalBytes against
-// the real size of ra before calling: both derive from superblock fields and
-// would otherwise size the allocation below directly from untrusted input.
-//
-//nolint:gocognit // the returned accessor is the function: the metadata buffer first, then the block cache
-func newMetaReader(ra io.ReaderAt, metaStart, totalBytes int64, blockSize int) func(int64) []byte {
-	metaSize := totalBytes - metaStart
-	if metaSize <= 0 {
-		return func(int64) []byte { return nil }
+// So no byte of the image is read twice through the windows, whatever the
+// order: letting a window go to hold fewer of them is reading it again
+// when the walk comes back, a window for each name of an image laid out
+// for it. What a copy reads beside them it reads as the reader does, at
+// its size and where the tree puts it: the blocks of a directory's
+// entries and of a link's target.
+type imageWindows struct {
+	ra io.ReaderAt
+	// total is the image's length by its superblock, which the caller held
+	// to the source's own.
+	total int64
+	// pages find the windows held, window idx in page idx/copyPage, a page
+	// made when a window of it is first held: a held window is a part of
+	// the read that took it, its capacity the rest of that read, and one
+	// not held is empty. held is their bytes, at most room.
+	pages []*[copyPage][]byte
+	held  int64
+	room  int64
+	// The last read took run windows and ended on window last. A read of
+	// the window after it takes twice as many: where the tree's metadata
+	// is all there is, the image is read in few reads and not one a window.
+	last, run int64
+}
+
+func newImageWindows(ra io.ReaderAt, total, room int64) *imageWindows {
+	return &imageWindows{ra: ra, total: total, room: room}
+}
+
+// heldWindow is window idx when it is held, and empty when it is not.
+func (w *imageWindows) heldWindow(idx int64) []byte {
+	if at := idx / copyPage; at < int64(len(w.pages)) {
+		if page := w.pages[at]; page != nil {
+			return page[idx%copyPage]
+		}
 	}
 
-	metaBuf := make([]byte, metaSize)
-	if n, err := ra.ReadAt(metaBuf, metaStart); err != nil || int64(n) != metaSize {
-		return func(int64) []byte { return nil }
+	return nil
+}
+
+// hold keeps win as window idx.
+func (w *imageWindows) hold(idx int64, win []byte) {
+	at := idx / copyPage
+	for int64(len(w.pages)) <= at {
+		w.pages = append(w.pages, nil)
 	}
 
-	cache := make(map[int64][]byte)
+	page := w.pages[at]
+	if page == nil {
+		page = new([copyPage][]byte)
+		w.pages[at] = page
+	}
 
-	return func(off int64) []byte {
-		// Fast path: offset in metadata region.
-		if off >= metaStart {
-			o := off - metaStart
-			if o >= int64(len(metaBuf)) {
-				return nil
-			}
+	page[idx%copyPage] = win
+}
 
-			return metaBuf[o:]
+// span is the n bytes at off: the windows' own bytes where one read took
+// them all, and a copy of them where more than one did. A window the range
+// runs through and that is not held is read, and those after it that the
+// range needs with it. Once the windows held leave no room for one of them
+// the range is read on its own, at its size, each time it is asked for.
+func (w *imageWindows) span(off, n int64) ([]byte, error) {
+	if off < 0 || n < 0 || n > w.total || off > w.total-n {
+		return nil, fmt.Errorf("%d bytes at offset %d lie outside the %d byte image: %w",
+			n, off, w.total, ErrCorrupt)
+	}
+
+	if n == 0 {
+		return []byte{}, nil
+	}
+
+	idx := off / copyWindow
+	at := off - idx*copyWindow
+	end := (off+n-1)/copyWindow + 1
+
+	win, err := w.window(idx, end-idx)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(win) == 0 {
+		return w.alone(off, n)
+	}
+
+	// A window's capacity runs to the end of the read that took it.
+	if at+n <= int64(cap(win)) {
+		return win[at : at+n : at+n], nil
+	}
+
+	whole := make([]byte, n)
+	got := int64(copy(whole, win[at:]))
+
+	for next := idx + 1; got < n; next++ {
+		win, err = w.window(next, end-next)
+		if err != nil {
+			return nil, err
 		}
-		// Outside metadata — flat-plain data block. Load on demand.
-		if off < 0 || off >= totalBytes {
-			return nil
+
+		if len(win) == 0 {
+			return w.alone(off, n)
 		}
 
-		blkAddr := off - off%int64(blockSize)
-		if cached, ok := cache[blkAddr]; ok {
-			return cached[off-blkAddr:]
+		got += int64(copy(whole[got:], win))
+	}
+
+	return whole, nil
+}
+
+// window is window idx, read if it is not held, with the windows after it
+// that the caller needs, need in all; empty when it is not held and no
+// room is left for it.
+func (w *imageWindows) window(idx, need int64) ([]byte, error) {
+	if win := w.heldWindow(idx); len(win) > 0 {
+		return win, nil
+	}
+
+	if w.held+min(copyWindow, w.total-idx*copyWindow) > w.room {
+		return nil, nil
+	}
+
+	return w.load(idx, need)
+}
+
+// alone reads the n bytes at off into a buffer of their own.
+func (w *imageWindows) alone(off, n int64) ([]byte, error) {
+	buf := make([]byte, n)
+	if err := w.read(buf, off); err != nil {
+		return nil, err
+	}
+
+	return buf, nil
+}
+
+// load reads window idx, which is not held and which there is room for,
+// and with it the windows after it that the caller needs, need in all, or
+// that a run of reads has earned if they are more, short of one already
+// held, of the image's end and of the room left.
+func (w *imageWindows) load(idx, need int64) ([]byte, error) {
+	want := need
+	if w.run > 0 && idx == w.last+1 {
+		want = max(need, min(2*w.run, copyAhead/copyWindow))
+	}
+
+	start := idx * copyWindow
+
+	count := int64(1)
+	for count < want && start+count*copyWindow < w.total {
+		if len(w.heldWindow(idx+count)) > 0 {
+			break
 		}
 
-		sz := int64(blockSize)
-		if blkAddr+sz > totalBytes {
-			sz = totalBytes - blkAddr
+		if w.held+min((count+1)*copyWindow, w.total-start) > w.room {
+			break
 		}
 
-		buf := make([]byte, sz)
-		if n, err := ra.ReadAt(buf, blkAddr); err != nil || int64(n) != sz {
-			return nil
-		}
+		count++
+	}
 
-		cache[blkAddr] = buf
+	buf := make([]byte, min(count*copyWindow, w.total-start))
+	if err := w.read(buf, start); err != nil {
+		return nil, err
+	}
 
-		return buf[off-blkAddr:]
+	for i := range count {
+		from := i * copyWindow
+		w.hold(idx+i, buf[from:min(from+copyWindow, int64(len(buf)))])
+	}
+
+	w.held += int64(len(buf))
+	w.last, w.run = idx+count-1, count
+
+	return buf[:min(copyWindow, int64(len(buf)))], nil
+}
+
+// read fills buf from off. A reader may say io.EOF with its last bytes; one
+// that ends before buf is full holds less than the superblock declares.
+func (w *imageWindows) read(buf []byte, off int64) error {
+	switch n, err := w.ra.ReadAt(buf, off); {
+	case n == len(buf):
+		return nil
+	case err != nil && !errors.Is(err, io.EOF):
+		return err
+	default:
+		return fmt.Errorf("the image ends %d bytes into the %d at offset %d, inside the %d its superblock declares: %w",
+			n, len(buf), off, w.total, ErrCorrupt)
+	}
+}
+
+// endsWhereDeclared holds a source that reports no length to the length its
+// superblock declares, by its last byte: the copy reads what the tree
+// names, and a source that ends short of the image is one whatever of it
+// the tree names.
+func endsWhereDeclared(ra io.ReaderAt, total int64) error {
+	var last [1]byte
+
+	switch n, err := ra.ReadAt(last[:], total-1); {
+	case n == len(last):
+		return nil
+	case err != nil && !errors.Is(err, io.EOF):
+		return err
+	default:
+		return fmt.Errorf("superblock declares %d bytes and the image ends before them: %w", total, ErrCorrupt)
 	}
 }
 
@@ -116,9 +283,8 @@ type imgQEntry struct {
 
 // copyFromImage is a fast path for CopyFrom when the source is an *image.
 // Instead of walking via the fs.FS interface (which does per-inode ReadAt
-// syscalls), it reads the entire metadata area into memory and parses
-// inodes, directory entries, xattrs, and chunk indexes directly from the
-// buffer. This reduces thousands of syscalls to a single ReadAt.
+// syscalls), it reads the image in windows (imageWindows) and parses
+// inodes, directory entries, xattrs, and chunk indexes directly from them.
 //
 //nolint:gocognit // the BFS over the source's inodes, each decoded field by field; the fast path bench_test.go's merge benchmarks measure
 func (fsys *Writer) copyFromImage(img *image) error {
@@ -135,22 +301,18 @@ func (fsys *Writer) copyFromImage(img *image) error {
 	// and must never size an allocation on their own: a handful of tampered
 	// bytes would otherwise request a terabyte-scale buffer, which fails as
 	// an unrecoverable runtime OOM rather than a returned error.
-	if actual, ok := imageSize(img.meta); ok && totalBytes > actual {
-		return fmt.Errorf("superblock declares %d bytes but image is %d bytes: %w",
-			totalBytes, actual, ErrCorrupt)
+	if actual, ok := imageSize(img.meta); ok {
+		if totalBytes > actual {
+			return fmt.Errorf("superblock declares %d bytes but image is %d bytes: %w",
+				totalBytes, actual, ErrCorrupt)
+		}
+	} else if err := endsWhereDeclared(img.meta, totalBytes); err != nil {
+		return err
 	}
 
 	if metaStart < 0 || metaStart >= totalBytes {
 		return fmt.Errorf("metadata start %d outside image of %d bytes: %w",
 			metaStart, totalBytes, ErrCorrupt)
-	}
-	// The cap applies whether or not the source can report its size. A file
-	// that can is not thereby trustworthy: a sparse one is as large as it
-	// cares to claim for free, so "declared <= actual" passes for a 256 TiB
-	// metadata region that costs the attacker nothing to produce.
-	if totalBytes-metaStart > maxEagerMetaBytes {
-		return fmt.Errorf("metadata region of %d bytes exceeds the %d byte limit: %w",
-			totalBytes-metaStart, int64(maxEagerMetaBytes), ErrInvalid)
 	}
 
 	blkBits := img.sb.BlkSizeBits
@@ -159,37 +321,12 @@ func (fsys *Writer) copyFromImage(img *image) error {
 
 	blockSize := int(1 << blkBits)
 
-	// Get an accessor for image data. Reads the metadata region eagerly
-	// and loads flat-plain data blocks on demand.
-	at := newMetaReader(img.meta, metaStart, totalBytes, blockSize)
+	// Nothing of the image is read before the walk asks for it: sb.Blocks
+	// sizes no buffer, whatever it declares and whatever the source's length.
+	span := newImageWindows(img.meta, totalBytes, copyHeld).span
 
-	// span returns exactly n bytes at off, or an error. at() serves whatever
-	// it has from the current buffer or block, which is enough for the
-	// common case; anything that runs past what at() holds — a shared xattr
-	// entry straddling a block, say — is read directly, and anything that
-	// runs past the image is refused rather than reported as absent. Every
-	// place this function used to skip an entry it could not fully read now
-	// fails the copy through this helper, as the reader would.
-	span := func(off, n int64) ([]byte, error) {
-		if off < 0 || n < 0 || n > totalBytes || off > totalBytes-n {
-			return nil, fmt.Errorf("%d bytes at offset %d lie outside the %d byte image: %w",
-				n, off, totalBytes, ErrCorrupt)
-		}
-
-		if b := at(off); int64(len(b)) >= n {
-			return b[:n], nil
-		}
-
-		buf := make([]byte, n)
-		if _, err := img.meta.ReadAt(buf, off); err != nil {
-			return nil, err
-		}
-
-		return buf, nil
-	}
-
-	// Shared xattr block address (if present). The at() function
-	// will load the block on demand when xattrs are parsed.
+	// Shared xattr block address (if present): read when an inode names an
+	// entry of it.
 	var sharedXattrOff int64
 	if img.sb.XattrBlkAddr > 0 {
 		sharedXattrOff = int64(img.sb.XattrBlkAddr) << blkBits
@@ -246,21 +383,20 @@ func (fsys *Writer) copyFromImage(img *image) error {
 
 		inodeAddr := metaStart + int64(cur.nid*disk.SizeInodeCompact) // #nosec G115 -- nid bounded just above
 
-		buf := at(inodeAddr)
-		if len(buf) < disk.SizeInodeCompact {
-			return fmt.Errorf("inode %d out of range: %w", cur.nid, ErrCorrupt)
+		buf, err := span(inodeAddr, disk.SizeInodeCompact)
+		if err != nil {
+			return fmt.Errorf("inode %d out of range: %w", cur.nid, err)
 		}
 
 		format := binary.LittleEndian.Uint16(buf[:2])
 		layout := uint8((format & disk.InodeFormatLayoutMask) >> 1)
 		compact := format&disk.InodeFormatExtended == 0
 
-		if compact && len(buf) < disk.SizeInodeCompact {
-			return fmt.Errorf("compact inode %d out of range: %w", cur.nid, ErrCorrupt)
-		}
-
-		if !compact && len(buf) < disk.SizeInodeExtended {
-			return fmt.Errorf("extended inode %d out of range: %w", cur.nid, ErrCorrupt)
+		if !compact {
+			buf, err = span(inodeAddr, disk.SizeInodeExtended)
+			if err != nil {
+				return fmt.Errorf("extended inode %d out of range: %w", cur.nid, err)
+			}
 		}
 
 		var (
@@ -369,6 +505,25 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			return fmt.Errorf("nid %d declares a size of %d bytes: %w", cur.nid, size, ErrCorrupt)
 		}
 
+		typ := mode & disk.StatTypeMask
+
+		// A nid already registered under an earlier name in this copy is
+		// the same inode: give it another name, as Link would, rather than
+		// a second copy of its metadata and chunks. Directories are never
+		// shared (BFS expands each once), and a link count of 1 says there
+		// is nothing to share. Told before its attributes are read: they
+		// were, for the first name, and a file of many names has them read
+		// once.
+		if typ != disk.StatTypeDir && nlink > 1 {
+			if prior, ok := fsys.copyLinks[hardlinkKey{0, cur.nid}]; ok && !prior.removed {
+				if err := fsys.addAlias(cur.path, prior); err != nil {
+					return err
+				}
+
+				continue
+			}
+		}
+
 		// Parse xattr area.
 		xattrSize := 0
 		if xcnt > 0 {
@@ -398,22 +553,6 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		}
 
 		trailingAddr := inodeAddr + int64(icSize) + int64(xattrSize)
-		typ := mode & disk.StatTypeMask
-
-		// A nid already registered under an earlier name in this copy is
-		// the same inode: give it another name, as Link would, rather than
-		// a second copy of its metadata and chunks. Directories are never
-		// shared (BFS expands each once), and a link count of 1 says there
-		// is nothing to share.
-		if typ != disk.StatTypeDir && nlink > 1 {
-			if prior, ok := fsys.copyLinks[hardlinkKey{0, cur.nid}]; ok && !prior.removed {
-				if err := fsys.addAlias(cur.path, prior); err != nil {
-					return err
-				}
-
-				continue
-			}
-		}
 
 		// Build fsEntry directly, bypassing builder.Entry + add() overhead.
 		fe := &fsEntry{
@@ -460,9 +599,9 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		// metadata region has. A target is bounded as the copy with its data
 		// bounds it: the reader's page, then the writer's one byte less,
 		// which the reader reads and Symlink refuses.
-		if typ == disk.StatTypeDir && size > maxEagerMetaBytes {
+		if typ == disk.StatTypeDir && size > maxDirBytes {
 			return fmt.Errorf("directory nid %d declares %d bytes, over the %d byte limit: %w",
-				cur.nid, size, int64(maxEagerMetaBytes), ErrInvalid)
+				cur.nid, size, int64(maxDirBytes), ErrInvalid)
 		}
 
 		if typ == disk.StatTypeSymlink && size > maxSymlinkSize {
@@ -670,9 +809,9 @@ func (fsys *Writer) copyFromImage(img *image) error {
 					return fmt.Errorf("nid %d: %w", cur.nid, err)
 				}
 
-				if avail := int64(len(at(chunkAddr))); avail < need {
-					return fmt.Errorf("nid %d: chunk index truncated: have %d bytes, need %d for a %d byte file: %w",
-						cur.nid, avail, need, size, ErrCorrupt)
+				index, err := span(chunkAddr, need)
+				if err != nil {
+					return fmt.Errorf("chunk index of a %d byte file for nid %d: %w", size, cur.nid, err)
 				}
 
 				// Parsed once per inode: a later name for this nid becomes
@@ -681,11 +820,9 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				var chunks []builder.Chunk
 
 				if indexed {
-					chunks, err = fsys.parseChunks(
-						at(chunkAddr), chunkFmt, size, blkBits, img.deviceIDMask, img.locateChunk,
-					)
+					chunks, err = fsys.parseChunks(index, chunkFmt, size, blkBits, img.deviceIDMask, img.locateChunk)
 				} else {
-					chunks, err = parseBlockMap(at(chunkAddr), chunkFmt, size, blkBits, img.locateChunk)
+					chunks, err = parseBlockMap(index, chunkFmt, size, blkBits, img.locateChunk)
 				}
 
 				if err != nil {
