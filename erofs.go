@@ -49,7 +49,7 @@
 // any other name index (0, the format's lustre index 5, an undefined one) is
 // listed on no mount and is left out by the reader. A name that could only
 // be stored that way is refused by [Writer.Setxattr], as [ErrInvalid], and
-// left out by [Writer.CopyFrom], whose source may carry any: one attribute
+// left out by [Writer.CopyFrom], whose source may carry any: such a name
 // fails no copy.
 package erofs
 
