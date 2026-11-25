@@ -1,6 +1,7 @@
 package erofs_test
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"testing"
 	"time"
 
@@ -986,5 +988,110 @@ func formatSize(b int64) string {
 		return fmt.Sprintf("%.0f KB", float64(b)/1024)
 	default:
 		return fmt.Sprintf("%d B", b)
+	}
+}
+
+// benchCountedFile is an image file that counts what is read of it.
+type benchCountedFile struct {
+	*os.File
+
+	read int64
+}
+
+func (c *benchCountedFile) ReadAt(p []byte, off int64) (int, error) {
+	n, err := c.File.ReadAt(p, off)
+	c.read += int64(n)
+
+	return n, err
+}
+
+// BenchmarkMetadataOnlyCopyOfMkfsImage measures a metadata-only copy of an
+// image mkfs.erofs made, where the inodes are among the data and not in a
+// region of their own: 20000 files in 200 directories, of 16 KiB each in
+// blocks of their own, and of 1 KiB each kept beside their inodes, where
+// the metadata is most of the image. read-B/op is what the copy read of
+// the image, image-B its size.
+func BenchmarkMetadataOnlyCopyOfMkfsImage(b *testing.B) {
+	if _, err := exec.LookPath("mkfs.erofs"); err != nil {
+		b.Skip("mkfs.erofs not available")
+	}
+
+	for _, shape := range []struct {
+		name string
+		size int
+		args []string
+	}{
+		{"data-16KiB", 16 << 10, []string{"-b4096", "-Enoinline_data"}},
+		{"inline-1KiB", 1 << 10, []string{"-b4096"}},
+	} {
+		b.Run(shape.name, func(b *testing.B) {
+			const dirs, files = 200, 100
+
+			tmp := b.TempDir()
+			tree := filepath.Join(tmp, "tree")
+			data := bytes.Repeat([]byte{'x'}, shape.size)
+
+			for d := range dirs {
+				dir := filepath.Join(tree, fmt.Sprintf("d%03d", d))
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					b.Fatal(err)
+				}
+
+				for f := range files {
+					// Each file its own bytes: mkfs.erofs gives files of the
+					// same content one inode's blocks.
+					copy(data, fmt.Sprintf("%03d/%03d", d, f))
+
+					if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%03d", f)), data, 0o644); err != nil {
+						b.Fatal(err)
+					}
+				}
+			}
+
+			imgPath := filepath.Join(tmp, "img.erofs")
+
+			args := append(slices.Clone(shape.args), "--quiet", imgPath, tree)
+			if out, err := exec.CommandContext(b.Context(), "mkfs.erofs", args...).CombinedOutput(); err != nil {
+				b.Fatalf("mkfs.erofs: %v\n%s", err, out)
+			}
+
+			f, err := os.Open(imgPath)
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			b.Cleanup(func() { _ = f.Close() })
+
+			info, err := f.Stat()
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			var read int64
+
+			gc := disableGC(b)
+			b.ReportAllocs()
+			b.ResetTimer()
+
+			for range b.N {
+				gc()
+
+				src := &benchCountedFile{File: f}
+
+				fsys, err := erofs.Open(src)
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				if err := erofs.Create(&testBuffer{}).CopyFrom(fsys, erofs.MetadataOnly()); err != nil {
+					b.Fatal(err)
+				}
+
+				read = src.read
+			}
+
+			b.ReportMetric(float64(read), "read-B/op")
+			b.ReportMetric(float64(info.Size()), "image-B")
+		})
 	}
 }
