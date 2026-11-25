@@ -422,6 +422,18 @@ func (im *Image) decodeXattrs(in *Inode) error {
 		remaining -= size
 	}
 
+	// erofs_xattr_iter_shared begins with the metabox's buffer when the
+	// image says its shared entries are there, before it looks at the
+	// inode's count: with no metabox, which Parse refuses, the listing of
+	// every inode that has a body fails.
+	if im.Super.FeatureCompat&FeatureCompatSharedEAInMbx != 0 {
+		return fmt.Errorf(
+			"%w: inode %d xattrs: shared entries in a metabox the image does not have",
+			ErrCorrupt,
+			in.Nid,
+		)
+	}
+
 	for _, id := range in.SharedIDs {
 		x, _, err := im.xattrEntry(int64(im.Super.XattrBlkAddr)*int64(im.Super.BlockSize) + int64(id)*4)
 		if err != nil {

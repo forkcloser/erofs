@@ -1288,7 +1288,7 @@ func TestReaderCompactInodeMtime(t *testing.T) {
 
 		edited := bytes.Clone(im.Img)
 		edited[1263] = 0x3c
-		edited[1032] = 0x5a // the checksum feature cleared
+		edited[1032] &^= disk.FeatureCompatSBChksum // no checksum to redo
 
 		sb := edited[disk.SuperBlockOffset:]
 		epoch := int64(binary.LittleEndian.Uint64(sb[24:]))

@@ -378,6 +378,10 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		var xattrs map[string]string
 
 		if xattrSize > 0 {
+			if err := img.xattrsListable(cur.nid); err != nil {
+				return err
+			}
+
 			xb, err := span(inodeAddr+int64(icSize), int64(xattrSize))
 			if err != nil {
 				return fmt.Errorf("xattrs for nid %d: %w", cur.nid, err)
