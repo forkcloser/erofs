@@ -2310,8 +2310,9 @@ func (b *file) finishInfo(span []byte, n int, addr int64, xcnt uint16) error {
 // the kernel's erofs_fill_symlink does (!i_size || strlen(link) != i_size),
 // so no Stat, ReadDir or Open serves an inode whose target is empty or
 // holds a NUL. span is the inode's block from the inode on, at addr, its
-// first n bytes read; a target is the one thing read into the rest of it,
-// and one running past it is refused where it is read.
+// first n bytes read, or the inode alone when it ends in the next block; a
+// target is the one thing read into the rest of it, and one running past
+// the block the inode ends in is refused where it is read.
 func (b *file) checkFastSymlink(span []byte, n int, addr int64) error {
 	ino := b.info
 
@@ -2330,15 +2331,37 @@ func (b *file) checkFastSymlink(span []byte, n int, addr int64) error {
 		return fmt.Errorf("inode %d: invalid fast symlink size %d: %w", b.nid, ino.size, ErrCorrupt)
 	}
 
-	if end > int64(len(span)) {
+	// The block that bounds an inline target is the one the inode ends in:
+	// an extended inode may end in the block after the one it starts in, and
+	// its target is there with its last bytes (erofs_read_inode).
+	blockSize := int64(1) << b.img.sb.BlkSizeBits
+	left := blockSize - addr&(blockSize-1)
+
+	straddles := left < int64(ino.icsize)
+	if straddles {
+		left += blockSize
+	}
+
+	if end > left {
 		return nil
 	}
 
-	// What of the target the inode's read did not bring. An image that ends
-	// inside the target leaves it to the read of the link, as a target past
-	// the block is.
-	if from := max(start, int64(n)); from < end {
-		got, err := b.img.meta.ReadAt(span[from:end], addr+from)
+	// What of the target the inode's read did not bring: all of it past a
+	// straddling inode, of which span holds the inode alone and whose target
+	// goes over it, the inode being decoded. An image that ends inside the
+	// target leaves it to the read of the link, as a target past the block is.
+	var target []byte
+
+	from := max(start, int64(n))
+
+	if straddles {
+		target, from = span[:end-start], start
+	} else {
+		target = span[start:end]
+	}
+
+	if from < end {
+		got, err := b.img.meta.ReadAt(target[from-start:], addr+from)
 		if err != nil && !errors.Is(err, io.EOF) {
 			return err
 		}
@@ -2348,7 +2371,7 @@ func (b *file) checkFastSymlink(span []byte, n int, addr int64) error {
 		}
 	}
 
-	if bytes.IndexByte(span[start:end], 0) >= 0 {
+	if bytes.IndexByte(target, 0) >= 0 {
 		return fmt.Errorf("inode %d: invalid fast symlink target: %w", b.nid, ErrCorrupt)
 	}
 
