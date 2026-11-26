@@ -325,7 +325,6 @@ func (fsys *Writer) Create(name string) (*File, error) {
 		e.dataStartOff = fsys.dataOff
 	} else {
 		f.dataStartOff = fsys.spoolOff
-		e.spoolOff = fsys.spoolOff
 		e.dataStartOff = fsys.spoolOff
 	}
 
@@ -553,9 +552,9 @@ func checkOwner(uid, gid int) (uid32, gid32 uint32, err error) {
 	return uint32(uid), uint32(gid), nil
 }
 
-// Chtimes sets the access and modification times on the named path.
-// EROFS only stores mtime; atime is retained for read-back before Close.
-func (fsys *Writer) Chtimes(name string, atime, mtime time.Time) error {
+// Chtimes sets the modification time of the named path. EROFS stores no
+// access time: atime is taken, as [os.Chtimes] takes one, and not kept.
+func (fsys *Writer) Chtimes(name string, _, mtime time.Time) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
 	}
@@ -565,9 +564,6 @@ func (fsys *Writer) Chtimes(name string, atime, mtime time.Time) error {
 		return err
 	}
 
-	// #nosec G115 -- held in two's complement, as mtime is
-	e.atime = uint64(atime.Unix())
-	e.atimeNs = uint32(atime.Nanosecond()) // #nosec G115 -- Nanosecond is below 1e9
 	// #nosec G115 -- i_mtime is the kernel's signed time64_t in two's complement: a pre-1970 time round-trips
 	e.mtime = uint64(mtime.Unix())
 	e.mtimeNs = uint32(mtime.Nanosecond()) // #nosec G115 -- Nanosecond is below 1e9
@@ -1274,8 +1270,6 @@ type fsEntry struct {
 	path     string
 	mode     uint16
 	uid, gid uint32
-	atime    uint64
-	atimeNs  uint32
 	mtime    uint64
 	mtimeNs  uint32
 	nlink    uint32
@@ -1318,8 +1312,6 @@ type fsEntry struct {
 	// again by a later layer.
 	placed uint64
 
-	// data location in spool file
-	spoolOff     int64
 	dataStartOff int64     // byte offset where file data begins (spool or data file)
 	fileClosed   bool      // true after File.Close() is called
 	directData   io.Reader // bypasses spool; set by add() for source-provided data
@@ -2868,7 +2860,7 @@ func (fsys *Writer) fsToErofs(e *fsEntry) erofsEntry {
 			data = e.directData
 		} else if fsys.spool != nil {
 			// #nosec G115 -- e.size fits int64: File counts it in an int64, and add and copyFromImage bound it
-			data = io.NewSectionReader(fsys.spool, e.spoolOff, int64(e.size))
+			data = io.NewSectionReader(fsys.spool, e.dataStartOff, int64(e.size))
 		}
 	}
 
