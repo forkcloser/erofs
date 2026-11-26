@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"errors"
 	"io/fs"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -208,6 +209,61 @@ func TestWriterNameLength(t *testing.T) {
 
 	if got, err := fs.ReadFile(fsys, exact); err != nil || string(got) != "x" {
 		t.Fatalf("a 255-byte name read back: %q, %v", got, err)
+	}
+}
+
+// TestWriterNameWithANul: a name with a NUL is refused by every method that
+// creates one and by a copy of a source that lists one: written, it is
+// another name, "a" a second time for "a\x00b" beside "a". The image that
+// follows the refusals has what was created under sound names, and no more.
+func TestWriterNameWithANul(t *testing.T) {
+	t.Parallel()
+
+	var buf testBuffer
+
+	w := erofs.Create(&buf)
+	writeFile(t, w, "/a", []byte("x"))
+
+	for what, step := range map[string]func() error{
+		"Create":  func() error { _, err := w.Create("/a\x00b"); return err },
+		"Mkdir":   func() error { return w.Mkdir("/d\x00", 0o755) },
+		"Symlink": func() error { return w.Symlink("t", "/\x00l") },
+		"Link":    func() error { return w.Link("/a", "/a\x00h") },
+		"Mknod":   func() error { return w.Mknod("/n\x00x", fs.ModeNamedPipe|0o600, 0) },
+		"parent":  func() error { return w.Mkdir("/p\x00/x", 0o755) },
+		// Into a Writer of its own: what a copy that stops leaves behind
+		// is not this test's.
+		"CopyFrom": func() error {
+			return erofs.Create(&testBuffer{}).CopyFrom(fstest.MapFS{"sub/c\x00d": &fstest.MapFile{Data: []byte("y")}})
+		},
+	} {
+		if err := step(); !errors.Is(err, erofs.ErrInvalid) {
+			t.Fatalf("%s with a NUL in the name: %v; want ErrInvalid", what, err)
+		}
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	fsys, err := erofs.Open(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got []string
+
+	err = fs.WalkDir(fsys, ".", func(p string, _ fs.DirEntry, err error) error {
+		got = append(got, p)
+
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if want := []string{".", "a"}; !slices.Equal(got, want) {
+		t.Errorf("the image holds %q; want %q", got, want)
 	}
 }
 
