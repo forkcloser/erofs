@@ -1001,10 +1001,11 @@ func TestUntrustedDirectoryCycleFullImageTerminates(t *testing.T) {
 // errBudget stops the cyclic walk below once it has visited enough.
 var errBudget = errors.New("visit budget exhausted")
 
-// TestReaderWalkOnCyclicImage records the reader's behaviour on the same
-// image. fs.WalkDir has no cycle detection of its own, so the walk is
-// expected to keep descending; the callback bounds it so this test can
-// assert the exposure without running away.
+// TestReaderWalkOnCyclicImage: a walk of the same image ends, where its
+// path passes 4096 bytes, with ErrInvalid. fs.WalkDir has no cycle
+// detection of its own: the package's bound on a path is what stops it,
+// after 2050 visits here. The callback's count fails the test long before
+// a walk without that bound would be felt.
 func TestReaderWalkOnCyclicImage(t *testing.T) {
 	t.Parallel()
 
@@ -1015,22 +1016,17 @@ func TestReaderWalkOnCyclicImage(t *testing.T) {
 		t.Fatalf("cyclic image failed to open: %v", err)
 	}
 
-	const budget = 200
+	// A level is a slash and a name of one byte: 2048 of them in 4096 bytes.
+	const budget = 4096
 
 	visits := 0
-	deepest := ""
 
-	err = fs.WalkDir(img, ".", func(p string, _ fs.DirEntry, err error) error {
+	err = fs.WalkDir(img, ".", func(_ string, _ fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
 		visits++
-
-		if len(p) > len(deepest) {
-			deepest = p
-		}
-
 		if visits >= budget {
 			return errBudget
 		}
@@ -1039,13 +1035,12 @@ func TestReaderWalkOnCyclicImage(t *testing.T) {
 	})
 
 	if errors.Is(err, errBudget) {
-		t.Logf("fs.WalkDir descended %d times on a 3-entry image (deepest path %d bytes); "+
-			"callers walking an untrusted image must impose their own depth limit", visits, len(deepest))
-
-		return
+		t.Fatalf("fs.WalkDir was still descending the cycle after %d visits", visits)
 	}
 
-	t.Logf("fs.WalkDir terminated after %d visits: %v", visits, err)
+	if !errors.Is(err, ErrInvalid) {
+		t.Errorf("the walk ended after %d visits on %v; want ErrInvalid, the path over 4096 bytes", visits, err)
+	}
 }
 
 // badSizeFS is a source fs.FS holding one regular file that lies about its
