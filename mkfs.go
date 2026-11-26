@@ -990,14 +990,21 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 
 		// For regular files, get a data reader.
 		if info.Mode().IsRegular() && info.Size() > 0 && (be == nil || be.Data == nil) {
-			if aerr := fsys.addRegular(src, fpath, p, info, be); aerr != nil {
+			// The file's name in src is p without its slash, the entry's own
+			// string: the walk's is another, held for each file if kept.
+			name := p[1:]
+
+			if aerr := fsys.addRegular(src, name, p, info, be); aerr != nil {
 				return aerr
 			}
 			// Where the Writer holds none of the file's data. A further
 			// name of an inode already copied holds none either way, and
-			// reads back through the first.
+			// reads back through the first. A file Close is to open by name
+			// already says where it is (sourceFile).
 			if e := fsys.byPath[cleanPath(p)]; e != nil && (e.metadataOnly || e.directData != nil) {
-				e.reopen = func() (fs.File, error) { return src.Open(fpath) }
+				if _, later := e.directData.(*sourceFile); !later {
+					e.reopen = func() (fs.File, error) { return src.Open(name) }
+				}
 			}
 
 			return nil
@@ -1169,14 +1176,19 @@ func (fsys *Writer) Open(name string) (fs.File, error) {
 		// #nosec G115 -- e.size fits int64: File counts it in an int64, and add and copyFromImage bound it
 		size := int64(e.size)
 
+		reopen := e.reopen
+		if later, ok := e.directData.(*sourceFile); ok {
+			reopen = later.again
+		}
+
 		switch {
 		case size == 0:
 		case e.holedInDataFile:
 			return &readFile{entry: e, path: name, reader: io.NewSectionReader(
 				chunkedData{fsys.dataFile, e.chunks, int64(fsys.resolveBlockSize())}, 0, size,
 			)}, nil
-		case e.reopen != nil:
-			src, err := e.reopen()
+		case reopen != nil:
+			src, err := reopen()
 			if err != nil {
 				return nil, fmt.Errorf("mkfs: open %s where it was copied from: %w", name, err)
 			}
@@ -1972,6 +1984,12 @@ func (s *sourceFile) Close() error {
 	s.f = nil
 
 	return f.Close() //nolint:wrapcheck // the source's own error
+}
+
+// again opens the file once more, for a reader of its own: Open's, before
+// Close reads the data through file.
+func (s *sourceFile) again() (fs.File, error) {
+	return s.src.Open(s.name) //nolint:wrapcheck // the source's own error, wrapped by Open with the entry's path
 }
 
 // file is the source's file, opened on the first call, by name: what the
