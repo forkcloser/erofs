@@ -28,7 +28,7 @@ func TestAnchoredToCommitted(t *testing.T) {
 		t.Run(im.Name, func(t *testing.T) {
 			t.Parallel()
 
-			ref, err := erofsspec.Parse(im.Img, im.Extra())
+			ref, err := erofsspec.Parse(im.Img, im.Extra()...)
 			if err != nil {
 				t.Fatalf("Parse: %v", err)
 			}
@@ -71,7 +71,7 @@ func TestAnchoredToMkfs(t *testing.T) {
 			im := corpus.Mkfs(t, name, args, tarball)
 			corpus.Fsck(t, im)
 
-			ref, err := erofsspec.Parse(im.Img, im.Extra())
+			ref, err := erofsspec.Parse(im.Img, im.Extra()...)
 			if err != nil {
 				t.Fatalf("Parse: %v", err)
 			}

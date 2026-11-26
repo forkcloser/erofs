@@ -1202,7 +1202,7 @@ func checkEditedCopy(t *testing.T, im corpus.Image, img []byte, label string) in
 	// passed through ("a failing reader"). Every other map past its image
 	// or device is a declared bound the reader refuses at Stat.
 	short := false
-	if ref, perr := erofsspec.Parse(img, im.Extra()); perr == nil {
+	if ref, perr := erofsspec.Parse(img, im.Extra()...); perr == nil {
 		short = uint64(len(img)) < ref.Super.Blocks*uint64(ref.Super.BlockSize)
 	}
 
@@ -1222,7 +1222,7 @@ func checkEditedCopy(t *testing.T, im corpus.Image, img []byte, label string) in
 	// is for the source the reference does not read.
 	declared := int64(0)
 
-	if ref, perr := erofsspec.Parse(img, im.Extra()); perr == nil {
+	if ref, perr := erofsspec.Parse(img, im.Extra()...); perr == nil {
 		unsorted, _ = referenceWalk(ref, func(e erofsspec.Entry) error {
 			if e.Inode != nil && e.Inode.IsRegular() && e.Inode.Size > 0 {
 				declared += min(e.Inode.Size, maxEditedCopyBytes+1)
@@ -1324,7 +1324,7 @@ type copyView struct {
 // viewOf reads an image through the reference into its copy view; an
 // error is the reference's refusal, which the copy must then have shared.
 func viewOf(img []byte, extra [][]byte) (map[string]copyView, error) {
-	ref, err := erofsspec.Parse(img, extra)
+	ref, err := erofsspec.Parse(img, extra...)
 	if err != nil {
 		return nil, err
 	}

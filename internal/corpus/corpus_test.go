@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -62,7 +64,7 @@ func TestCommittedIsReproducible(t *testing.T) {
 		im := rebuild(t, set, matrix)
 		anchor(t, set, im)
 
-		for _, file := range sortedKeys(files(im)) {
+		for _, file := range slices.Sorted(maps.Keys(files(im))) {
 			b := files(im)[file]
 			fmt.Fprintf(&manifest, "%s  %s  %d\n", corpus.Digest(b), file, len(b))
 
@@ -107,7 +109,7 @@ func anchor(t *testing.T, set corpus.Set, im corpus.Image) {
 
 	corpus.Fsck(t, im)
 
-	ref, err := erofsspec.Parse(im.Img, im.Extra())
+	ref, err := erofsspec.Parse(im.Img, im.Extra()...)
 	if err != nil {
 		t.Errorf("%s: reference: %v", im.Name, err)
 
@@ -216,23 +218,6 @@ func files(im corpus.Image) map[string][]byte {
 	}
 
 	return m
-}
-
-func sortedKeys(m map[string][]byte) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-
-	for i := range keys {
-		for j := i + 1; j < len(keys); j++ {
-			if keys[j] < keys[i] {
-				keys[i], keys[j] = keys[j], keys[i]
-			}
-		}
-	}
-
-	return keys
 }
 
 func checkOrWrite(t *testing.T, file string, want []byte) {

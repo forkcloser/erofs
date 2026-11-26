@@ -100,7 +100,7 @@ func openImage(tb testing.TB, im corpus.Image) fs.FS {
 
 	if ref, perr := erofsspec.Parse(
 		im.Img,
-		im.Extra(),
+		im.Extra()...,
 	); perr == nil &&
 		ref.Super.FeatureIncompat&erofsspec.FeatureIncompat48Bit != 0 {
 		if !errors.Is(err, erofs.ErrNotImplemented) {
@@ -121,7 +121,7 @@ func openImage(tb testing.TB, im corpus.Image) fs.FS {
 func parseImage(tb testing.TB, im corpus.Image) *erofsspec.Image {
 	tb.Helper()
 
-	ref, err := erofsspec.Parse(im.Img, im.Extra())
+	ref, err := erofsspec.Parse(im.Img, im.Extra()...)
 	if err != nil {
 		tb.Fatalf("%s: reference Parse: %v", im.Name, err)
 	}
@@ -1326,7 +1326,7 @@ func TestContractReferenceDeviceCountIsTheGiven(t *testing.T) {
 		img[1024+80] &^= byte(erofsspec.FeatureIncompatDeviceTable)
 		img[1024+8] = 0 // the checksum feature, so the edit is judged on its own
 
-		if _, err := erofsspec.Parse(img, im.Extra()); !errors.Is(err, erofsspec.ErrCorrupt) {
+		if _, err := erofsspec.Parse(img, im.Extra()...); !errors.Is(err, erofsspec.ErrCorrupt) {
 			t.Fatalf(
 				"%s without the device-table feature, blob given: Parse %v, want ErrCorrupt at Parse",
 				im.Name,
@@ -2218,7 +2218,7 @@ func referenceVerdict(img, blob []byte) verdict {
 		extra = [][]byte{blob}
 	}
 
-	ref, err := erofsspec.Parse(img, extra)
+	ref, err := erofsspec.Parse(img, extra...)
 	if err != nil {
 		return verdict{class: referenceClass(err), err: err}
 	}
