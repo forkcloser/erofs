@@ -825,29 +825,68 @@ func (img *image) walkChunkMap(
 	return nil
 }
 
-// chunkAddr converts a chunk-index physical block address into a byte offset.
-//
-// phys is assembled from two on-disk fields with no upper bound of their own,
-// and the shift is by up to BlkSizeBits (16), so the product overflows int64
-// and lands negative. Same exposure as checkNid: the value reaches the
-// caller's reader.
-func (img *image) chunkAddr(phys uint64) (int64, error) {
-	if phys > uint64(math.MaxInt64)>>img.sb.BlkSizeBits {
-		return 0, fmt.Errorf("chunk block address %d is out of range: %w", phys, ErrCorrupt)
+// chunkMap is a chunk-based inode's map: where it lies in the image and what
+// it is made of.
+type chunkMap struct {
+	base   int64 // of its first entry
+	unit   int   // an entry's bytes: 4, a block address; 8, an index, device and block
+	bits   uint8 // a chunk is 1<<bits bytes
+	chunks int   // as many as the file's size takes
+}
+
+// chunkMapOf is the map of ino, a chunk-based inode of some size, where
+// erofs_map_chunks reads it: after the inode and its xattrs, an entry a
+// chunk, indexes aligned to eight. The kernel aligns a block array to four
+// as well; inodes sit at multiples of 32 and the inode and xattr sizes are
+// multiples of four, so it holds.
+func (img *image) chunkMapOf(ino *inode) (chunkMap, error) {
+	// #nosec G115 -- the chunk format is the low 16 bits of i_u, as the kernel's __le16 c.format reads it
+	format := uint16(ino.inodeData)
+	// An entry's block is read as 32 bits, where a hole is every bit set;
+	// with 48 it is not that, nor the block.
+	if format&disk.LayoutChunkFormat48Bit != 0 {
+		return chunkMap{}, fmt.Errorf("48-bit chunk format for nid %d: %w", ino.nid, ErrNotImplemented)
 	}
 
-	// #nosec G115 -- phys was checked against MaxInt64 >> BlkSizeBits just above
-	return int64(phys) << img.sb.BlkSizeBits, nil
+	m := chunkMap{unit: 4, bits: img.sb.BlkSizeBits + uint8(format&disk.LayoutChunkFormatBits)}
+	m.chunks = int((ino.size-1)>>m.bits) + 1
+	// #nosec G115 -- readInfo bounded the nid through checkNid
+	m.base = img.metaStartPos() + int64(ino.nid)*disk.SizeInodeCompact + ino.flatDataOffset()
+
+	if format&disk.LayoutChunkFormatIndexes != 0 {
+		m.unit = disk.SizeChunkIndex
+		m.base = (m.base + 7) &^ 7
+	}
+
+	return m, nil
+}
+
+// chunkEntry reads an entry of a chunk map: the device it names, none in a
+// block address, and its block, every bit set for a hole. The block is 32
+// bits and a block at most 64 KiB, so its byte address is under 1<<48.
+//
+// One read of the block, where the entry's size puts it. A read of the
+// first four bytes, then of the next four behind the test of the size, is
+// one eight-byte load ahead of the test as go1.27.4 compiles it for arm64:
+// four bytes past the end of a block address.
+func (img *image) chunkEntry(entry []byte) (uint16, uint32) {
+	var device uint16
+
+	at := entry
+	if len(entry) == disk.SizeChunkIndex {
+		device = binary.LittleEndian.Uint16(entry[2:]) & img.deviceIDMask
+		at = entry[4:]
+	}
+
+	return device, binary.LittleEndian.Uint32(at)
 }
 
 // checkImageRange rejects a byte range of the primary image that cannot lie
 // inside it.
 //
-// A flat-plain inode's data address is a block number taken straight off
-// disk, with no bound of its own beyond what the shift can represent. The
-// chunk-based path routes every address through chunkAddr and mapDev, which
-// apply this check; the flat paths used to hand the offset to the caller's
-// io.ReaderAt as-is, and expose it publicly as DataRange.Offset. Same
+// A data address is a block number taken straight off disk, with no bound
+// of its own beyond what the shift can represent. Handed on as it is, it
+// reaches the caller's io.ReaderAt and is public as DataRange.Offset. Same
 // exposure as checkNid, same answer: a slice-backed reader would index with
 // it and panic.
 func (img *image) checkImageRange(off, n int64) error {
@@ -962,6 +1001,12 @@ func (img *image) deviceReader(dev uint16) io.ReaderAt {
 // (onMappedDevice), and the rest is the image's own, bounded.
 // DataRange exposes the result publicly, so both readers and the ranges go
 // through here and agree on where data lives.
+//
+// pa is the address the chunk begins at, the one address the kernel
+// translates for it (erofs_map_chunks, then erofs_map_dev), and the whole
+// chunk lies from there on that device; never the address of a block
+// inside the chunk, which is another device's where the chunk crosses the
+// edge of a mapped range.
 func (img *image) locate(deviceID uint16, pa int64) (uint16, int64, error) {
 	if deviceID > 0 {
 		if int(deviceID) > len(img.devices) {
@@ -1137,98 +1182,39 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 
 		return io.NewSectionReader(headThenTail{blocks, inline}, 0, ino.size)
 	case disk.LayoutChunkBased:
-		// Chunk-based files store data at the physical block addresses
-		// listed in the chunk index. For contiguous single-device files,
-		// the data is laid out consecutively and can be read directly.
+		// Indexes only: a block map is read a block at a time.
 		// #nosec G115 -- the chunk format is the low 16 bits of i_u, as the kernel's __le16 c.format reads it
-		chunkFmt := uint16(ino.inodeData)
-		if chunkFmt&disk.LayoutChunkFormatIndexes == 0 {
-			return nil
-		}
-		// Same format rules loadBlock applies. A fast path that accepts what
-		// the slow path rejects is how the two disagree about a file.
-		if chunkFmt&^(disk.LayoutChunkFormatBits|disk.LayoutChunkFormatIndexes) != 0 {
+		if uint16(ino.inodeData)&disk.LayoutChunkFormatIndexes == 0 {
 			return nil
 		}
 
-		chunkBits := img.sb.BlkSizeBits + uint8(chunkFmt&disk.LayoutChunkFormatBits)
-		nchunks := int((ino.size-1)>>chunkBits) + 1
-
-		// Read chunk index entries to check contiguity.
-		// #nosec G115 -- readInfo bounded the nid through checkNid
-		inodeStart := img.metaStartPos() + int64(ino.nid)*disk.SizeInodeCompact
-
-		baseOffset := inodeStart + ino.flatDataOffset()
-		if baseOffset%8 != 0 {
-			baseOffset = (baseOffset + 7) & ^int64(7)
-		}
-
-		needed := int64(nchunks) * int64(disk.SizeChunkIndex)
-		if !img.chunkIndexFits(baseOffset, needed) {
-			return nil
-		}
-
-		// Check that all chunks are contiguous on the same device, stopping
-		// at the first that is not: a file that is not one run says so in
-		// its first entries, and the rest of its index is not read for it.
+		// One range of the file's, as Stat's ranges are made: each chunk
+		// where locate places it, never the run by its first chunk. A
+		// file that is not one says so in its first entries, and the rest
+		// of its map is not read for it; a map eachChunk refuses is left to
+		// the block reader, which reports it.
 		var (
-			startBlock uint64
-			deviceID   uint16
+			run   DataRange
+			count int
 		)
 
-		blocksPerChunk := uint64(1 << (chunkBits - img.sb.BlkSizeBits))
-		oneRun := true
+		err := img.eachChunk(ino, func(chunk DataRange) bool {
+			if count > 0 && continuesRange(run, chunk) {
+				run.Size += chunk.Size
 
-		err := img.walkChunkMap(
-			ino.nid,
-			baseOffset,
-			nchunks,
-			disk.SizeChunkIndex,
-			func(i int, entry []byte) (bool, error) {
-				blkLo := binary.LittleEndian.Uint32(entry[4:8])
-				// The high half is the kernel's "advise" field unless the
-				// 48-bit format is declared, which is rejected above and
-				// unimplemented anyway. loadBlock has always read the address
-				// as 32-bit; folding these bits in here made the two paths
-				// return different bytes for the same chunk file.
-				did := binary.LittleEndian.Uint16(entry[2:4]) & img.deviceIDMask
-				phys := uint64(blkLo)
+				return true
+			}
 
-				switch {
-				case ^blkLo == 0: // hole
-					oneRun = false
-				case i == 0:
-					startBlock = phys
-					deviceID = did
-				// #nosec G115 -- i is a chunk index, never negative
-				case phys != startBlock+uint64(i)*blocksPerChunk || did != deviceID:
-					oneRun = false // not contiguous or different device
-				}
+			run = chunk
+			count++
 
-				return oneRun, nil
-			},
-		)
-		if err != nil || !oneRun {
+			return count == 1 && chunk.Offset != holeOffset
+		})
+		if err != nil || count != 1 || run.Offset == holeOffset {
 			return nil
 		}
 
-		// All chunks contiguous — resolve through the device, using the same
-		// mapping loadBlock applies so both paths agree on where data lives.
-		dataOffset, err := img.chunkAddr(startBlock)
-		if err != nil {
-			return nil
-		}
-
-		// Bounded like the block path: a device shorter than the file's
-		// run would end the direct read as the file's end.
-		dev, mapped, err := img.locate(deviceID, dataOffset)
-		if err != nil || img.boundOnDevice(dev, mapped, ino.size) != nil {
-			return nil
-		}
-
-		reader := img.deviceReader(dev)
-
-		return io.NewSectionReader(reader, mapped, ino.size)
+		return io.NewSectionReader(img.deviceReader(run.Device), run.Offset, ino.size)
 	default:
 		return nil
 	}
@@ -1551,47 +1537,22 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 			dataBlock = true
 		}
 	case disk.LayoutChunkBased:
-		// first 2 le bytes for format, second 2 bytes are reserved
-		// #nosec G115 -- the chunk format is the low 16 bits of i_u, as the kernel's __le16 c.format reads it
-		format := uint16(fi.inodeData)
-		if format&disk.LayoutChunkFormat48Bit != 0 {
-			return nil, fmt.Errorf("48-bit chunk format for nid %d: %w", fi.nid, ErrNotImplemented)
+		m, err := img.chunkMapOf(fi)
+		if err != nil {
+			return nil, err
 		}
 
-		if format&^(disk.LayoutChunkFormatBits|disk.LayoutChunkFormatIndexes) != 0 {
-			return nil, fmt.Errorf("unsupported chunk format %x for nid %d: %w", format, fi.nid, ErrNotImplemented)
-		}
+		// The block's chunk: one of the map's, bn being one of the file's.
+		cn := pos >> m.bits
+		entryPos := m.base + cn*int64(m.unit)
 
-		chunkbits := img.sb.BlkSizeBits + uint8(format&disk.LayoutChunkFormatBits)
-		chunkn := int((fi.size-1)>>chunkbits) + 1
-		cn := int(pos >> chunkbits)
-
-		if cn >= chunkn {
-			return nil, fmt.Errorf("chunk format does not fit into allocated bytes for nid %d: %w", fi.nid, ErrCorrupt)
-		}
-
-		// #nosec G115 -- readInfo bounded the nid through checkNid
-		inodeStart := img.metaStartPos() + int64(fi.nid*disk.SizeInodeCompact)
-		baseOffset := inodeStart + fi.flatDataOffset()
-
-		unit := 4
-		if format&disk.LayoutChunkFormatIndexes == disk.LayoutChunkFormatIndexes {
-			unit = 8
-			// Align to 8 bytes
-			if baseOffset%8 != 0 {
-				baseOffset = (baseOffset + 7) & ^int64(7)
-			}
-		}
-
-		entryPos := baseOffset + int64(cn*unit)
-
-		var entryBuf [8]byte
+		var entryBuf [disk.SizeChunkIndex]byte
 		// The count before the error, as for a block below: an entry the
 		// reader ends inside is the image's fault, not the file's end.
-		switch n, err := img.meta.ReadAt(entryBuf[:unit], entryPos); {
-		case n == unit:
-		case err != nil && !errors.Is(err, io.EOF):
-			return nil, fmt.Errorf("failed to read chunk entry at %d: %w", entryPos, err)
+		switch n, entryErr := img.meta.ReadAt(entryBuf[:m.unit], entryPos); {
+		case n == m.unit:
+		case entryErr != nil && !errors.Is(entryErr, io.EOF):
+			return nil, fmt.Errorf("failed to read chunk entry at %d: %w", entryPos, entryErr)
 		default:
 			return nil, fmt.Errorf(
 				"the image ends inside the chunk map of nid %d, at %d: %w",
@@ -1601,32 +1562,7 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 			)
 		}
 
-		var (
-			deviceID uint16
-			err      error
-		)
-
-		if unit == 8 {
-			startBlkLo := binary.LittleEndian.Uint32(entryBuf[4:8])
-			if ^startBlkLo == 0 {
-				addr = -1
-			} else {
-				if addr, err = img.chunkAddr(uint64(startBlkLo)); err != nil {
-					return nil, err
-				}
-
-				deviceID = binary.LittleEndian.Uint16(entryBuf[2:4]) & img.deviceIDMask
-			}
-		} else {
-			rawAddr := binary.LittleEndian.Uint32(entryBuf[:4])
-			if ^rawAddr == 0 {
-				addr = -1
-			} else {
-				if addr, err = img.chunkAddr(uint64(rawAddr)); err != nil {
-					return nil, err
-				}
-			}
-		}
+		deviceID, chunkBlock := img.chunkEntry(entryBuf[:m.unit])
 
 		if bn == nblocks-1 {
 			blockEnd = int(fi.size - int64(bn)*int64(1<<img.sb.BlkSizeBits))
@@ -1647,22 +1583,17 @@ func (img *image) loadBlock(fi *inode, pos int64) (*block, error) {
 			)
 		}
 
-		if addr == -1 {
+		if ^chunkBlock == 0 {
 			return img.holeBlock(blockOffset, blockEnd), nil
 		}
 
-		// Add block offset within chunk
-		blockPos := int64(bn) << img.sb.BlkSizeBits
-		if blockPos > 0 {
-			addr += (blockPos - int64(cn<<chunkbits))
-		}
-
-		dev, mappedAddr, err := img.locate(deviceID, addr)
+		dev, chunkAt, err := img.locate(deviceID, int64(chunkBlock)<<img.sb.BlkSizeBits)
 		if err != nil {
 			return nil, fmt.Errorf("failed to map device for nid %d: %w", fi.nid, err)
 		}
 
-		addr = mappedAddr
+		// The block where it is in its chunk, on the chunk's device.
+		addr = chunkAt + int64(bn)<<img.sb.BlkSizeBits - cn<<m.bits
 
 		// Bounded before the read: a device's end would otherwise reach the
 		// caller as the file's, an empty read where the index points past
@@ -2725,14 +2656,16 @@ const maxChunkIndexBytes = 64 << 20 // 64 MiB
 func (b *file) buildChunkDataRanges(ino *inode, nranges int) ([]DataRange, error) {
 	ranges := make([]DataRange, 0, nranges)
 
-	err := b.eachChunk(ino, func(chunk DataRange) {
+	err := b.img.eachChunk(ino, func(chunk DataRange) bool {
 		if n := len(ranges); n > 0 && continuesRange(ranges[n-1], chunk) {
 			ranges[n-1].Size += chunk.Size
 
-			return
+			return true
 		}
 
 		ranges = append(ranges, chunk)
+
+		return true
 	})
 	if err != nil {
 		return nil, err
@@ -2749,15 +2682,17 @@ func (b *file) countChunkRanges(ino *inode) (int, error) {
 		nranges int
 	)
 
-	err := b.eachChunk(ino, func(chunk DataRange) {
+	err := b.img.eachChunk(ino, func(chunk DataRange) bool {
 		if nranges > 0 && continuesRange(last, chunk) {
 			last.Size += chunk.Size
 
-			return
+			return true
 		}
 
 		last = chunk
 		nranges++
+
+		return true
 	})
 
 	return nranges, err
@@ -2776,49 +2711,21 @@ func continuesRange(prev, chunk DataRange) bool {
 
 // eachChunk walks ino's chunk map and hands emit every chunk, in logical
 // order, as the range it maps: its device, its offset there and its size,
-// the last chunk's trimmed to the file's tail, or a hole (Offset -1). Each
-// chunk is judged as a range is served, so a walk that returns nil has
-// judged the whole map; it holds nothing of the map itself.
-//
-//nolint:gocognit // one pass over the chunk map, each chunk judged where it is decoded
-func (b *file) eachChunk(ino *inode, emit func(DataRange)) error {
-	// #nosec G115 -- the chunk format is the low 16 bits of i_u, as the kernel's __le16 c.format reads it
-	chunkFmt := uint16(ino.inodeData)
-	// 48-bit chunk addressing is not yet implemented; the null-chunk sentinel
-	// (blkLo == 0xFFFFFFFF) is only unambiguous in 32-bit address mode.
-	if chunkFmt&disk.LayoutChunkFormat48Bit != 0 {
-		return fmt.Errorf("48-bit chunk format for nid %d: %w", ino.nid, ErrNotImplemented)
+// the last chunk's trimmed to the file's tail, or a hole (Offset -1), until
+// emit returns false. Each chunk is judged as a range is served, so a walk
+// that emit did not end and that returns nil has judged the whole map; it
+// holds nothing of the map itself.
+func (img *image) eachChunk(ino *inode, emit func(DataRange) bool) error {
+	m, err := img.chunkMapOf(ino)
+	if err != nil {
+		return err
 	}
 
-	chunkBits := b.img.sb.BlkSizeBits + uint8(chunkFmt&disk.LayoutChunkFormatBits)
-	nchunks := int((ino.size-1)>>chunkBits) + 1
-	chunkSize := int64(1) << chunkBits
-
-	// #nosec G115 -- readInfo bounded the nid through checkNid
-	inodeStart := b.img.metaStartPos() + int64(ino.nid)*disk.SizeInodeCompact
-
-	// The map is a four-byte block address per chunk, or an eight-byte index
-	// (device, block) aligned to eight, as erofs_map_chunks reads it; the
-	// block array names no device, so its chunks are on the primary one. The
-	// kernel aligns the array to four as well; inodes sit at multiples of
-	// 32 and the inode and xattr sizes are multiples of four, so it holds.
-	baseOffset := inodeStart + ino.flatDataOffset()
-	unit := 4
-	indexed := chunkFmt&disk.LayoutChunkFormatIndexes != 0
-
-	if indexed {
-		unit = disk.SizeChunkIndex
-
-		if baseOffset%8 != 0 {
-			baseOffset = (baseOffset + 7) & ^int64(7)
-		}
-	}
-
-	needed := int64(nchunks) * int64(unit)
-	if !b.img.chunkIndexFits(baseOffset, needed) {
+	needed := int64(m.chunks) * int64(m.unit)
+	if !img.chunkIndexFits(m.base, needed) {
 		// A map the image holds whole and the limit alone refuses is a
 		// sound file, not a bad image: only one the image cannot hold is.
-		if needed > maxChunkIndexBytes && b.img.chunkIndexInImage(baseOffset, needed) {
+		if needed > maxChunkIndexBytes && img.chunkIndexInImage(m.base, needed) {
 			return fmt.Errorf("chunk map of nid %d is %d bytes, over the %d byte limit: %w",
 				ino.nid, needed, int64(maxChunkIndexBytes), ErrInvalid)
 		}
@@ -2826,51 +2733,30 @@ func (b *file) eachChunk(ino *inode, emit func(DataRange)) error {
 		return fmt.Errorf("chunk index of nid %d lies past the end of the image: %w", ino.nid, ErrCorrupt)
 	}
 
-	return b.img.walkChunkMap(ino.nid, baseOffset, nchunks, unit, func(i int, entry []byte) (bool, error) {
-		// Size of this logical chunk: full chunkSize for all but the last.
-		size := chunkSize
-		if i == nchunks-1 {
-			size = ino.size - int64(i)*chunkSize
+	return img.walkChunkMap(ino.nid, m.base, m.chunks, m.unit, func(i int, entry []byte) (bool, error) {
+		// Size of this logical chunk: a whole one for all but the last.
+		size := int64(1) << m.bits
+		if i == m.chunks-1 {
+			size = ino.size - int64(i)<<m.bits
 		}
 
-		var deviceID uint16
-
-		blkLo := binary.LittleEndian.Uint32(entry[:4])
-		if indexed {
-			deviceID = binary.LittleEndian.Uint16(entry[2:4]) & b.img.deviceIDMask
-			blkLo = binary.LittleEndian.Uint32(entry[4:8])
-		}
-
-		if ^blkLo == 0 {
-			emit(DataRange{Offset: holeOffset, Size: size})
-
-			return true, nil
-		}
-
-		// 32-bit addressing only; see openDirect.
-		phys := uint64(blkLo)
-		// DataRange.Offset is public: a MetadataOnly consumer preads it
-		// against an external device, so an unrepresentable address must not
-		// reach it.
-		byteOffset, err := b.img.chunkAddr(phys)
-		if err != nil {
-			return false, err
+		device, block := img.chunkEntry(entry)
+		if ^block == 0 {
+			return emit(DataRange{Offset: holeOffset, Size: size}), nil
 		}
 
 		// The same translation the readers apply: an address on the primary
 		// device inside an extra device's mapped range is that device's.
-		deviceID, byteOffset, err = b.img.locate(deviceID, byteOffset)
+		device, offset, err := img.locate(device, int64(block)<<img.sb.BlkSizeBits)
 		if err != nil {
 			return false, err
 		}
 
-		if err := b.img.boundOnDevice(deviceID, byteOffset, size); err != nil {
+		if err := img.boundOnDevice(device, offset, size); err != nil {
 			return false, fmt.Errorf("nid %d: %w", ino.nid, err)
 		}
 
-		emit(DataRange{Device: deviceID, Offset: byteOffset, Size: size})
-
-		return true, nil
+		return emit(DataRange{Device: device, Offset: offset, Size: size}), nil
 	})
 }
 
