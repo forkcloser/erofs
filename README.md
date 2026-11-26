@@ -243,9 +243,10 @@ most 65535 bytes. `Chown` refuses negative ids.
 
 An extended attribute, name and value, that more than two files carry is
 stored once, in the image's shared area, and each file names it there, as
-`mkfs.erofs` stores it by default. So are the attributes of a file whose
-inode cannot hold them all itself. A file names at most 255 attributes
-there, and holds the others.
+`mkfs.erofs` stores it by default. A file names at most 255 attributes
+there, the first in the order of their names, and holds the others. A file
+whose inode cannot hold all of its attributes itself has its first 255
+stored there, however few files carry them.
 
 None of these bounds a copy by the size of its source. `CopyFrom` writes the
 tree it walks, and an EROFS image may store once what many of its files name:
