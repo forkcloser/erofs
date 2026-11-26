@@ -326,7 +326,9 @@ func laidInlineFiles(n, size int, reversed bool) []byte {
 // three hundred files of 100 bytes whose inodes lie in the reverse of
 // their names are read in under twice their thirty thousand bytes, where
 // in the order of their names a few reads take them all, ends of 5 bytes
-// with more between them than in them as well.
+// with more between them than in them as well. And every file has its own
+// bytes whatever read served it: ends of one byte, 64 apart, put one of them
+// a byte past the 4 KiB a read took, which is not in that read.
 func TestContractCloseReadsInlineEndsInAnyOrderOnceEach(t *testing.T) {
 	t.Parallel()
 
@@ -338,6 +340,7 @@ func TestContractCloseReadsInlineEndsInAnyOrderOnceEach(t *testing.T) {
 	}{
 		"in the order of their names":        {100, false},
 		"small, in the order of their names": {5, false},
+		"of one byte, in that order":         {1, false},
 		"in the reverse of it":               {100, true},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -382,10 +385,10 @@ func TestContractCloseReadsInlineEndsInAnyOrderOnceEach(t *testing.T) {
 
 			fsys := openWithDevices(t, out.Bytes(), src.data)
 
-			for _, i := range []int{0, 1, files / 2, files - 1} {
+			for i := range files {
 				got, err := fs.ReadFile(fsys, fmt.Sprintf("f%03d", i))
 				if err != nil || !bytes.Equal(got, inlineContent(i, size)) {
-					t.Errorf("f%03d reads %d bytes, %v; want its own %d", i, len(got), err, size)
+					t.Errorf("f%03d reads %q, %v; want its own %d bytes", i, got, err, size)
 				}
 			}
 		})
