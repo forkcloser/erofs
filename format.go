@@ -1,9 +1,10 @@
 package erofs
 
 import (
+	"cmp"
 	"fmt"
 	"io/fs"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/forkcloser/erofs/internal/disk"
@@ -33,32 +34,45 @@ func xattrSplit(name string) (uint8, string) {
 	return 0, name
 }
 
-// listedXattrs is attrs without the names the kernel serves under no prefix:
-// attrs itself when it holds none, which is nearly always, and else a map of
-// its own, attrs being the source's.
-func listedXattrs(attrs map[string]string) map[string]string {
-	hidden := 0
-
-	for name := range attrs {
-		if idx, _ := xattrSplit(name); idx == 0 {
-			hidden++
-		}
-	}
-
-	if hidden == 0 {
-		return attrs
-	}
-
-	listed := make(map[string]string, len(attrs)-hidden)
-
-	for name, value := range attrs {
-		if idx, _ := xattrSplit(name); idx != 0 {
-			listed[name] = value
-		}
-	}
-
-	return listed
+// xattr is one extended attribute of an entry the Writer holds. An entry's
+// are in the order of their names, the order they are written in.
+type xattr struct {
+	name, value string
 }
+
+// xattrMap is attrs as the map a caller is handed, its own; nil for none.
+func xattrMap(attrs []xattr) map[string]string {
+	if len(attrs) == 0 {
+		return nil
+	}
+
+	m := make(map[string]string, len(attrs))
+	for _, x := range attrs {
+		m[x.name] = x.value
+	}
+
+	return m
+}
+
+// xattrAt is where name is among attrs, or where it would go.
+func xattrAt(attrs []xattr, name string) (int, bool) {
+	return slices.BinarySearchFunc(attrs, name, func(x xattr, name string) int {
+		return cmp.Compare(x.name, name)
+	})
+}
+
+// listedXattrs is attrs without the names the kernel serves under no prefix,
+// in attrs' own array: there are nearly always none.
+func listedXattrs(attrs []xattr) []xattr {
+	return slices.DeleteFunc(attrs, func(x xattr) bool {
+		idx, _ := xattrSplit(x.name)
+
+		return idx == 0
+	})
+}
+
+// byXattrName orders attributes as they are written.
+func byXattrName(a, b xattr) int { return cmp.Compare(a.name, b.name) }
 
 // On-disk xattr field limits. erofs_xattr_entry stores the name suffix
 // length in a uint8 and the value length in a uint16, and an inode's
@@ -127,8 +141,8 @@ func calcXattrSize(e *erofsEntry) int {
 	}
 
 	entriesSize := 0
-	for name, value := range e.xattrs {
-		entriesSize += xattrEntrySize(name, value)
+	for _, x := range e.xattrs {
+		entriesSize += xattrEntrySize(x.name, x.value)
 	}
 
 	return disk.SizeXattrBodyHeader + entriesSize
@@ -150,18 +164,6 @@ func xattrICount(xattrSize int) int {
 func xattrCount(xattrSize int) uint16 {
 	// #nosec G115 -- checkLimits rejected any area whose count exceeds maxXattrICount, the uint16 maximum
 	return uint16(xattrICount(xattrSize))
-}
-
-// sortedXattrKeys returns xattr keys in deterministic order.
-func sortedXattrKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-
-	sort.Strings(keys)
-
-	return keys
 }
 
 // inodeFormat builds the Format field: bit 0 = extended, bits 1-3 = layout.
