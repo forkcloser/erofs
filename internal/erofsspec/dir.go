@@ -490,8 +490,8 @@ func (im *Image) walkEntry(dir *Inode, de Dirent, prefix string, seen map[uint64
 }
 
 // CheckDir applies fsck.erofs's directory rules on top of the kernel's
-// (erofs-utils lib/dir.c, traverse_dirents with fsck set): names are packed
-// back to back in entry order, strictly increasing bytewise, no name holds
+// (erofs-utils lib/dir.c, traverse_dirents with fsck set): names are
+// strictly increasing bytewise, no name holds
 // "/" or NUL, every file type is below the maximum, "." names the directory
 // itself and ".." its parent (the root for the root), each present exactly
 // once unless the directory omits the dot. It returns every violation.

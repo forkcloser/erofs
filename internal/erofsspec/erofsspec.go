@@ -14,10 +14,22 @@
 // the image, which a block device would answer with an I/O error, are
 // [ErrTruncated].
 //
-// Two things the kernel does and this package does not, by its own limit:
-// compressed inodes are refused as [ErrUnsupported] whatever the kernel's
-// configuration, and the metabox feature (compressed metadata) is refused at
-// [Parse]. Neither is produced by mkfs.erofs without being asked for.
+// Where it parts from the kernel, by its own limits:
+//   - compressed inodes are refused as [ErrUnsupported] whatever the
+//     kernel's configuration, and the compression configurations a
+//     superblock announces are not parsed, which the kernel does at mount;
+//   - the metabox feature (compressed metadata) is refused at [Parse], and
+//     with it a nid that lies in the metabox;
+//   - the packed inode is read only when the long xattr prefix table is in
+//     it, where the kernel reads it at the mount of every image that has
+//     fragments and one;
+//   - an inode's extended attributes are decoded with the inode, so that
+//     one whose attributes are broken is refused whole, where the kernel
+//     serves the inode and fails the calls that ask for its attributes.
+//
+// Neither compression nor the metabox is produced by mkfs.erofs without
+// being asked for. [Image.CheckDir] is apart from all this: it applies
+// fsck.erofs's rules for a directory, which are stricter than the kernel's.
 package erofsspec
 
 import (
