@@ -1236,6 +1236,30 @@ func checkFlatHole(nid uint64, size, blockSize int64) error {
 	return nil
 }
 
+// errRangesNotTheFile is the reader's own ranges of a file failing what
+// they promise: every byte of the file, once, in order, and no more.
+var errRangesNotTheFile = errors.New("the file's ranges do not cover it exactly")
+
+// coversExactly holds a file's ranges to what they promise: each of some
+// bytes, and size bytes in all.
+func coversExactly(ranges []DataRange, size int64) error {
+	var pos int64
+
+	for _, r := range ranges {
+		if r.Size <= 0 || r.Size > size-pos {
+			return fmt.Errorf("%w: one of %d bytes at byte %d of %d", errRangesNotTheFile, r.Size, pos, size)
+		}
+
+		pos += r.Size
+	}
+
+	if pos != size {
+		return fmt.Errorf("%w: they end at byte %d of %d", errRangesNotTheFile, pos, size)
+	}
+
+	return nil
+}
+
 // holedData lays out, in blocks of blockSize bytes, a file of the image that
 // has holes: the chunks, a hole wherever whole blocks lie inside one of the
 // file's, the rest counted from zero as blocks of data; and that data, the
@@ -1244,6 +1268,13 @@ func holedData(f *file, ino *inode, blockSize int64) ([]builder.Chunk, io.Reader
 	ranges, err := f.buildDataRanges(ino, nil)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	// The blocks left to keep are counted below without a sign, by what
+	// the ranges have covered: ranges that end past the file leave less
+	// than none, which is 1<<64 of them to lay out.
+	if err := coversExactly(ranges, ino.size); err != nil {
+		return nil, nil, fmt.Errorf("nid %d: %w", ino.nid, err)
 	}
 
 	// #nosec G115 -- readInfo bounded the size, which is not negative
