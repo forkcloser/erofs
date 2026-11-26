@@ -81,6 +81,10 @@ type Writer struct {
 	// them. A key holds the first attributes that hashed to it.
 	copyXattrs map[uint64][]xattr
 	xattrSeed  maphash.Seed
+	// copyStrings holds each attribute name and value of one CopyFrom once:
+	// entries whose attributes differ may still have most of them in
+	// common, as the files that name the entries of an image's shared area.
+	copyStrings map[uint64]string
 	// xattrScratch is where a copy puts an entry's attributes in order
 	// before it knows whether an earlier entry has the same ones.
 	xattrScratch []xattr
@@ -809,9 +813,10 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 
 	fsys.copyLinks = make(map[hardlinkKey]*fsEntry)
 	fsys.copyXattrs = map[uint64][]xattr{}
-	// Let go of with the copy: it would keep the attributes of entries
+	fsys.copyStrings = map[uint64]string{}
+	// Let go of with the copy: they would keep the attributes of entries
 	// removed since.
-	defer func() { fsys.copyXattrs, fsys.xattrScratch = nil, nil }()
+	defer func() { fsys.copyXattrs, fsys.copyStrings, fsys.xattrScratch = nil, nil, nil }()
 
 	fsys.copyDirs = make(map[uint64]string)
 	for _, opt := range opts {
@@ -2191,11 +2196,35 @@ func (fsys *Writer) heldXattrs(attrs []xattr) []xattr {
 	}
 
 	held = slices.Clone(attrs)
+	for i := range held {
+		held[i].name = fsys.heldString(held[i].name)
+		held[i].value = fsys.heldString(held[i].value)
+	}
+
 	if !taken {
 		fsys.copyXattrs[key] = held
 	}
 
 	return held
+}
+
+// heldString is s, or the equal string an earlier entry of this copy holds.
+// A key holds the first string that hashed to it.
+func (fsys *Writer) heldString(s string) string {
+	key := maphash.String(fsys.xattrSeed, s)
+
+	held, taken := fsys.copyStrings[key]
+	if !taken {
+		fsys.copyStrings[key] = s
+
+		return s
+	}
+
+	if held == s {
+		return held
+	}
+
+	return s
 }
 
 // checkNoOpenFile reports an error when a file from Create is still open.

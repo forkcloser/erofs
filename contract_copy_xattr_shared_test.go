@@ -419,3 +419,52 @@ func TestContractCopyOfFilesWithAttributesOfTheirOwn(t *testing.T) {
 		})
 	}
 }
+
+// TestContractCopyHoldsOnceAValueFilesNameAmongOthers: files whose
+// attributes differ may still have nearly all of them in common, as the
+// files that name the entries of an image's shared area do, each a list of
+// its own. A copy holds each name and each value once. Two hundred shared
+// attributes of 1100 bytes, and four hundred files that each name all but
+// one, are an image of 640 KiB: the copy holds under three times that,
+// where a copy of each file's own values is over seventy times.
+//
+//nolint:paralleltest // measures the process's live heap; a parallel test's would count in it
+func TestContractCopyHoldsOnceAValueFilesNameAmongOthers(t *testing.T) {
+	const (
+		attrs = 200
+		files = 400
+	)
+
+	l := corpus.Layout{BlockBits: 16, Extended: true}
+
+	for i := range attrs {
+		l.Shared = append(l.Shared, corpus.AXattr{
+			Index: 1, Suffix: fmt.Sprintf("a%03d", i), Value: bytes.Repeat([]byte{byte('a' + i%26)}, 1100),
+		})
+	}
+
+	for n := range files {
+		ids := make([]int, 0, attrs-1)
+
+		for i := range attrs {
+			if i != n%attrs {
+				ids = append(ids, i)
+			}
+		}
+
+		l.Entries = append(l.Entries, corpus.AEntry{
+			Name: fmt.Sprintf("f%03d", n), Mode: 0o100644, Nlink: 1, SharedIDs: ids,
+		})
+	}
+
+	img := corpus.Assemble(l)
+
+	for route, opts := range copyRoutes() {
+		t.Run(route, func(t *testing.T) {
+			if held := heldByCopy(t, img, opts...); held > int64(3*len(img)) {
+				t.Errorf("the copy of an image of %d bytes holds %d, %d times as much; want under 3 times",
+					len(img), held, held/int64(len(img)))
+			}
+		})
+	}
+}
