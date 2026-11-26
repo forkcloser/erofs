@@ -51,6 +51,7 @@ type erofsWriter struct {
 	shared       []xattr
 	sharedSize   int
 	sharing      xattrSharing
+	xattrHead    [disk.SizeXattrEntry]byte // the head of the entry being written (writeXattrEntry)
 	xattrBlkAddr uint32
 	bodyIDs      []uint32
 	bodyOwn      []xattr
@@ -775,14 +776,16 @@ func (w *erofsWriter) writeXattrs(buf io.Writer, e *erofsEntry) error {
 func (w *erofsWriter) writeXattrEntry(buf io.Writer, x xattr) error {
 	nameIndex, suffix := xattrSplit(x.name)
 
-	var xent [disk.SizeXattrEntry]byte
+	// The writer's own four bytes: an array of this call's, handed to buf,
+	// is one allocation for each entry written.
+	xent := w.xattrHead[:]
 
 	xent[0] = uint8(len(suffix)) // #nosec G115 -- checkLimits ran validateXattr: at most maxXattrNameLen
 	xent[1] = nameIndex
 	// #nosec G115 -- checkLimits ran validateXattr: at most maxXattrValueLen
 	binary.LittleEndian.PutUint16(xent[2:4], uint16(len(x.value)))
 
-	if _, err := buf.Write(xent[:]); err != nil {
+	if _, err := buf.Write(xent); err != nil {
 		return err
 	}
 
