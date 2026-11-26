@@ -944,8 +944,10 @@ func TestContractWriterChtimes(t *testing.T) {
 			b := wBuild(t, func(w *erofs.Writer) {
 				mustCreate(t, w, "f", []byte("x"))
 
+				// Another time for the access: the image has no place for
+				// one, and the modification time is not it.
 				at := time.Unix(c.sec, c.nsec)
-				if err := w.Chtimes("f", at, at); err != nil {
+				if err := w.Chtimes("f", at.Add(-time.Hour), at); err != nil {
 					t.Fatal(err)
 				}
 			})
