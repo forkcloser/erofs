@@ -2859,23 +2859,23 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 	}
 
 	// erofsEntry values are carved from one slab rather than allocated one at
-	// a time: there is exactly one per registered path, so the capacity is
-	// known up front and append never reallocates — which is what keeps the
-	// pointers handed out valid. The fallback covers the count being wrong.
+	// a time: there is exactly one per registered path, a file's further
+	// names among them, so the capacity is known up front and append never
+	// reallocates — which is what keeps the pointers handed out valid. The
+	// fallback covers the count being wrong.
 	arena := make([]erofsEntry, 0, len(fsys.byPath))
-	alloc := func(e *fsEntry) *erofsEntry {
+	alloc := func() *erofsEntry {
 		if len(arena) == cap(arena) {
-			er := fsys.fsToErofs(e)
-
-			return &er
+			return new(erofsEntry)
 		}
 
-		arena = append(arena, fsys.fsToErofs(e))
+		arena = arena[:len(arena)+1]
 
 		return &arena[len(arena)-1]
 	}
 
-	rootEr := alloc(fsys.root)
+	rootEr := alloc()
+	*rootEr = fsys.fsToErofs(fsys.root)
 	queue := []pair{{fsys.root, rootEr}}
 
 	// Hardlink wiring happens after the walk: an alias may sit in a
@@ -2917,18 +2917,16 @@ func (fsys *Writer) buildErofsTree() *erofsEntry {
 			if c.linkTo != nil {
 				// Dirent-only alias: name here, inode on the target
 				// (nid/file type copied once the target has one).
-				ent := &erofsEntry{
-					mode: c.mode,
-					name: path.Base(c.path),
-					path: c.path,
-				}
+				ent := alloc()
+				ent.mode, ent.name, ent.path = c.mode, path.Base(c.path), c.path
 				cur.er.children = append(cur.er.children, ent)
 				aliases = append(aliases, aliasFixup{target: c.linkTo, er: ent})
 
 				continue
 			}
 
-			ent := alloc(c)
+			ent := alloc()
+			*ent = fsys.fsToErofs(c)
 			cur.er.children = append(cur.er.children, ent)
 
 			if c.extraLinks > 0 {
