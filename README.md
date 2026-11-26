@@ -157,6 +157,11 @@ file's inline tail, shorter than a block, is copied, as one block. Open the
 result with `WithExtraDevices` over the source images in copy order, each
 followed by its own devices.
 
+That tail is the file's data: `Close` reads it from the source image when it
+writes the result, and the `Writer` holds none of it until then. A source
+image must stay as it was, and readable, until `Close`, as a source copied
+with its data must.
+
 ## Building an image programmatically
 
 ```go

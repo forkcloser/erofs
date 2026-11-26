@@ -16,6 +16,14 @@ import (
 	"github.com/forkcloser/erofs/internal/disk"
 )
 
+// tailWindow is the most of a source image one read for an inline end
+// takes, the end itself, at most a block, and those that follow it; and
+// tailReach the least it takes once an end has followed another.
+const (
+	tailWindow = 256 << 10
+	tailReach  = 4 << 10
+)
+
 // maxBlockSize is the largest block size we support. EROFS images with
 // larger block sizes are unmountable on common platforms (aarch64 caps
 // page size at 64 KiB) and the reader rejects BlkSizeBits > 16.
@@ -43,11 +51,16 @@ type erofsWriter struct {
 	// noInlineData keeps every regular file's data in whole blocks: no
 	// tail packed beside the inode.
 	noInlineData bool
-	chunkBits    uint8                        // log2(chunkSize / blockSize); chunkSize = blockSize << chunkBits
-	copyBuf      []byte                       // reusable buffer for io.CopyBuffer
-	zeroBuf      []byte                       // blockSize-length zero buffer for padding
-	dirBuf       []byte                       // reusable scratch for one dirent block
-	inodeBuf     [disk.SizeInodeExtended]byte // scratch buffer for writeInode
+	chunkBits    uint8  // log2(chunkSize / blockSize); chunkSize = blockSize << chunkBits
+	copyBuf      []byte // reusable buffer for io.CopyBuffer
+	// tailWin is the window of image tailOf at tailAt that the inline ends
+	// of a metadata-only copy's files are read from (inlineEnd).
+	tailWin  []byte
+	tailOf   *image
+	tailAt   int64
+	zeroBuf  []byte                       // blockSize-length zero buffer for padding
+	dirBuf   []byte                       // reusable scratch for one dirent block
+	inodeBuf [disk.SizeInodeExtended]byte // scratch buffer for writeInode
 }
 
 // inodeSize returns the on-disk inode header size for e.
@@ -184,7 +197,7 @@ func (w *erofsWriter) checkLimits() error {
 			blocks++
 		}
 
-		if len(entry.tail) > 0 {
+		if entry.tail.n > 0 {
 			blocks++
 		}
 
@@ -225,7 +238,7 @@ func (w *erofsWriter) runChunkBits(e *erofsEntry) uint8 {
 	// follows nothing, or else a hole, which follows a hole alone.
 	// #nosec G115 -- the block size is positive, 512 to 1<<16
 	blocks := (e.size + uint64(w.blockSize) - 1) / uint64(w.blockSize)
-	if prev != nil && at < blocks && (len(e.tail) > 0 || prev.PhysicalBlock != builder.NullPhysicalBlock) {
+	if prev != nil && at < blocks && (e.tail.n > 0 || prev.PhysicalBlock != builder.NullPhysicalBlock) {
 		fit = min(fit, alignedBits(at))
 	}
 
@@ -368,7 +381,7 @@ func (w *erofsWriter) assignFlatPlainAddrs(addr uint32) uint32 {
 			addr += uint32((ds + w.blockSize - 1) / w.blockSize)
 		}
 
-		if len(e.tail) > 0 {
+		if e.tail.n > 0 {
 			e.tailBlkAddr = addr
 			// The tail's chunk: the one block of this image, after the
 			// chunks on the source's devices. It begins a chunk of its
@@ -436,7 +449,7 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 			dataBlocks += (ds + w.blockSize - 1) / w.blockSize
 		}
 
-		if len(e.tail) > 0 {
+		if e.tail.n > 0 {
 			dataBlocks++
 		}
 	}
@@ -1010,18 +1023,67 @@ func (w *erofsWriter) writeDataBlocks(out io.Writer) error {
 	return nil
 }
 
+// inlineEnd is the bytes of t, read from its image. The ends of a
+// directory's files lie beside their inodes, one after another, and a read
+// for each is a round trip to the source for each: so a read takes twice
+// the one before it, tailReach at least and tailWindow at most, when t
+// lies where that reaches, and serves the ends that follow. One that lies
+// elsewhere is read alone: the order is the image's to choose, and a
+// window for each would read many times the image.
+func (w *erofsWriter) inlineEnd(t inlineTail) ([]byte, error) {
+	last := int64(len(w.tailWin))
+
+	from := t.at - w.tailAt
+	if t.img != w.tailOf {
+		from = -1
+	}
+
+	if from >= 0 && from+int64(t.n) <= last {
+		return w.tailWin[from : from+int64(t.n)], nil
+	}
+
+	size := t.n
+	if ahead := max(2*last, tailReach); from >= 0 && from-last < ahead {
+		size = int(min(max(int64(size), ahead), tailWindow))
+	}
+
+	if w.tailWin == nil {
+		w.tailWin = make([]byte, 0, tailWindow)
+	}
+
+	// A read that runs past the source's end comes back short, with the
+	// end for an error: what counts is that t is in it.
+	n, err := t.img.meta.ReadAt(w.tailWin[:size], t.at)
+	w.tailOf, w.tailAt, w.tailWin = t.img, t.at, w.tailWin[:n]
+
+	if n < t.n {
+		if err == nil || errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
+		}
+
+		return nil, err
+	}
+
+	return w.tailWin[:t.n], nil
+}
+
 // writeTailBlock writes a metadata-only file's copied tail as one block,
 // where assignFlatPlainAddrs placed it.
 func (w *erofsWriter) writeTailBlock(out io.Writer, e *erofsEntry) error {
-	if len(e.tail) == 0 {
+	if e.tail.n == 0 {
 		return nil
 	}
 
-	if _, err := out.Write(e.tail); err != nil {
+	tail, err := w.inlineEnd(e.tail)
+	if err != nil {
+		return fmt.Errorf("read the inline end of %s where it was copied from: %w", e.path, err)
+	}
+
+	if _, err := out.Write(tail); err != nil {
 		return fmt.Errorf("write tail for %s: %w", e.path, err)
 	}
 
-	if pad := w.blockSize - len(e.tail)%w.blockSize; pad < w.blockSize {
+	if pad := w.blockSize - len(tail)%w.blockSize; pad < w.blockSize {
 		if _, err := out.Write(w.zeroBuf[:pad]); err != nil {
 			return fmt.Errorf("write padding for %s: %w", e.path, err)
 		}
