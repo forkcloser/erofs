@@ -64,6 +64,7 @@ func (w *erofsWriter) planLayout(root *erofsEntry) {
 	walk(root)
 
 	w.totalInodes = uint64(len(w.entries))
+	w.shareXattrs()
 
 	// Block 0 holds: 1024-byte pad + 128-byte superblock + device slot(s) + padding
 	// MetaBlkAddr is set later by write() depending on the on-disk layout.
@@ -75,7 +76,7 @@ func (w *erofsWriter) planLayout(root *erofsEntry) {
 	currentOff := 0 // byte offset from metaStartPos
 	for _, e := range w.entries {
 		e.nid = uint64(currentOff / 32)
-		e.xattrSize = calcXattrSize(e)
+		e.xattrSize = w.xattrBody(e.xattrs, false)
 
 		// Decide compact (32B) vs extended (64B) inode. A compact inode
 		// stores no timestamp: the reader reconstructs it as the superblock's

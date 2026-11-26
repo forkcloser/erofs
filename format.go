@@ -3,7 +3,10 @@ package erofs
 import (
 	"cmp"
 	"fmt"
+	"hash/maphash"
 	"io/fs"
+	"math"
+	"math/bits"
 	"slices"
 	"strings"
 
@@ -134,18 +137,262 @@ func xattrEntrySize(name, value string) int {
 	return sz
 }
 
-// calcXattrSize returns the total xattr area size (header + entries), or 0.
-func calcXattrSize(e *erofsEntry) int {
-	if len(e.xattrs) == 0 {
+// sharedXattrOver is how many inodes may carry an attribute before it goes
+// to the shared area: one that more than two carry is stored once there,
+// mkfs.erofs's default (-x2). maxSharedXattrs is how many an inode can name
+// there, its h_shared_count being one byte.
+const (
+	sharedXattrOver = 2
+	maxSharedXattrs = 255
+)
+
+// xattrSharing is how an erofsWriter knows which attributes are in the
+// shared xattr area, for the price of one hash of an attribute most
+// inodes carry alone, and less for one they nearly all carry.
+type xattrSharing struct {
+	seed maphash.Seed
+	// seen counts, to sharedXattrOver+1 and no further, the inodes whose
+	// attributes hash to each of its slots: an attribute whose slot is not
+	// past sharedXattrOver is carried by too few to be shared, whatever
+	// else fell there.
+	seen []uint8
+	// ids is where each shared attribute is in the area, in units of four
+	// bytes.
+	ids map[xattr]uint32
+	// last is the attribute last asked about at each of an inode's first
+	// places, and what was answered: the files of a tree carry the same
+	// label one after another, and equal strings that are one string
+	// compare at once.
+	last [xattrPlaces]xattrAnswer
+}
+
+// xattrPlaces is how many of an inode's first attributes are remembered
+// from the inode before it, where they are asked about and where they are
+// counted.
+const xattrPlaces = 4
+
+// xattrAnswer is what xattrSharing.id answered for x, once asked.
+type xattrAnswer struct {
+	x      xattr
+	id     uint32
+	shared bool
+	asked  bool
+}
+
+// xattrRun is an attribute that so many inodes in a row carry at one place.
+type xattrRun struct {
+	x      xattr
+	inodes int
+}
+
+// slot is where x counts in seen.
+func (s *xattrSharing) slot(x xattr) *uint8 {
+	var h maphash.Hash
+
+	h.SetSeed(s.seed)
+	_, _ = h.WriteString(x.name)
+	_ = h.WriteByte(0)
+	_, _ = h.WriteString(x.value)
+
+	return &s.seen[h.Sum64()&uint64(len(s.seen)-1)] // #nosec G115 -- a length, a power of two, is not negative
+}
+
+// id is where the attribute x, the i-th of an inode, is in the shared area,
+// and whether it is there.
+func (s *xattrSharing) id(i int, x xattr) (uint32, bool) {
+	if len(s.ids) == 0 {
+		return 0, false
+	}
+
+	if i < len(s.last) && s.last[i].asked && s.last[i].x == x {
+		return s.last[i].id, s.last[i].shared
+	}
+
+	var (
+		id     uint32
+		shared bool
+	)
+
+	if *s.slot(x) > sharedXattrOver {
+		id, shared = s.ids[x]
+	}
+
+	if i < len(s.last) {
+		s.last[i].x, s.last[i].id, s.last[i].shared, s.last[i].asked = x, id, shared, true
+	}
+
+	return id, shared
+}
+
+// shareXattrs chooses the shared xattr area: the attributes, name and
+// value, that more than sharedXattrOver of the entries carry, in the order
+// of their names and then of their values.
+func (w *erofsWriter) shareXattrs() {
+	total := 0
+	for _, e := range w.entries {
+		total += len(e.xattrs)
+	}
+
+	w.shared, w.sharedSize = w.shared[:0], 0
+	w.sharing = xattrSharing{seed: maphash.MakeSeed()}
+
+	if total == 0 {
+		return
+	}
+
+	// Four slots an attribute: few fall together that are not the same.
+	w.sharing.seen = make([]uint8, 1<<bits.Len(uint(4*total-1)))
+
+	// An inode's body is sized in 65535 units of four bytes: attributes
+	// that do not fit it whole are named in the shared area, however few
+	// inodes carry them, as an image may store them. forced are those.
+	forced := map[xattr]struct{}{}
+
+	w.eachCarried(func(over bool, x xattr, inodes int) {
+		slot := w.sharing.slot(x)
+		*slot = uint8(min(int(*slot)+inodes, sharedXattrOver+1)) // #nosec G115 -- at most sharedXattrOver+1
+
+		if over {
+			forced[x] = struct{}{}
+			*slot = sharedXattrOver + 1
+		}
+	})
+
+	carried := map[xattr]int{}
+
+	w.eachCarried(func(_ bool, x xattr, inodes int) {
+		if *w.sharing.slot(x) > sharedXattrOver {
+			carried[x] += inodes
+		}
+	})
+
+	for x, inodes := range carried {
+		if _, must := forced[x]; must || inodes > sharedXattrOver {
+			w.shared = append(w.shared, x)
+		}
+	}
+
+	slices.SortFunc(w.shared, func(a, b xattr) int {
+		return cmp.Or(cmp.Compare(a.name, b.name), cmp.Compare(a.value, b.value))
+	})
+
+	w.sharing.ids = make(map[xattr]uint32, len(w.shared))
+
+	for i, x := range w.shared {
+		// An id is 32 bits, of four bytes each: what would lie past them
+		// stays in the inodes that carry it.
+		if w.sharedSize/4 > math.MaxUint32 {
+			w.shared = w.shared[:i]
+
+			break
+		}
+
+		w.sharing.ids[x] = uint32(w.sharedSize / 4) // #nosec G115 -- held to 32 bits just above
+		w.sharedSize += xattrEntrySize(x.name, x.value)
+	}
+}
+
+// eachCarried calls fn for each attribute the entries carry, with how many
+// inodes in a row carry it at the same place of theirs, counted together:
+// the files of a tree carry the same label one after another. over says
+// that the attribute is one of more than its inode can hold.
+func (w *erofsWriter) eachCarried(fn func(over bool, x xattr, inodes int)) {
+	var run [xattrPlaces]xattrRun
+
+	for _, e := range w.entries {
+		over := xattrsOverflow(e.xattrs)
+
+		for i, x := range e.xattrs {
+			if over || i >= len(run) {
+				fn(over, x, 1)
+
+				continue
+			}
+
+			r := &run[i] // #nosec G602 -- i is under len(run), tested just above
+			if r.inodes == 0 || r.x != x {
+				r.end(fn)
+				r.x = x
+			}
+
+			r.inodes++
+		}
+	}
+
+	for i := range run {
+		run[i].end(fn)
+	}
+}
+
+// end hands the run to fn, if it has begun, and empties it.
+func (r *xattrRun) end(fn func(over bool, x xattr, inodes int)) {
+	if r.inodes > 0 {
+		fn(false, r.x, r.inodes)
+	}
+
+	r.inodes = 0
+}
+
+// xattrsOverflow reports whether attrs are more than an inode's xattr body
+// holds, sized as it is in maxXattrICount units of four bytes.
+func xattrsOverflow(attrs []xattr) bool {
+	// An entry is under eight bytes more than its name and value: nearly
+	// every inode is told apart without splitting a name.
+	most := len(attrs) * 8
+	for _, x := range attrs {
+		most += len(x.name) + len(x.value)
+	}
+
+	return most > maxXattrICount*4 && xattrICount(inlineXattrSize(attrs)) > maxXattrICount
+}
+
+// inlineXattrSize is an xattr body that holds all of attrs itself.
+func inlineXattrSize(attrs []xattr) int {
+	size := disk.SizeXattrBodyHeader
+	for _, x := range attrs {
+		size += xattrEntrySize(x.name, x.value)
+	}
+
+	return size
+}
+
+// xattrBody is the bytes attrs put in an inode's xattr body: a reference
+// for each of the first maxSharedXattrs of them that are in the shared
+// area, then the entries of the others. With keep, it leaves the two in
+// bodyIDs and bodyOwn, in attrs' order, for writeXattrs.
+func (w *erofsWriter) xattrBody(attrs []xattr, keep bool) int {
+	if len(attrs) == 0 {
 		return 0
 	}
 
-	entriesSize := 0
-	for _, x := range e.xattrs {
-		entriesSize += xattrEntrySize(x.name, x.value)
+	size, shared := disk.SizeXattrBodyHeader, 0
+
+	if keep {
+		w.bodyIDs, w.bodyOwn = w.bodyIDs[:0], w.bodyOwn[:0]
 	}
 
-	return disk.SizeXattrBodyHeader + entriesSize
+	for i, x := range attrs {
+		if id, is := w.sharing.id(i, x); is && shared < maxSharedXattrs {
+			shared++
+			size += 4 // a reference to the shared area is a __le32
+
+			if keep {
+				w.bodyIDs = append(w.bodyIDs, id)
+			}
+
+			continue
+		}
+
+		if keep {
+			w.bodyOwn = append(w.bodyOwn, x)
+
+			continue
+		}
+
+		size += xattrEntrySize(x.name, x.value)
+	}
+
+	return size
 }
 
 // xattrICount is the value i_xattr_icount encodes for an xattr area of the
