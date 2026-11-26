@@ -92,3 +92,69 @@ func TestContractARefusedRootLeavesTheWritersGeometry(t *testing.T) {
 			1<<sb.BlkSizeBits, sb.ExtraDevices)
 	}
 }
+
+// turningRoot is a source whose root is a directory the first time it is
+// asked about and what root says from then on: a host directory that
+// something replaced while it was being copied.
+type turningRoot struct {
+	fstest.MapFS
+
+	root  fs.FileInfo
+	asked int
+}
+
+func (s *turningRoot) Stat(name string) (fs.FileInfo, error) {
+	if name != "." {
+		return s.MapFS.Stat(name)
+	}
+
+	s.asked++
+	if s.asked == 1 {
+		return s.MapFS.Stat(".")
+	}
+
+	return s.root, nil
+}
+
+// TestContractCopyRefusesARootThatStoppedBeingADirectory: a copy asks for
+// the source's root before anything else, and the walk asks again. A root
+// that is a directory the first time and something else the second, an
+// empty file or a FIFO, is refused where the walk hands it over,
+// ErrNotDirectory: the image's root is a directory or there is no image.
+func TestContractCopyRefusesARootThatStoppedBeingADirectory(t *testing.T) {
+	t.Parallel()
+
+	for name, becomes := range map[string]fstest.MapFS{
+		"an empty file": {"f": &fstest.MapFile{Mode: 0o644}},
+		"a file":        {"f": &fstest.MapFile{Data: []byte("five."), Mode: 0o644}},
+		"a FIFO":        {"f": &fstest.MapFile{Mode: fs.ModeNamedPipe | 0o644}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			root, err := becomes.Stat("f")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			out := &sink{}
+			w := erofs.Create(out)
+			src := &turningRoot{
+				MapFS: fstest.MapFS{"kept": &fstest.MapFile{Data: []byte("kept"), Mode: 0o644}},
+				root:  root,
+			}
+
+			if err := w.CopyFrom(src); !errors.Is(err, erofs.ErrNotDirectory) {
+				t.Errorf("CopyFrom = %v; want ErrNotDirectory", err)
+			}
+
+			if err := w.Close(); !errors.Is(err, erofs.ErrNotDirectory) {
+				t.Errorf("Close = %v; want the copy's error", err)
+			}
+
+			if out.size != 0 {
+				t.Errorf("Close wrote an image of %d bytes; want none", out.size)
+			}
+		})
+	}
+}

@@ -927,6 +927,11 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 		p := "/" + fpath
 		if fpath == "." {
 			p = "/"
+			// The root CopyFrom asked about was a directory; it is the one
+			// the walk hands over that becomes the image's.
+			if !info.IsDir() {
+				return fmt.Errorf("mkfs: the source's root: %w", ErrNotDirectory)
+			}
 		}
 
 		if fsys.copyMerge && fsys.marker(p) {
