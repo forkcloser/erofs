@@ -190,7 +190,7 @@ func (im *Image) Lookup(dir *Inode, name []byte) (Dirent, error) {
 
 		nameoff := int64(binary.LittleEndian.Uint16(block[8:])) & (bs - 1)
 
-		diff := dirnamecmp(name, block[nameoff:end], &matched)
+		diff := dirnamecmp(name, storedName(block, nameoff, end), &matched)
 		if diff < 0 {
 			back = mid - 1
 			endprfx = matched
@@ -257,12 +257,7 @@ func findTargetDirent(name, block []byte, bs, ndirents int64) (Dirent, bool) {
 			end = int64(binary.LittleEndian.Uint16(block[(mid+1)*DirentSize+8:])) & (bs - 1)
 		}
 
-		var stored []byte
-		if nameoff <= end {
-			stored = block[nameoff:end]
-		}
-
-		ret := dirnamecmp(name, stored, &matched)
+		ret := dirnamecmp(name, storedName(block, nameoff, end), &matched)
 
 		switch {
 		case ret == 0:
@@ -277,6 +272,18 @@ func findTargetDirent(name, block []byte, bs, ndirents int64) (Dirent, bool) {
 	}
 
 	return Dirent{}, false
+}
+
+// storedName is a dirent's name as erofs_dirnamecmp is handed it: the
+// block's bytes from the name's offset to the next name's. An offset below
+// it leaves no byte: the kernel compares with that and goes on ("to just
+// skip the invalid name").
+func storedName(block []byte, nameoff, end int64) []byte {
+	if nameoff > end {
+		return nil
+	}
+
+	return block[nameoff:end]
 }
 
 // dirnamecmp is namei.c's erofs_dirnamecmp: the stored name has no
