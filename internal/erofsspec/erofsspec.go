@@ -397,8 +397,9 @@ func (im *Image) parseDevices() error {
 // erofs_read_metadata item (a 16-bit length, zero meaning 65536, then the
 // bytes), holding a base index and an infix of at most EROFS_NAME_LEN
 // bytes. The items live in the image itself when the PLAIN_XATTR_PFX
-// feature says so or no packed inode exists, and in the packed inode's data
-// otherwise.
+// feature says so or the mount took no packed inode, and in the packed
+// inode's data otherwise. The mount takes one under FRAGMENTS alone
+// (super.c): a packed_nid without that feature names nothing.
 func (im *Image) parsePrefixes() error {
 	s := &im.Super
 	if s.XattrPrefixCount == 0 {
@@ -406,7 +407,8 @@ func (im *Image) parsePrefixes() error {
 	}
 
 	src := im.bytesAt
-	if s.FeatureCompat&FeatureCompatPlainXattrPfx == 0 && s.PackedNid != 0 {
+	if s.FeatureCompat&FeatureCompatPlainXattrPfx == 0 && s.FeatureIncompat&FeatureIncompatFragments != 0 &&
+		s.PackedNid != 0 {
 		packed, err := im.Inode(s.PackedNid)
 		if err != nil {
 			return fmt.Errorf("packed inode: %w", err)
