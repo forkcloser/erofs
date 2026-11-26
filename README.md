@@ -39,7 +39,7 @@ its reader applies (`super.c`, `inode.c`, `dir.c`, `namei.c`, `xattr.c`,
 `data.c`), sharing no code with the package. The reference is anchored first:
 it parses images built by the pinned `mkfs.erofs` from a described tree back
 to the tree, field for field. Committed under `internal/corpus/testdata` with
-a digest manifest, so that every CI lane judges the same bytes: 17 such images
+a digest manifest, so that every CI lane judges the same bytes: 18 such images
 (block sizes 512, 1024, 4096 and 16384, compact and extended inodes, inline
 and plain data, chunk maps as block arrays and as indexes, a blob device, long
 xattr prefixes, no checksum, the dot-omitted layout) and 5 from a small
@@ -48,7 +48,7 @@ a header-only xattr body, a flat file at the null address, an xattr name under
 index 0). Where `mkfs.erofs` is present, the committed images are rebuilt,
 read back to the tree and passed to `fsck.erofs`, and under the build the
 manifest names (`erofs-utils` 1.9.4 on Darwin) compared byte for byte; the
-full tree is built under the whole option matrix, 30 sets over every block
+full tree is built under the whole option matrix, 31 sets over every block
 size from 512 to 16384.
 
 Over that corpus, and over the writer's own images at the block sizes
@@ -105,7 +105,6 @@ can be held to one.
 - [x] Extra devices for chunked data, and an image opened without them as the kernel mounts it (flatdev: metadata and in-image data served, blob data refused where it is read)
 - [x] Create erofs files from any `fs.FS`
 - [x] Directory to erofs packing
-- [x] AUFS whiteout to overlayfs conversion
 - [x] Merge multiple filesystem layers with whiteout processing
 - [ ] Read erofs files with compression
 
@@ -191,9 +190,11 @@ Beyond `Create`, `Mkdir`, `Symlink` and `CopyFrom`:
 - `Chmod`, `Chown`, `Chtimes`, `Setxattr` and `SetNlink` edit metadata by
   path; `File.Chmod` and `File.Chown` do the same on an open file.
 - `Stat` and `Open` read entries back before `Close`.
-- `Create` options: `WithBlockSize`, `WithBuildTime`, `WithDataFile` (an
-  external data file for metadata-only images) and `WithTempDir` (where the
-  spool lives otherwise). `CopyFrom` options: `MetadataOnly` and `Merge`.
+- `Create` options: `WithBlockSize`, `WithBuildTime`, `WithNoInlineData`
+  (a regular file's data in whole blocks, none beside its inode, which a DAX
+  mount needs), `WithDataFile` (an external data file for metadata-only
+  images) and `WithTempDir` (where the spool lives otherwise). `CopyFrom`
+  options: `MetadataOnly` and `Merge`.
 
 `CopyFrom` reads a source's file data when the image is written, at `Close`
 (at once, with a data file), one file open at a time: the source stays as it
@@ -206,8 +207,8 @@ Paths given to the writer are cleaned: `x`, `/x` and `./x` name the same
 entry. The reader is stricter and follows the `fs.FS` convention exactly.
 
 `CopyFrom` takes ownership, times and link identity from `Sys()` when it is a
-`*syscall.Stat_t` (linux, darwin and freebsd), a `*builder.Entry` or this
-package's `*Stat`, as an image opened here hands out; a source with none of
+`*syscall.Stat_t` (linux, darwin and freebsd) or this
+package's `*Stat`, as an image opened here hands out; a source with neither of
 them still contributes mode, size and `ModTime`. Two names that share a source
 inode become one inode with two names in the image when the source reports
 more than one link for it; a file's link count is computed from the names the
@@ -218,8 +219,8 @@ or whose minor is over 1048575 is refused, `ErrInvalid`.
 
 ## Limits
 
-The reader accepts block sizes from 512 bytes to 64 KiB. Compressed inodes,
-48-bit chunk addressing and extended inode slots are rejected with
+The reader accepts block sizes from 512 bytes to 64 KiB. Compressed inodes
+and 48-bit chunk addressing are rejected with
 `ErrNotImplemented`. The bounds that protect a caller from a hostile image
 report `ErrInvalid`: symlink targets and paths of at most 4096 bytes, 255
 symlink hops per resolution, a chunk-index map of at most 64 MiB per file,

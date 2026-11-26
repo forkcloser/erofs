@@ -33,8 +33,8 @@
 // # Limits
 //
 // The reader accepts block sizes from 512 bytes to 64 KiB and rejects
-// compressed inodes, 48-bit chunk addressing and extended inode slots with
-// [ErrNotImplemented]. An image whose on-disk structures disagree with the
+// compressed inodes and 48-bit chunk addressing with [ErrNotImplemented].
+// An image whose on-disk structures disagree with the
 // format or point outside it is reported as [ErrCorrupt]. Bounds that
 // protect a caller from a hostile image, each reported as [ErrInvalid]
 // alone: a symlink target of at most 4096 bytes, a path of at most 4096

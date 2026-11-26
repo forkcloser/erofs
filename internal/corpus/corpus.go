@@ -69,7 +69,7 @@ const UUID = "01234567-89ab-cdef-0123-456789abcdef"
 // format stores, ids at the compact/extended boundary, sizes one short of,
 // at and one past 512 and 4096 bytes, names at the length limit, a
 // directory wider than an 8 KiB block, xattrs of every built-in prefix and
-// a long one. It is kept small, since it is committed under thirteen
+// a long one. It is kept small, since it is committed under fourteen
 // option sets; Full adds the bulk.
 func Tree() []Node {
 	t := []Node{
