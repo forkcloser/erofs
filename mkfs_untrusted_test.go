@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/metrics"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -133,6 +135,9 @@ func TestUntrustedChunkSizeIsBounded(t *testing.T) {
 			}
 
 			var before, after runtime.MemStats
+
+			heapWatch(t)
+
 			runtime.ReadMemStats(&before)
 
 			dst := Create(&seekBuf{})
@@ -187,6 +192,9 @@ func TestUntrustedInodeCountIsBounded(t *testing.T) {
 	}
 
 	var before, after runtime.MemStats
+
+	heapWatch(t)
+
 	runtime.ReadMemStats(&before)
 
 	dst := Create(&seekBuf{})
@@ -214,6 +222,9 @@ func TestUntrustedBlockCountIsRejected(t *testing.T) {
 	buf[disk.SuperBlockOffset+8] &^= disk.FeatureCompatSBChksum
 
 	var before, after runtime.MemStats
+
+	heapWatch(t)
+
 	runtime.ReadMemStats(&before)
 
 	// Open bounds the superblock's geometry against the image, so a block
@@ -321,6 +332,9 @@ func TestUntrustedDirectorySizeIsBounded(t *testing.T) {
 	}
 
 	var before, after runtime.MemStats
+
+	heapWatch(t)
+
 	runtime.ReadMemStats(&before)
 
 	err = Create(&seekBuf{}).CopyFrom(img, MetadataOnly())
@@ -708,6 +722,9 @@ func holeSizeIsBounded(
 	}
 
 	var before, after runtime.MemStats
+
+	heapWatch(t)
+
 	runtime.ReadMemStats(&before)
 
 	out := &seekBuf{}
@@ -911,6 +928,9 @@ func TestUntrustedDirectoryCycleTerminates(t *testing.T) {
 	}
 
 	var before, after runtime.MemStats
+
+	heapWatch(t)
+
 	runtime.ReadMemStats(&before)
 
 	done := make(chan error, 1)
@@ -964,6 +984,7 @@ func TestUntrustedDirectoryCycleFullImageTerminates(t *testing.T) {
 		t.Fatalf("cyclic image failed to open: %v", err)
 	}
 
+	peak := heapWatch(t)
 	done := make(chan error, 1)
 
 	go func() {
@@ -973,11 +994,7 @@ func TestUntrustedDirectoryCycleFullImageTerminates(t *testing.T) {
 
 	select {
 	case err := <-done:
-		var after runtime.MemStats
-
-		//revive:disable-next-line:call-to-gc resident memory is measured from a collected heap
-		runtime.GC()
-		runtime.ReadMemStats(&after)
+		most := peak()
 
 		if err == nil {
 			t.Fatal("full-image CopyFrom accepted an image with a directory cycle")
@@ -986,12 +1003,12 @@ func TestUntrustedDirectoryCycleFullImageTerminates(t *testing.T) {
 		if !errors.Is(err, ErrInvalid) {
 			t.Errorf("err = %v, want it to wrap ErrInvalid", err)
 		}
-		// What has to stay bounded is resident memory, which is what an OOM
-		// is made of.
-		t.Logf("rejected with %v (heap in use after GC %d bytes)", err, after.HeapInuse)
+		// What has to stay bounded is the heap while the copy runs, which
+		// is what an OOM is made of: once it has ended, all of it is free.
+		t.Logf("rejected with %v (the heap reached %d bytes)", err, most)
 
-		if after.HeapInuse > 256<<20 {
-			t.Errorf("heap in use is %d bytes after a cyclic image; want well under 256 MiB", after.HeapInuse)
+		if most > 256<<20 {
+			t.Errorf("the heap reached %d bytes on a cyclic image; want well under 256 MiB", most)
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("full-image CopyFrom did not terminate on a cyclic image")
@@ -1709,6 +1726,9 @@ func TestUntrustedChunkIndexAllocIsBacked(t *testing.T) {
 	}
 
 	var before, after runtime.MemStats
+
+	heapWatch(t)
+
 	runtime.ReadMemStats(&before)
 
 	const calls = 4
@@ -2458,4 +2478,73 @@ func TestCopyFromImageTruncatedXattr(t *testing.T) {
 	} else if !errors.Is(err, ErrInvalid) {
 		t.Errorf("CopyFrom err = %v, want it to wrap ErrInvalid", err)
 	}
+}
+
+// runawayHeap is where a test of a hostile image ends the test binary. What
+// such a test is for is a subject that allocates without end, and one that
+// did would go on after the test had failed, for as long as the binary ran.
+const runawayHeap = 2 << 30
+
+// heapWatch samples the heap from here to the end of the test, and ends the
+// binary when it passes runawayHeap. The function it returns stops it
+// earlier and gives the largest heap it saw.
+func heapWatch(t *testing.T) func() uint64 {
+	t.Helper()
+
+	var (
+		name   = t.Name()
+		sample = []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
+		done   = make(chan struct{})
+		seen   = make(chan uint64, 1)
+	)
+
+	go func() {
+		var most uint64
+
+		tick := time.NewTicker(5 * time.Millisecond)
+		defer tick.Stop()
+
+		for {
+			metrics.Read(sample)
+			most = max(most, sample[0].Value.Uint64())
+
+			if most > runawayHeap {
+				fmt.Fprintf(
+					os.Stderr,
+					"%s: the heap passed %d bytes; the test binary ends here\n",
+					name,
+					uint64(runawayHeap),
+				)
+				//revive:disable-next-line:deep-exit // on purpose: nothing else stops a goroutine that allocates without end
+				os.Exit(2)
+			}
+
+			select {
+			case <-done:
+				seen <- most
+
+				return
+			case <-tick.C:
+			}
+		}
+	}()
+
+	var (
+		once sync.Once
+		most uint64
+	)
+
+	stop := func() uint64 {
+		once.Do(func() {
+			close(done)
+
+			most = <-seen
+		})
+
+		return most
+	}
+
+	t.Cleanup(func() { stop() })
+
+	return stop
 }
