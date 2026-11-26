@@ -766,6 +766,10 @@ func (l listedOnce) ReadDir(name string) ([]fs.DirEntry, error) {
 // read as that file, under the metadata of the first. With a data file the
 // same is so at once: a file shorter than it was found fails CopyFrom, and
 // one that has grown is copied to the size it was found with.
+// A CopyFrom that fails once it has begun to copy has left a part of its
+// source in the tree: the Writer keeps the error, and Close, which writes
+// nothing then, and every later call that would change the Writer return
+// it. One refused before it copies anything does not fail the Writer.
 // Reads symlink targets via readLinker interface when Entry.LinkTarget is empty.
 // If src implements blockSizer, the image block size is set accordingly.
 // A directory an EROFS image names twice, a hard link to it or a cycle
@@ -863,7 +867,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 			fsys.copySourceIsImage = true
 			fsys.devices = append(fsys.devices, devBlocks...)
 
-			return fsys.copyFromImage(srcImg)
+			return fsys.failed(fsys.copyFromImage(srcImg))
 		}
 	}
 
@@ -893,7 +897,7 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 	// is an image: a Writer not yet closed hands 0 for every entry.
 	_, fromImage := src.(*image)
 
-	return fs.WalkDir(listedOnce{src}, ".", func(fpath string, d fs.DirEntry, err error) error {
+	return fsys.failed(fs.WalkDir(listedOnce{src}, ".", func(fpath string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -1029,12 +1033,14 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 		}
 
 		return fsys.add(p, info)
-	})
+	}))
 }
 
 // --- Writer finalization ---
 
 // Close writes the EROFS image. The FS must not be used after Close.
+// A Writer that has failed writes nothing: Close returns the error it
+// failed on.
 func (fsys *Writer) Close() error {
 	if fsys.wErr != nil {
 		return fsys.wErr
@@ -2234,6 +2240,17 @@ func (fsys *Writer) heldString(s string) string {
 	}
 
 	return s
+}
+
+// failed keeps the error a copy ended on as the Writer's own. The part of
+// the source copied before it is in the tree, and without the error Close
+// would write that part as an image and report nothing.
+func (fsys *Writer) failed(err error) error {
+	if err != nil {
+		fsys.wErr = err
+	}
+
+	return err
 }
 
 // checkNoOpenFile reports an error when a file from Create is still open.
