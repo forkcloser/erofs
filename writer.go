@@ -1067,12 +1067,17 @@ func (w *erofsWriter) writeDataBlocks(out io.Writer) error {
 
 			n = written
 		case disk.StatTypeSymlink:
-			written, err := io.WriteString(out, e.symTarget)
-			if err != nil {
-				return fmt.Errorf("write symlink data for %s: %w", e.path, err)
-			}
+			// Through the copy buffer: out takes bytes, and a string
+			// handed to it as bytes is a copy of it made for the call.
+			for left := e.symTarget; left != ""; {
+				piece := w.copyBuf[:copy(w.copyBuf, left)]
+				if _, err := out.Write(piece); err != nil {
+					return fmt.Errorf("write symlink data for %s: %w", e.path, err)
+				}
 
-			n = written
+				left = left[len(piece):]
+				n += len(piece)
+			}
 		}
 
 		if n%w.blockSize != 0 {
