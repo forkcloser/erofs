@@ -243,53 +243,85 @@ func (w *erofsWriter) shareXattrs() {
 	// Four slots an attribute: few fall together that are not the same.
 	w.sharing.seen = make([]uint8, 1<<bits.Len(uint(4*total-1)))
 
-	// An inode's body is sized in 65535 units of four bytes: attributes
-	// that do not fit it whole are named in the shared area, however few
-	// inodes carry them, as an image may store them. forced are those.
-	forced := map[xattr]struct{}{}
+	ids := w.countCarried()
 
-	w.eachCarried(func(over bool, x xattr, inodes int) {
-		slot := w.sharing.slot(x)
-		*slot = uint8(min(int(*slot)+inodes, sharedXattrOver+1)) // #nosec G115 -- at most sharedXattrOver+1
+	w.shared = slices.Grow(w.shared, len(ids))
 
-		if over {
-			forced[x] = struct{}{}
-			*slot = sharedXattrOver + 1
-		}
-	})
-
-	carried := map[xattr]int{}
-
-	w.eachCarried(func(_ bool, x xattr, inodes int) {
-		if *w.sharing.slot(x) > sharedXattrOver {
-			carried[x] += inodes
-		}
-	})
-
-	for x, inodes := range carried {
-		if _, must := forced[x]; must || inodes > sharedXattrOver {
+	for x, inodes := range ids {
+		if inodes > sharedXattrOver {
 			w.shared = append(w.shared, x)
+
+			continue
 		}
+
+		delete(ids, x)
 	}
 
 	slices.SortFunc(w.shared, func(a, b xattr) int {
 		return cmp.Or(cmp.Compare(a.name, b.name), cmp.Compare(a.value, b.value))
 	})
 
-	w.sharing.ids = make(map[xattr]uint32, len(w.shared))
-
 	for i, x := range w.shared {
 		// An id is 32 bits, of four bytes each: what would lie past them
 		// stays in the inodes that carry it.
 		if w.sharedSize/4 > math.MaxUint32 {
+			for _, left := range w.shared[i:] {
+				delete(ids, left)
+			}
+
 			w.shared = w.shared[:i]
 
 			break
 		}
 
-		w.sharing.ids[x] = uint32(w.sharedSize / 4) // #nosec G115 -- held to 32 bits just above
+		ids[x] = uint32(w.sharedSize / 4) // #nosec G115 -- held to 32 bits just above
 		w.sharedSize += xattrEntrySize(x.name, x.value)
 	}
+
+	w.sharing.ids = ids
+}
+
+// countCarried fills seen and counts, by name and value, the inodes that
+// carry each attribute whose slot is past sharedXattrOver, to
+// sharedXattrOver+1 and no further. An attribute of an inode that cannot
+// hold its own counts as past it, however few carry it: an inode's body is
+// sized in 65535 units of four bytes, and what does not fit it whole is
+// named in the shared area, as an image may store it.
+//
+// The table is the one shareXattrs then keeps the ids in, and it is made
+// once, at the count of the slots that pass sharedXattrOver: about as many
+// as the attributes it will hold.
+func (w *erofsWriter) countCarried() map[xattr]uint32 {
+	past := 0
+
+	w.eachCarried(func(over bool, x xattr, inodes int) {
+		slot := w.sharing.slot(x)
+		was := *slot
+
+		*slot = uint8(min(int(was)+inodes, sharedXattrOver+1)) // #nosec G115 -- at most sharedXattrOver+1
+		if over {
+			*slot = sharedXattrOver + 1
+		}
+
+		if was <= sharedXattrOver && *slot > sharedXattrOver {
+			past++
+		}
+	})
+
+	counts := make(map[xattr]uint32, past)
+
+	w.eachCarried(func(over bool, x xattr, inodes int) {
+		switch {
+		case over:
+			counts[x] = sharedXattrOver + 1
+		case *w.sharing.slot(x) > sharedXattrOver:
+			counts[x] = uint32(
+				min(int(counts[x])+inodes, sharedXattrOver+1),
+			) // #nosec G115 -- at most sharedXattrOver+1
+		}
+	})
+
+	return counts
 }
 
 // eachCarried calls fn for each attribute the entries carry, with how many
