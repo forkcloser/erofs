@@ -1035,8 +1035,6 @@ func chunkMapBytes(chunkFmt uint16, fileSize uint64, blkBits uint8, unit int64) 
 // reader will ever parse back (maxChunkIndexBytes). Both mean the size field
 // cannot be trusted, and carrying it forward would let a corrupt source drive
 // the writer's own allocations — the entry's trailing size is derived from it.
-//
-//nolint:gocognit // one pass over the chunk index, coalescing holes and contiguous extents in place
 func (*Writer) parseChunks(
 	data []byte,
 	chunkFmt uint16,
@@ -1088,20 +1086,7 @@ func (*Writer) parseChunks(
 			// slides every later extent down into the wrong logical offset
 			// and the file reads back unrelated device bytes where it should
 			// read zeros.
-			if len(chunks) > 0 {
-				prev := &chunks[len(chunks)-1]
-				if prev.PhysicalBlock == builder.NullPhysicalBlock &&
-					uint64(prev.Count)+uint64(blocksPerChunk) <= math.MaxUint32 {
-					prev.Count += blocksPerChunk
-
-					continue
-				}
-			}
-
-			chunks = append(chunks, builder.Chunk{
-				PhysicalBlock: builder.NullPhysicalBlock,
-				Count:         blocksPerChunk,
-			})
+			chunks = appendRun(chunks, builder.NullPhysicalBlock, blocksPerChunk, 0)
 
 			continue
 		}
@@ -1123,27 +1108,13 @@ func (*Writer) parseChunks(
 			return nil, err
 		}
 
-		if len(chunks) > 0 {
-			prev := &chunks[len(chunks)-1]
-			if prev.PhysicalBlock != builder.NullPhysicalBlock &&
-				prev.DeviceID == deviceID &&
-				prev.PhysicalBlock+uint64(prev.Count) == physBlock &&
-				uint64(prev.Count)+uint64(blocksPerChunk) <= math.MaxUint32 {
-				prev.Count += blocksPerChunk
-				continue
-			}
-		}
-
-		chunks = append(chunks, builder.Chunk{
-			PhysicalBlock: physBlock,
-			Count:         blocksPerChunk,
-			DeviceID:      deviceID,
-		})
+		chunks = appendRun(chunks, physBlock, blocksPerChunk, deviceID)
 	}
 
-	// The slice outlives this call on every entry that shares the inode, so
-	// hand back one sized to its contents rather than to append's last step.
-	return slices.Clip(chunks), nil
+	// The slice outlives this call on every entry that shares the inode: a
+	// copy of it at its length, since what append grew keeps the room of
+	// its last step, up to a quarter more, whatever its capacity is cut to.
+	return slices.Clone(chunks), nil
 }
 
 // parseXattrsFromBuf parses xattr entries from an in-memory buffer into
@@ -1421,7 +1392,9 @@ func parseBlockMap(
 	chunkBits := blkBits + uint8(chunkFmt&disk.LayoutChunkFormatBits)
 	// #nosec G115 -- chunkBits is at least 9, the smallest block, so the count is below 1<<55
 	nchunks := int((fileSize-1)>>chunkBits) + 1
-	blocksPerChunk := uint64(1) << (chunkBits - blkBits)
+	// At most 1<<31 blocks, the format's five chunk bits: within the
+	// uint32 a builder.Chunk counts blocks in.
+	blocksPerChunk := uint32(1) << (chunkBits - blkBits)
 
 	if len(data) < nchunks*4 {
 		return nil, fmt.Errorf("block map of %d entries truncated at %d bytes: %w", nchunks, len(data), ErrCorrupt)
@@ -1433,7 +1406,7 @@ func parseBlockMap(
 		addr := binary.LittleEndian.Uint32(data[i*4:])
 
 		if addr == disk.NullAddr {
-			chunks = append(chunks, deviceChunks(builder.NullPhysicalBlock, blocksPerChunk, 0)...)
+			chunks = appendRun(chunks, builder.NullPhysicalBlock, blocksPerChunk, 0)
 
 			continue
 		}
@@ -1443,10 +1416,32 @@ func parseBlockMap(
 			return nil, err
 		}
 
-		chunks = append(chunks, deviceChunks(start, blocksPerChunk, dev)...)
+		chunks = appendRun(chunks, start, blocksPerChunk, dev)
 	}
 
-	return chunks, nil
+	// The slice outlives this call on every entry that shares the inode: a
+	// copy of it at its length, since what append grew keeps the room of
+	// its last step, up to a quarter more, whatever its capacity is cut to.
+	return slices.Clone(chunks), nil
+}
+
+// appendRun adds a chunk of that many blocks at start on device, a hole
+// from the null block, to the chunks of a file: as more of the last run
+// when it follows it and the run's count holds it, as a run of its own
+// otherwise. The two forms of a chunk map are read into the same runs by it.
+func appendRun(chunks []builder.Chunk, start uint64, blocks uint32, device uint16) []builder.Chunk {
+	chunk := builder.Chunk{PhysicalBlock: start, Count: blocks, DeviceID: device}
+
+	if len(chunks) > 0 {
+		last := &chunks[len(chunks)-1]
+		if follows(last, &chunk) && uint64(last.Count)+uint64(blocks) <= math.MaxUint32 {
+			last.Count += blocks
+
+			return chunks
+		}
+	}
+
+	return append(chunks, chunk)
 }
 
 // flatChunks names the blocks from start on the devices the kernel's
