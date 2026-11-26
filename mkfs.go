@@ -1123,18 +1123,10 @@ func (fsys *Writer) Close() error {
 	}
 
 	ew := &erofsWriter{
-		buildTime:   buildTime,
-		buildTimeNs: fsys.buildTimeNs,
-		devices:     fsys.devices,
-		blockSize:   fsys.blockSize,
-		// chunkBits 0 makes the chunk size equal the block size, the one
-		// granularity at which any extent list is mapped exactly: a chunk
-		// index carries one mapping per chunk, while chunks and DataRange
-		// describe extents per block, and a larger chunk swallows an extent
-		// or hole boundary that falls inside it. It is the floor: planLayout
-		// gives each file the largest chunk its own boundaries allow
-		// (runChunkBits).
-		chunkBits:    0,
+		buildTime:    buildTime,
+		buildTimeNs:  fsys.buildTimeNs,
+		devices:      fsys.devices,
+		blockSize:    fsys.blockSize,
 		noInlineData: fsys.noInlineData,
 		zeroBuf:      make([]byte, fsys.blockSize),
 	}
@@ -1497,7 +1489,7 @@ type erofsEntry struct {
 	// For regular files — metadata-only mode
 	chunks       []builder.Chunk
 	contiguous   bool  // data blocks are contiguous; use large chunk size
-	chunkBits    uint8 // per-entry chunk bits (0 = use global)
+	chunkBits    uint8 // log2 of the entry's chunk size in blocks; 0 is a chunk a block
 	metadataOnly bool  // chunk-based layout even without chunks
 	// tail is an inline end to copy from a source image, written as one data
 	// block of this image at tailBlkAddr and named by the last chunk.
