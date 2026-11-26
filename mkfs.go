@@ -30,6 +30,21 @@ import (
 // "/" all name the root. This is deliberately more forgiving than the
 // [fs.FS] convention the reader enforces.
 //
+// A Writer holds the tree it is given in memory until Close, and no file's
+// data: under 2 KiB, and for each name the name's path and under 512 bytes,
+// or under 768 for a file of an image copied with its data. On top of that
+// come a symbolic link's target, sixteen bytes for each run of blocks that
+// follow each other in a file that a metadata-only copy leaves in its source
+// or that has holes, and the extended attributes: a name and a value once
+// for all the entries a CopyFrom found them on, and, for each entry Setxattr
+// gave them to, the strings it was given, kept as they are and not copied,
+// with 32 bytes for each attribute of each distinct list of them. Each of
+// these is held in the size the allocator rounds it up to, a quarter more at
+// most for one of a hundred bytes or more. An image that was copied, with
+// its data or without, stays open until Close: under 1 KiB of its own, its
+// tables of devices and of long attribute prefixes, and what it kept of its
+// shared attributes as it was read, under 1.5 MiB.
+//
 // A Writer is not safe for concurrent use: every method, including those on
 // the [File] it hands out, must be called from one goroutine at a time.
 type Writer struct {

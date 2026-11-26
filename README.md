@@ -262,6 +262,22 @@ The `fs.FS` from `Open` is safe for concurrent use; the files it opens and a
 as it reads them, a mebibyte of them at most: the label every file of a tree
 names is read once.
 
+A `Writer` holds the tree it is given in memory until `Close`, and no file's
+data: under 2 KiB, and for each name the name's path and under 512 bytes, or
+under 768 for a file of an image copied with its data, so that a tree of a
+million names with paths of 50 bytes is under 600 MB, and under 850 MB copied
+whole from an image. On top of that come a symbolic link's target, sixteen bytes
+for each run of blocks that follow each other in a file that a metadata-only
+copy leaves in its source or that has holes, and the extended attributes: a name
+and a value once for all the entries a `CopyFrom` found them on, and, for each
+entry `Setxattr` gave them to, the strings it was given, kept as they are and
+not copied, with 32 bytes for each attribute of each distinct list of them. Each
+of these is held in the size the allocator rounds it up to, a quarter more at
+most for one of a hundred bytes or more. An image that was copied, with its data
+or without, stays open until `Close`: under 1 KiB of its own, its tables of
+devices and of long attribute prefixes, and what it kept of its shared
+attributes as it was read, under 1.5 MiB.
+
 ## Releasing
 
 Versions are signed annotated tags following semantic versioning, cut from
