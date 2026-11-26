@@ -295,11 +295,12 @@ func (w *erofsWriter) write(out io.WriteSeeker) error {
 }
 
 // writeSeekable uses a data-first on-disk layout: block0 (placeholder),
-// data blocks, metadata. After everything is written, it seeks back to
+// data blocks, the shared xattr area when there is one, metadata. After
+// everything is written, it seeks back to
 // write the real superblock. This matches how mkfs.erofs lays out
 // streaming sources — data is written as it arrives, metadata last.
 func (w *erofsWriter) writeSeekable(out io.WriteSeeker) error {
-	// Data-first layout: sbArea, data blocks, metadata.
+	// Data-first layout: sbArea, data blocks, shared xattr area, metadata.
 	// Set metaBlkAddr to a sentinel so assignDataBlocks uses data-first.
 	w.metaBlkAddr = 0xFFFFFFFF
 	w.assignDataBlocks()
