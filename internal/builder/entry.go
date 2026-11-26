@@ -28,7 +28,6 @@ type Entry struct {
 	Chunks       []Chunk   // physical block refs (metadata-only mode)
 	ChunksOfData bool      // Chunks count the blocks of Data, device 0, from zero: Data leaves the file's holes out
 	Contiguous   bool      // data blocks are contiguous; flat-plain is sufficient
-	MetadataOnly bool      // chunk-based layout even without chunks
 }
 
 // NullPhysicalBlock is the sentinel value for Chunk.PhysicalBlock that marks
