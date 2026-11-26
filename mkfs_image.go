@@ -515,7 +515,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		// were, for the first name, and a file of many names has them read
 		// once.
 		if typ != disk.StatTypeDir && nlink > 1 {
-			if prior, ok := fsys.copyLinks[hardlinkKey{0, cur.nid}]; ok && !prior.removed {
+			if prior, ok := fsys.copyLinks[hardlinkKey{0, cur.nid}]; ok {
 				if err := fsys.addAlias(cur.path, prior); err != nil {
 					return err
 				}

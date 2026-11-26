@@ -1,13 +1,16 @@
 package erofs_test
 
 import (
+	"archive/tar"
 	"bytes"
+	"errors"
 	"io/fs"
 	"slices"
 	"testing"
 	"testing/fstest"
 
 	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/erofs/internal/corpus"
 )
 
 // mergedLayers is lower with upper merged over it, by each path a copy
@@ -168,6 +171,88 @@ func TestContractMergeMarkerSparesItsOwnLayer(t *testing.T) {
 					t.Errorf("%s, by %s: %s reads %q, %v; want %q", name, route, p, data, err, want)
 				}
 			}
+		}
+	}
+}
+
+// TestContractMergeMarkerSparesEveryNameOfItsLayersFile: a whiteout that
+// names a file of its own layer, one that sorts before it, takes the file
+// of the layer below and leaves the layer's own with every name it has: the
+// name the marker bears and the one that comes after the marker are one
+// file of two links, through the walk of a tree and through the copy of an
+// image's metadata.
+func TestContractMergeMarkerSparesEveryNameOfItsLayersFile(t *testing.T) {
+	t.Parallel()
+
+	lower := writeImage(t, []corpus.Node{
+		{Path: "-a", Type: tar.TypeReg, Mode: 0o644, Data: []byte("lower"), Sec: corpus.BuildTime},
+	})
+	upper := writeImage(t, []corpus.Node{
+		{Path: "-a", Type: tar.TypeReg, Mode: 0o644, Data: []byte("upper"), Sec: corpus.BuildTime},
+		{Path: ".wh.-a", Type: tar.TypeReg, Mode: 0o644, Sec: corpus.BuildTime},
+		{Path: "zlink", Type: tar.TypeLink, Link: "-a", Sec: corpus.BuildTime},
+	})
+
+	for route, opts := range map[string][]erofs.CopyOpt{
+		"the walk":         nil,
+		"the image's copy": {erofs.MetadataOnly()},
+	} {
+		out := &testBuffer{}
+		w := erofs.Create(out)
+
+		if err := errors.Join(
+			w.CopyFrom(openWithDevices(t, lower), opts...),
+			w.CopyFrom(openWithDevices(t, upper), append([]erofs.CopyOpt{erofs.Merge()}, opts...)...),
+		); err != nil {
+			t.Fatalf("by %s: %v", route, err)
+		}
+
+		if err := w.Close(); err != nil {
+			t.Fatalf("by %s: %v", route, err)
+		}
+
+		var devices [][]byte
+		if opts != nil {
+			devices = [][]byte{lower, upper}
+		}
+
+		fsys := openWithDevices(t, out.Bytes(), devices...)
+
+		entries, err := fs.ReadDir(fsys, ".")
+		if err != nil {
+			t.Fatalf("by %s: %v", route, err)
+		}
+
+		if len(entries) != 2 || entries[0].Name() != "-a" || entries[1].Name() != "zlink" {
+			t.Errorf("by %s: the root lists %v; want -a and zlink", route, entries)
+
+			continue
+		}
+
+		var inodes []uint64
+
+		for _, name := range []string{"-a", "zlink"} {
+			info, err := fs.Stat(fsys, name)
+			if err != nil {
+				t.Fatalf("by %s: %v", route, err)
+			}
+
+			st, ok := info.Sys().(*erofs.Stat)
+			if !ok || st.Nlink != 2 {
+				t.Errorf("by %s: %s has Sys() %v; want a file of 2 links", route, name, info.Sys())
+
+				continue
+			}
+
+			inodes = append(inodes, st.Ino)
+
+			if data, err := fs.ReadFile(fsys, name); err != nil || string(data) != "upper" {
+				t.Errorf("by %s: %s reads %q, %v; want the upper layer's file", route, name, data, err)
+			}
+		}
+
+		if len(inodes) == 2 && inodes[0] != inodes[1] {
+			t.Errorf("by %s: -a is inode %d and zlink %d; want one file", route, inodes[0], inodes[1])
 		}
 	}
 }

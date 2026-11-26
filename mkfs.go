@@ -727,9 +727,12 @@ type hardlinkKey struct {
 }
 
 // listedOnce is a source as the walk reads it: its directories are refused,
-// before any of their entries is visited, when they list a name twice. The
-// walk opens what it copies by name, so of two entries under one name it
-// would read one's content for both.
+// before any of their entries is visited, when they list a name twice or a
+// name that is not one. The walk opens what it copies by name, so of two
+// entries under one name it would read one's content for both; and it joins
+// a name to its directory, so a name that is not one path element is
+// another path: an entry of another directory, the same path a second
+// time, or a merge marker where the source has none.
 type listedOnce struct{ fs.FS }
 
 func (l listedOnce) Stat(name string) (fs.FileInfo, error) {
@@ -744,9 +747,14 @@ func (l listedOnce) ReadDir(name string) ([]fs.DirEntry, error) {
 		return entries, err //nolint:wrapcheck // the source's own error, as the walk gets it without this wrapper
 	}
 
-	for i := 1; i < len(entries); i++ {
-		if entries[i].Name() == entries[i-1].Name() {
-			return nil, fmt.Errorf("directory %s lists the name %q twice: %w", name, entries[i].Name(), ErrCorrupt)
+	for i, e := range entries {
+		listed := e.Name()
+		if listed == "" || listed == "." || listed == ".." || strings.Contains(listed, "/") {
+			return nil, fmt.Errorf("directory %s lists %q, which is not a name: %w", name, listed, ErrCorrupt)
+		}
+
+		if i > 0 && listed == entries[i-1].Name() {
+			return nil, fmt.Errorf("directory %s lists the name %q twice: %w", name, listed, ErrCorrupt)
 		}
 	}
 
@@ -773,7 +781,9 @@ func (l listedOnce) ReadDir(name string) ([]fs.DirEntry, error) {
 // reach, as under a bind mount, is copied at each, as mkfs.erofs copies it.
 // A directory that lists a name twice is refused whatever the source: a lookup
 // finds one of the two entries, and the copy would hold that one's content
-// under the other's metadata.
+// under the other's metadata. So is one that lists what is not a name, as
+// fs.DirEntry has it: an empty one, "." or "..", or one with a slash, which
+// joined to its directory is a path the source did not name.
 // A copy is the size of the tree it copies, not of its source: an EROFS
 // image may store once what many of its files name, and the copy stores it
 // for each of them. With its data, a file is written at its logical size,
@@ -2056,7 +2066,7 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 	// take part: their link count reflects child directories, not names.
 	if typ != disk.StatTypeDir && be.Ino != 0 && be.Nlink > 1 && fsys.copyLinks != nil {
 		key := hardlinkKey{be.Dev, be.Ino}
-		if prior, ok := fsys.copyLinks[key]; ok && !prior.removed {
+		if prior, ok := fsys.copyLinks[key]; ok {
 			if c, ok := be.Data.(io.Closer); ok {
 				_ = c.Close()
 			}
