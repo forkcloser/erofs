@@ -353,7 +353,14 @@ func (a *assembler) inode(e AEntry) []byte {
 	b = binary.LittleEndian.AppendUint16(b, e.Mode)
 
 	if a.l.Extended {
-		b = binary.LittleEndian.AppendUint16(b, 0)            // i_nb: startblk_hi
+		// i_nb is the start block's high sixteen bits here: a hole is every
+		// bit of the 48 set, not the low 32 alone.
+		hi := uint16(0)
+		if e.Hole > 0 {
+			hi = 0xFFFF
+		}
+
+		b = binary.LittleEndian.AppendUint16(b, hi)
 		b = binary.LittleEndian.AppendUint64(b, uint64(size)) // #nosec G115 -- the layouts' own sizes
 		b = binary.LittleEndian.AppendUint32(b, u)
 		b = binary.LittleEndian.AppendUint32(b, 0) // i_ino
