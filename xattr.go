@@ -123,6 +123,70 @@ func (img *image) sharedXattr(addr int64) (entry disk.XattrEntry, body string, e
 	return entry, string(long), nil
 }
 
+// sharedXattrHeld is how many bytes of shared entries an image keeps as it
+// decoded them: the labels and capabilities of a tree, a few kilobytes that
+// every inode names, are then read once. An entry that would take the image
+// past it is read for each reference.
+const sharedXattrHeld = 1 << 20
+
+// sharedEntryCost is what a held entry counts for beside its strings, so
+// that entries of no bytes, as those the kernel does not list are held, are
+// bounded too.
+const sharedEntryCost = 64
+
+// sharedEntry is an entry of the shared xattr area as an inode's attributes
+// take it: its full name and its value, and whether the kernel lists it.
+type sharedEntry struct {
+	name, value string
+	listed      bool
+}
+
+// sharedEntryAt is the entry a reference names: ref counts 4-byte units
+// from the start of the shared xattr area. A failed read is held by nothing:
+// the next reference reads again.
+func (img *image) sharedEntryAt(ref uint32) (sharedEntry, error) {
+	img.sharedMu.RLock()
+	held, ok := img.shared[ref]
+	img.sharedMu.RUnlock()
+
+	if ok {
+		return held, nil
+	}
+
+	// Widened before scaling: the multiply would otherwise wrap in uint32.
+	addr := int64(img.sb.XattrBlkAddr)<<img.sb.BlkSizeBits + int64(ref)*4
+
+	entry, body, err := img.sharedXattr(addr)
+	if err != nil {
+		return sharedEntry{}, err
+	}
+
+	var (
+		shared sharedEntry
+		cost   = sharedEntryCost
+	)
+
+	if prefix, listed := img.listedPrefix(entry.NameIndex); listed {
+		shared = sharedEntry{name: prefix + body[:entry.NameLen], value: body[entry.NameLen:], listed: true}
+		// The value keeps all of body.
+		cost += len(shared.name) + len(body)
+	}
+
+	img.sharedMu.Lock()
+	defer img.sharedMu.Unlock()
+
+	if _, raced := img.shared[ref]; !raced && img.sharedHeld+cost <= sharedXattrHeld {
+		if img.shared == nil {
+			img.shared = map[uint32]sharedEntry{}
+		}
+
+		img.shared[ref] = shared
+		img.sharedHeld += cost
+	}
+
+	return shared, nil
+}
+
 // xattrsListable refuses the attributes of an inode in an image that says
 // its shared entries are in the metabox: Open takes no image with one, and
 // the kernel, with none, fails the listing of every inode that has an xattr
@@ -196,25 +260,15 @@ func loadXattrs(b *file, stat *Stat) (err error) {
 			}
 		}
 
-		xattrAddr := binary.LittleEndian.Uint32(xb[:4])
+		var shared sharedEntry
 
-		// TODO: Cache shared xattr blocks
-		// xattrAddr counts 4-byte units from the shared xattr area, and is
-		// widened before scaling: the multiply would otherwise wrap in uint32.
-		sharedAddr := int64(b.img.sb.XattrBlkAddr)<<b.img.sb.BlkSizeBits + int64(xattrAddr)*4
-
-		var (
-			xattrEntry disk.XattrEntry
-			body       string
-		)
-
-		xattrEntry, body, err = b.img.sharedXattr(sharedAddr)
+		shared, err = b.img.sharedEntryAt(binary.LittleEndian.Uint32(xb[:4]))
 		if err != nil {
 			return fmt.Errorf("shared xattr for nid %d: %w", b.nid, err)
 		}
 
-		if prefix, listed := b.img.listedPrefix(xattrEntry.NameIndex); listed {
-			if err = setXattr(stat, b.nid, prefix+body[:xattrEntry.NameLen], body[xattrEntry.NameLen:]); err != nil {
+		if shared.listed {
+			if err = setXattr(stat, b.nid, shared.name, shared.value); err != nil {
 				return err
 			}
 		}

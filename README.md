@@ -239,7 +239,9 @@ one file is 512 chunks of one block is a copy of over two megabytes. A caller
 that copies an image it does not trust bounds what it writes to.
 
 The `fs.FS` from `Open` is safe for concurrent use; the files it opens and a
-`Writer` are not.
+`Writer` are not. It keeps the extended attributes of the image's shared area
+as it reads them, a mebibyte of them at most: the label every file of a tree
+names is read once.
 
 ## Releasing
 
