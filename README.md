@@ -241,14 +241,18 @@ would reach, and one with a NUL, which would read back as another name. It
 stores xattr names of at most 255 bytes after their prefix and values of at
 most 65535 bytes. `Chown` refuses negative ids.
 
+An extended attribute, name and value, that more than two files carry is
+stored once, in the image's shared area, and each file names it there, as
+`mkfs.erofs` stores it by default. So are the attributes of a file whose
+inode cannot hold them all itself. A file names at most 255 attributes
+there, and holds the others.
+
 None of these bounds a copy by the size of its source. `CopyFrom` writes the
 tree it walks, and an EROFS image may store once what many of its files name:
 a block that many chunks map, a block of entries that several directories
-list as theirs, an attribute in the shared area. The copy stores it for each
+list as theirs. The copy stores it for each
 of them: with its data, a file at its logical size, and every directory's
-names. An attribute is written with each file that carries it, as the Writer
-is today: it shares none
-(https://github.com/forkcloser/erofs/issues/264). An image of 8 KiB whose
+names. An image of 8 KiB whose
 one file is 512 chunks of one block is a copy of over two megabytes. A caller
 that copies an image it does not trust bounds what it writes to.
 

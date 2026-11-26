@@ -43,11 +43,22 @@ type erofsWriter struct {
 	entries     []*erofsEntry // all entries in NID order
 	rootNid     uint64
 	metaBlkAddr uint32
-	totalInodes uint64
-	buildTime   uint64
-	buildTimeNs uint32
-	devices     []uint64 // per-device block counts (one slot per entry)
-	blockSize   int
+	// The shared xattr area: the attributes more than sharedXattrOver
+	// inodes carry, stored once, in blocks of their own between the data
+	// and the metadata. shared is the area in its order, sharedSize its
+	// bytes, and sharing says of an attribute where it is there. bodyIDs
+	// and bodyOwn are one inode's references and own entries (xattrBody).
+	shared       []xattr
+	sharedSize   int
+	sharing      xattrSharing
+	xattrBlkAddr uint32
+	bodyIDs      []uint32
+	bodyOwn      []xattr
+	totalInodes  uint64
+	buildTime    uint64
+	buildTimeNs  uint32
+	devices      []uint64 // per-device block counts (one slot per entry)
+	blockSize    int
 	// noInlineData keeps every regular file's data in whole blocks: no
 	// tail packed beside the inode.
 	noInlineData bool
@@ -187,7 +198,7 @@ func (w *erofsWriter) checkLimits() error {
 	// and metadata alias each other's blocks. Summed entry by entry, so the
 	// count stops at the limit long before it could overflow.
 	blockSize := int64(w.blockSize)
-	blocks := int64(w.sbAreaBlocks()) + (int64(w.metadataBytes())+blockSize-1)/blockSize
+	blocks := int64(w.sbAreaBlocks()) + int64(w.sharedBlocks()) + (int64(w.metadataBytes())+blockSize-1)/blockSize
 
 	for _, entry := range w.entries {
 		ds := int64(w.flatPlainDataSize(entry))
@@ -306,6 +317,10 @@ func (w *erofsWriter) writeSeekable(out io.WriteSeeker) error {
 	// The metadata goes out as it is serialized, never held whole: it is
 	// every inode, attribute, directory and inline file of the image.
 	meta := bufio.NewWriterSize(out, len(w.copyBuf))
+	if err := w.writeSharedXattrs(meta); err != nil {
+		return err
+	}
+
 	if err := w.writeMetadataInodes(meta); err != nil {
 		return err
 	}
@@ -361,10 +376,15 @@ func (w *erofsWriter) assignDataBlocks() {
 		// #nosec G115 -- checkLimits bounded the image's block count to 32 bits
 		w.assignFlatPlainAddrs(uint32(w.sbAreaBlocks() + metaBlocks))
 	} else {
-		// Data-first: data starts after superblock area.
-		// Metadata follows data.
+		// Data-first: data starts after superblock area. The shared xattr
+		// area follows the data, and the metadata follows it.
 		// #nosec G115 -- checkLimits bounded the image's block count to 32 bits
 		w.metaBlkAddr = w.assignFlatPlainAddrs(uint32(w.sbAreaBlocks()))
+
+		if blocks := w.sharedBlocks(); blocks > 0 {
+			w.xattrBlkAddr = w.metaBlkAddr
+			w.metaBlkAddr += uint32(blocks) // #nosec G115 -- checkLimits bounded the image's block count to 32 bits
+		}
 	}
 }
 
@@ -454,7 +474,7 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 		}
 	}
 
-	totalBlocks := w.sbAreaBlocks() + metaBlocks + dataBlocks
+	totalBlocks := w.sbAreaBlocks() + w.sharedBlocks() + metaBlocks + dataBlocks
 
 	var (
 		featureIncompat uint32
@@ -488,6 +508,7 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 		BuildTimeNs:     w.buildTimeNs,
 		Blocks:          uint32(totalBlocks), // #nosec G115 -- checkLimits bounded the block count to 32 bits
 		MetaBlkAddr:     w.metaBlkAddr,
+		XattrBlkAddr:    w.xattrBlkAddr,
 		FeatureIncompat: featureIncompat,
 		ExtraDevices:    extraDevices,
 		DevtSlotOff:     devtSlotOff,
@@ -717,43 +738,89 @@ func (w *erofsWriter) writeInode(buf io.Writer, e *erofsEntry) error {
 }
 
 func (w *erofsWriter) writeXattrs(buf io.Writer, e *erofsEntry) error {
+	w.xattrBody(e.xattrs, true)
+
 	// XattrHeader: 4-byte name filter + 1-byte shared count + 7 reserved = 12 bytes
 	var xhdr [12]byte
 	binary.LittleEndian.PutUint32(xhdr[0:4], math.MaxUint32) // name filter unused
+	xhdr[4] = uint8(len(w.bodyIDs))                          // #nosec G115 -- xattrBody shares at most maxSharedXattrs
 
 	if _, err := buf.Write(xhdr[:]); err != nil {
 		return err
 	}
 
-	for _, x := range e.xattrs {
-		value := x.value
-		nameIndex, suffix := xattrSplit(x.name)
+	// The references to the shared area come first, then the entries of
+	// the inode's own (xattr.c: erofs_init_inode_xattrs).
+	var id [4]byte
+	for _, shared := range w.bodyIDs {
+		binary.LittleEndian.PutUint32(id[:], shared)
 
-		var xent [disk.SizeXattrEntry]byte
-
-		xent[0] = uint8(len(suffix)) // #nosec G115 -- checkLimits ran validateXattr: at most maxXattrNameLen
-		xent[1] = nameIndex
-		// #nosec G115 -- checkLimits ran validateXattr: at most maxXattrValueLen
-		binary.LittleEndian.PutUint16(xent[2:4], uint16(len(value)))
-
-		if _, err := buf.Write(xent[:]); err != nil {
+		if _, err := buf.Write(id[:]); err != nil {
 			return err
 		}
+	}
 
-		if _, err := io.WriteString(buf, suffix); err != nil {
+	for _, x := range w.bodyOwn {
+		if err := w.writeXattrEntry(buf, x); err != nil {
 			return err
 		}
+	}
 
-		if _, err := io.WriteString(buf, value); err != nil {
+	return nil
+}
+
+// writeXattrEntry writes one attribute as the format stores it, in an inode
+// and in the shared area alike: the entry, the name after its prefix, the
+// value, padded to four bytes.
+func (w *erofsWriter) writeXattrEntry(buf io.Writer, x xattr) error {
+	nameIndex, suffix := xattrSplit(x.name)
+
+	var xent [disk.SizeXattrEntry]byte
+
+	xent[0] = uint8(len(suffix)) // #nosec G115 -- checkLimits ran validateXattr: at most maxXattrNameLen
+	xent[1] = nameIndex
+	// #nosec G115 -- checkLimits ran validateXattr: at most maxXattrValueLen
+	binary.LittleEndian.PutUint16(xent[2:4], uint16(len(x.value)))
+
+	if _, err := buf.Write(xent[:]); err != nil {
+		return err
+	}
+
+	if _, err := io.WriteString(buf, suffix); err != nil {
+		return err
+	}
+
+	if _, err := io.WriteString(buf, x.value); err != nil {
+		return err
+	}
+
+	// Pad to 4-byte boundary
+	entryLen := disk.SizeXattrEntry + len(suffix) + len(x.value)
+	if entryLen%4 != 0 {
+		if _, err := buf.Write(w.zeroBuf[:4-entryLen%4]); err != nil {
 			return err
 		}
+	}
 
-		// Pad to 4-byte boundary
-		entryLen := disk.SizeXattrEntry + len(suffix) + len(value)
-		if entryLen%4 != 0 {
-			if _, err := buf.Write(w.zeroBuf[:4-entryLen%4]); err != nil {
-				return err
-			}
+	return nil
+}
+
+// sharedBlocks is how many blocks the shared xattr area takes.
+func (w *erofsWriter) sharedBlocks() int {
+	return (w.sharedSize + w.blockSize - 1) / w.blockSize
+}
+
+// writeSharedXattrs writes the shared xattr area, padded to a block.
+func (w *erofsWriter) writeSharedXattrs(buf io.Writer) error {
+	for _, x := range w.shared {
+		if err := w.writeXattrEntry(buf, x); err != nil {
+			return err
+		}
+	}
+
+	if pad := w.sharedBlocks()*w.blockSize - w.sharedSize; pad > 0 {
+		if _, err := buf.Write(w.zeroBuf[:pad]); err != nil {
+			return err
 		}
 	}
 

@@ -798,9 +798,7 @@ func (l listedOnce) ReadDir(name string) ([]fs.DirEntry, error) {
 // image may store once what many of its files name, and the copy stores it
 // for each of them. With its data, a file is written at its logical size,
 // whatever blocks its chunks share; a directory gets every name it lists,
-// whatever block its entries share with another directory's. An attribute
-// the image keeps once, in its shared area, is written with each file that
-// carries it: the Writer, as it is today, shares none.
+// whatever block its entries share with another directory's.
 // Nothing here bounds a copy by the bytes of its source: what the caller
 // writes to does.
 // A hole in a file of an EROFS image stays a hole in the copy, with its

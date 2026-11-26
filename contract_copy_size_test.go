@@ -72,14 +72,12 @@ func TestContractCopyStoresADataBlockForEachChunkThatNamesIt(t *testing.T) {
 	}
 }
 
-// TestContractCopyStoresAnAttributeForEachFileThatNamesIt: an attribute a
+// TestContractCopyStoresOnceAnAttributeItsFilesShare: an attribute a
 // source image stores once, in its shared area, and that many of its files
-// name, is in the copy for each of them: 64 files that name one value of
-// 60000 bytes are a copy of over 64 times the value, from an image of a
-// few blocks. That is the Writer as it is today, which shares no attribute:
-// one that does (https://github.com/forkcloser/erofs/issues/264) writes the
-// value once, and this size goes with the sentence it holds.
-func TestContractCopyStoresAnAttributeForEachFileThatNamesIt(t *testing.T) {
+// name, is in the copy once too, in the copy's own shared area: 64 files
+// that name one value of 60000 bytes are a copy of under twice its source,
+// a few blocks, and each of them has the value.
+func TestContractCopyStoresOnceAnAttributeItsFilesShare(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -109,9 +107,22 @@ func TestContractCopyStoresAnAttributeForEachFileThatNamesIt(t *testing.T) {
 
 	image, got := copyWithData(t, src)
 
-	if len(image) < files*length {
-		t.Errorf("the copy of a %d byte image is %d bytes, under the %d of its files' attributes",
-			src.size, len(image), files*length)
+	if int64(len(image)) > 2*src.size {
+		t.Errorf("the copy of a %d byte image is %d bytes; want the value once, under twice the source",
+			src.size, len(image))
+	}
+
+	// Metadata-only, the value is once in the copy as well.
+	sink := &testBuffer{}
+	mw := erofs.Create(sink)
+
+	if err := errors.Join(mw.CopyFrom(openWithDevices(t, data), erofs.MetadataOnly()), mw.Close()); err != nil {
+		t.Fatal(err)
+	}
+
+	if int64(len(sink.Bytes())) > 2*src.size {
+		t.Errorf("the metadata-only copy of a %d byte image is %d bytes; want the value once, under twice the source",
+			src.size, len(sink.Bytes()))
 	}
 
 	for i := range files {
