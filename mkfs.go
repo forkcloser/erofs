@@ -1906,7 +1906,7 @@ func (fsys *Writer) addRegular(src fs.FS, fpath, p string, info fs.FileInfo, be 
 						be = &builder.Entry{}
 					}
 
-					be.Data = dr
+					be.Data = &imageData{from: dr, size: ino.size, left: ino.size}
 
 					return fsys.add(p, &entryFileInfo{info: info, sys: be})
 				}
@@ -2243,6 +2243,26 @@ func (fsys *Writer) toDataFile(p string, fe *fsEntry, data io.Reader, size uint6
 	}
 
 	return f.Close()
+}
+
+// imageData is the data of an image's file read from where it lies. The
+// device's end before the file's is the image cut short, ErrCorrupt as the
+// file's own Read says it: left as an end of file, the Writer would report
+// a source that shrank.
+type imageData struct {
+	from       io.Reader
+	size, left int64
+}
+
+func (d *imageData) Read(p []byte) (int, error) {
+	n, err := d.from.Read(p)
+	d.left -= int64(n)
+
+	if d.left > 0 && errors.Is(err, io.EOF) {
+		err = errEndsEarly(d.size)
+	}
+
+	return n, err
 }
 
 // heldXattrs is attrs, an entry's attributes in the order of their names, as
