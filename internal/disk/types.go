@@ -193,28 +193,6 @@ type XattrEntry struct {
 	// Name+Value
 }
 
-// XattrLongPrefixitem is a long xattr name prefix table entry
-// (erofs_xattr_long_prefix_item).
-type XattrLongPrefixitem struct {
-	PrefixAddr uint32 // address of the long prefix
-	PrefixLen  uint8  // length of the long prefix
-}
-
-// XattrLongPrefix is the on-disk long xattr name prefix
-// (erofs_xattr_long_prefix); the infix follows it.
-type XattrLongPrefix struct {
-	BaseIndex uint8 // short xattr name prefix index
-	// Infix part after short prefix
-}
-
-// InodeChunkIndex is the on-disk chunk index of a chunk-based inode
-// (erofs_inode_chunk_index).
-type InodeChunkIndex struct {
-	StartBlkHi uint16 // part of 48-bit support (not yet implemented)
-	DeviceID   uint16
-	StartBlkLo uint32
-}
-
 // DeviceSlot represents the on-disk device table entry (erofs_deviceslot).
 // See: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/fs/erofs/erofs_fs.h
 type DeviceSlot struct {
