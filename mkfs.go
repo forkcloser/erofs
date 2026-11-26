@@ -3314,6 +3314,11 @@ func (fsys *Writer) chunksToDataFile(fe *fsEntry, data io.Reader) error {
 	n, err := io.CopyBuffer(onlyWriter{fsys.dataFile}, data, fsys.copyBuf())
 	fsys.dataOff += n
 
+	// The source's file is done with here, read or not.
+	if c, ok := data.(io.Closer); ok {
+		_ = c.Close()
+	}
+
 	if err != nil {
 		return fmt.Errorf("mkfs: %s: %w", fe.path, err)
 	}

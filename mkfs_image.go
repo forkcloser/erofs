@@ -1367,6 +1367,13 @@ func (r *rangesReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// Close gives back what the file holds of its map. Whoever reads the data
+// closes it when it is done: the last range may end before the file does,
+// so that no read of it ends the file.
+func (r *rangesReader) Close() error {
+	return r.f.Close()
+}
+
 // deviceChunks names a run of blocks from start on device as chunk runs, each
 // within a chunk's 32-bit count; from the null block, the runs are holes.
 func deviceChunks(start, blocks uint64, device uint16) []builder.Chunk {

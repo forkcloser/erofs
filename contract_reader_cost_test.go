@@ -631,15 +631,15 @@ func TestContractReaderStatAllocatesNothingForAnAbsentChunkMap(t *testing.T) {
 	}
 }
 
-// TestContractReaderReadStopsAtTheFirstChunkOutOfRun: the first Read of a
-// file with chunk indexes learns whether the file is one run on its device,
-// to read it in one go, and stops at the first chunk that does not follow:
-// one byte of a file whose megabyte of indexes all name block 0 costs a
-// piece of the index, not the index. A file that is one run is still read
-// in one go, however long its index.
+// TestContractReaderReadTakesABlockOfTheMapNotTheMap: a Read of a file with
+// chunk indexes reads the block of its map that the read is in, and no more
+// of the map: one byte of a file whose megabyte of indexes all name block 0
+// costs a block of the index, not the index. A file that is one run is read
+// a run at a time, however long its index: sixteen blocks are one read of
+// the image once that block of the map is held.
 //
 //nolint:paralleltest // measures the process's allocations against a budget; a parallel test's would count against it
-func TestContractReaderReadStopsAtTheFirstChunkOutOfRun(t *testing.T) {
+func TestContractReaderReadTakesABlockOfTheMapNotTheMap(t *testing.T) {
 	const (
 		chunks = 1 << 17 // 1 MiB of indexes
 		budget = 128 << 10
