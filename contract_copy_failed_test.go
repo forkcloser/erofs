@@ -3,6 +3,7 @@ package erofs_test
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"testing"
 	"testing/fstest"
@@ -191,4 +192,52 @@ func TestContractACopyRefusedBeforeItBeginsDoesNotFailTheWriter(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestContractCloseReleasesTheSpoolOfAWriterThatFailed: Close releases what
+// the Writer holds on every path that ends it. A Writer that failed, after
+// a CopyFrom that failed for instance, closes its spool when it is closed,
+// as one that wrote its image does: a file of it opened before reads no
+// more.
+func TestContractCloseReleasesTheSpoolOfAWriterThatFailed(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		src  fs.FS
+		fail error
+	}{
+		{"a Writer that wrote its image", flatTree(3), nil},
+		{"a Writer that failed", notOpening{FS: flatTree(3), name: "f00002"}, errDoesNotOpen},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			w := erofs.Create(&sink{}, erofs.WithTempDir(t.TempDir()))
+			writeFile(t, w, "/spooled", []byte("in the spool"))
+
+			if err := w.CopyFrom(tc.src); !errors.Is(err, tc.fail) {
+				t.Fatalf("CopyFrom: %v; want %v", err, tc.fail)
+			}
+
+			f, err := w.Open("/spooled")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			defer func() { _ = f.Close() }()
+
+			if _, err := f.Read(make([]byte, 1)); err != nil {
+				t.Fatalf("the spool does not read before Close: %v", err)
+			}
+
+			if err := w.Close(); !errors.Is(err, tc.fail) {
+				t.Fatalf("Close: %v; want %v", err, tc.fail)
+			}
+
+			if _, err := io.ReadAll(f); !errors.Is(err, fs.ErrClosed) {
+				t.Errorf("the spool reads after Close: %v; want ErrClosed", err)
+			}
+		})
+	}
 }

@@ -1040,9 +1040,12 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 
 // Close writes the EROFS image. The FS must not be used after Close.
 // A Writer that has failed writes nothing: Close returns the error it
-// failed on.
+// failed on. Either way Close closes the Writer's spool.
 func (fsys *Writer) Close() error {
 	if fsys.wErr != nil {
+		// Done with, without an image: nothing else would close the spool.
+		fsys.release()
+
 		return fsys.wErr
 	}
 
@@ -1057,9 +1060,7 @@ func (fsys *Writer) Close() error {
 
 	fsys.closed = true
 
-	if fsys.spool != nil {
-		defer func() { _ = fsys.spool.Close() }()
-	}
+	defer fsys.release()
 
 	fsys.resolveBlockSize()
 
@@ -2240,6 +2241,15 @@ func (fsys *Writer) heldString(s string) string {
 	}
 
 	return s
+}
+
+// release closes the spool. The Writer keeps it, closed: a file of the
+// spool opened before then fails to read, where a spool forgotten would
+// read as an empty file.
+func (fsys *Writer) release() {
+	if fsys.spool != nil {
+		_ = fsys.spool.Close()
+	}
 }
 
 // failed keeps the error a copy ended on as the Writer's own. The part of
