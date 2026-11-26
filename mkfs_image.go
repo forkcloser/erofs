@@ -775,12 +775,22 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				}
 
 				if tail > 0 {
-					end, err := span(trailingAddr, tail)
-					if err != nil {
-						return fmt.Errorf("read inline data for nid %d: %w", cur.nid, err)
+					// Not read here: it is the file's data, and the source's
+					// until Close. Held to the image all the same: after an
+					// inode that ends a block, the image's last one too, the
+					// tail is the block that follows.
+					if trailingAddr > totalBytes-tail {
+						return fmt.Errorf(
+							"inline data for nid %d: %d bytes at offset %d lie outside the %d byte image: %w",
+							cur.nid,
+							tail,
+							trailingAddr,
+							totalBytes,
+							ErrCorrupt,
+						)
 					}
 
-					fe.tail = bytes.Clone(end)
+					fe.tail = inlineTail{img: img, at: trailingAddr, n: int(tail)}
 				}
 			}
 

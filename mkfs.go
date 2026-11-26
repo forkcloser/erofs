@@ -186,6 +186,12 @@ func Create(out io.WriteSeeker, opts ...CreateOpt) *Writer {
 // other source, a subtree of an image behind fs.Sub among them, a file whose
 // DataRange places data is refused, ErrInvalid: the result declares no
 // device for that range to name.
+//
+// The end of a file that an image stores beside the file's inode, shorter
+// than a block, no device can name: it is copied, as one block of the
+// result. It is the file's data, read when the image is written, at Close,
+// and none of it is held until then: the source image must stay as it was,
+// and readable, until Close, as a source copied with its data must.
 func MetadataOnly() CopyOpt {
 	return func(w *Writer) {
 		w.copyMetadataOnly = true
@@ -1323,7 +1329,7 @@ type fsEntry struct {
 	// tail is the inline end of a metadata-only file copied from an image,
 	// shorter than a block: a chunk can only name whole blocks of a device,
 	// so Close writes it as one block of this image after the chunks.
-	tail []byte
+	tail inlineTail
 
 	// Hardlinks. linkTo makes this entry a pure additional NAME for another
 	// entry's inode (always the final target: Link resolves chains at call
@@ -1356,6 +1362,15 @@ type fsEntry struct {
 	// caller's handle.
 	removed      bool
 	metadataOnly bool // from a metadata-only CopyFrom; use chunk-based layout
+}
+
+// inlineTail is the end of a file that an image stores beside the file's
+// inode: where it is, n bytes at an offset of the image, and not the bytes,
+// which are the source's until Close reads them, as a file's data is.
+type inlineTail struct {
+	img *image
+	at  int64
+	n   int
 }
 
 // underRemoved reports whether a directory above e has been removed.
@@ -1454,9 +1469,9 @@ type erofsEntry struct {
 	contiguous   bool  // data blocks are contiguous; use large chunk size
 	chunkBits    uint8 // per-entry chunk bits (0 = use global)
 	metadataOnly bool  // chunk-based layout even without chunks
-	// tail is an inline end copied from a source image, written as one data
+	// tail is an inline end to copy from a source image, written as one data
 	// block of this image at tailBlkAddr and named by the last chunk.
-	tail        []byte
+	tail        inlineTail
 	tailBlkAddr uint32
 
 	// For regular files — full-image mode
