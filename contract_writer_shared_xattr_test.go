@@ -413,3 +413,94 @@ func TestContractWriterSharesFromTheFirstUnitAnInodeCannotHold(t *testing.T) {
 		})
 	}
 }
+
+// TestContractWriterSharesNoAttributeThatTwoFilesCarryHoweverMany: what
+// two files carry stays with each of them, however many such attributes a
+// tree has: fifteen hundred values, each on two files, and no file names
+// one in a shared area, which the image does not have. Each on three
+// files, every file names its own there.
+func TestContractWriterSharesNoAttributeThatTwoFilesCarryHoweverMany(t *testing.T) {
+	t.Parallel()
+
+	const values = 1500
+
+	for _, carriers := range []int{2, 3} {
+		tree := map[string]map[string]string{}
+		names := make([]string, 0, carriers*values)
+
+		for i := range carriers * values {
+			name := fmt.Sprintf("f%05d", i)
+			names = append(names, name)
+			tree[name] = map[string]string{"user.k": fmt.Sprintf("value %d", i/carriers)}
+		}
+
+		img := attributed(t, names, tree)
+		all, shared := sharedOf(t, img, names)
+
+		named := 0
+
+		for _, name := range names {
+			if !maps.Equal(all[name], tree[name]) {
+				t.Fatalf("%s has %v; want %v", name, all[name], tree[name])
+			}
+
+			named += len(shared[name])
+		}
+
+		if want := (carriers - 2) * carriers * values; named != want {
+			t.Errorf(
+				"%d values on %d files each: %d files name theirs in a shared area; want %d",
+				values, carriers, named, want,
+			)
+		}
+	}
+}
+
+// TestContractWriterOrdersTheSharedAreaByNameThenValue: the shared area
+// holds its attributes in the order of their names, and of their values
+// under one name: the places of six attributes, three names with two
+// values each, rise in that order, where the values alone would order them
+// otherwise.
+func TestContractWriterOrdersTheSharedAreaByNameThenValue(t *testing.T) {
+	t.Parallel()
+
+	// In the order they must lie; by value alone the order is another.
+	inOrder := [][2]string{
+		{"user.a", "y"},
+		{"user.a", "z"},
+		{"user.b", "w"},
+		{"user.b", "x"},
+		{"user.c", "u"},
+		{"user.c", "v"},
+	}
+
+	tree := map[string]map[string]string{}
+
+	var names []string
+
+	// Three files carry each attribute, and nothing else.
+	for i, x := range inOrder {
+		for carrier := range 3 {
+			name := fmt.Sprintf("f%d%d", i, carrier)
+			names = append(names, name)
+			tree[name] = map[string]string{x[0]: x[1]}
+		}
+	}
+
+	_, shared := sharedOf(t, attributed(t, names, tree), names)
+
+	last, lastAt := "", uint32(0)
+
+	for i, x := range inOrder {
+		at, is := shared[fmt.Sprintf("f%d0", i)][x[0]]
+		if !is {
+			t.Fatalf("%s=%s is not in the shared area", x[0], x[1])
+		}
+
+		if i > 0 && at <= lastAt {
+			t.Errorf("%s=%s is at %d, not after %s at %d", x[0], x[1], at, last, lastAt)
+		}
+
+		last, lastAt = x[0]+"="+x[1], at
+	}
+}

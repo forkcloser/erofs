@@ -216,3 +216,89 @@ func TestContractReaderFlatInlineFileOnAShortDevice(t *testing.T) {
 		t.Errorf("Read gave %d bytes of a file whose device ends inside it", total)
 	}
 }
+
+// askedPastEnd is a source that counts the reads that begin at its end or
+// after it.
+type askedPastEnd struct {
+	data  []byte
+	asked int
+}
+
+func (s *askedPastEnd) Size() int64 { return int64(len(s.data)) }
+
+func (s *askedPastEnd) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 || off >= int64(len(s.data)) {
+		s.asked++
+
+		return 0, io.EOF
+	}
+
+	n := copy(p, s.data[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+
+	return n, nil
+}
+
+// TestContractReaderHoldsAnInlineEndToTheImage: an inode in the image's
+// last 32 bytes has its inline data at the head of the block after it, a
+// block the image has not. The file is ErrCorrupt by every way of reading
+// it, and the source is asked for nothing at or past its end: a reader
+// that indexes its bytes by the offset it is given would be handed one
+// outside them.
+func TestContractReaderHoldsAnInlineEndToTheImage(t *testing.T) {
+	t.Parallel()
+
+	const bs = 4096
+
+	img := make([]byte, 2*bs)
+	laidSuper(img, 12, 2)
+
+	// The root's inode and its one entry, then the file's inode, the last
+	// 32 bytes of the image.
+	inode := 2*bs - 32
+	dir := laidDirBlock([]laidDirent{{nid: uint64(inode-bs) / 32, ftype: laidFtReg, name: "f"}})
+	laidCompact(img[bs:], laidFlatInline, laidDir, 2, uint32(len(dir)), 0)
+	copy(img[bs+32:], dir)
+	laidCompact(img[inode:], laidFlatInline, laidReg, 1, 100, 0)
+
+	src := &askedPastEnd{data: img}
+
+	fsys, err := erofs.Open(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, err := fs.ReadFile(fsys, "f"); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Errorf("ReadFile: %d bytes, %v; want ErrCorrupt", len(got), err)
+	}
+
+	for _, way := range []string{"Read", "io.Copy"} {
+		f, err := fsys.Open("f")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var n int64
+
+		if way == "Read" {
+			var read int
+
+			read, err = f.Read(make([]byte, 200))
+			n = int64(read)
+		} else {
+			var out bytes.Buffer
+
+			n, err = io.Copy(&out, f)
+		}
+
+		if !errors.Is(err, erofs.ErrCorrupt) {
+			t.Errorf("%s: %d bytes, %v; want ErrCorrupt", way, n, err)
+		}
+	}
+
+	if src.asked != 0 {
+		t.Errorf("the source was asked %d times for bytes at or past its end; want never", src.asked)
+	}
+}
