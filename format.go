@@ -327,7 +327,8 @@ func (w *erofsWriter) countCarried() map[xattr]uint32 {
 // eachCarried calls fn for each attribute the entries carry, with how many
 // inodes in a row carry it at the same place of theirs, counted together:
 // the files of a tree carry the same label one after another. over says
-// that the attribute is one of more than its inode can hold.
+// that the attribute is one of more than its inode can hold, and one of
+// those the inode names in the shared area.
 func (w *erofsWriter) eachCarried(fn func(over bool, x xattr, inodes int)) {
 	var run [xattrPlaces]xattrRun
 
@@ -336,7 +337,10 @@ func (w *erofsWriter) eachCarried(fn func(over bool, x xattr, inodes int)) {
 
 		for i, x := range e.xattrs {
 			if over || i >= len(run) {
-				fn(over, x, 1)
+				// Of what an inode cannot hold, the first maxSharedXattrs
+				// are what it names in the shared area; one past them put
+				// there too would be in the image twice.
+				fn(over && i < maxSharedXattrs, x, 1)
 
 				continue
 			}
