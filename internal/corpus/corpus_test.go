@@ -107,7 +107,7 @@ func anchor(t *testing.T, set corpus.Set, im corpus.Image) {
 
 	corpus.Fsck(t, im)
 
-	ref, err := erofsspec.Parse(im.Img, im.Extra())
+	ref, err := erofsspec.Parse(im.Img, im.Extra()...)
 	if err != nil {
 		t.Errorf("%s: reference: %v", im.Name, err)
 

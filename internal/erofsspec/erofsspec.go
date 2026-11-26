@@ -179,11 +179,8 @@ type Image struct {
 // (device 1 first); with none given, chunk data on an extra device is read
 // from the image itself at the device's unified address, as the kernel does
 // for a flat layout (data.c, erofs_map_dev with devs->flatdev).
-func Parse(img []byte, extra ...[][]byte) (*Image, error) {
-	im := &Image{data: img}
-	if len(extra) > 0 {
-		im.extra = extra[0]
-	}
+func Parse(img []byte, extra ...[]byte) (*Image, error) {
+	im := &Image{data: img, extra: extra}
 
 	if err := im.parseSuper(); err != nil {
 		return nil, err
