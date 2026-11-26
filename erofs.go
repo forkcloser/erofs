@@ -1182,7 +1182,7 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 
 		return io.NewSectionReader(headThenTail{blocks, inline}, 0, ino.size)
 	case disk.LayoutChunkBased:
-		// Indexes only: a block map is read a block at a time.
+		// Indexes only: a file with a block map is read by its runs.
 		// #nosec G115 -- the chunk format is the low 16 bits of i_u, as the kernel's __le16 c.format reads it
 		if uint16(ino.inodeData)&disk.LayoutChunkFormatIndexes == 0 {
 			return nil
@@ -1192,7 +1192,7 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 		// where locate places it, never the run by its first chunk. A
 		// file that is not one says so in its first entries, and the rest
 		// of its map is not read for it; a map eachChunk refuses is left to
-		// the block reader, which reports it.
+		// the readers of the file, which report it.
 		var (
 			run   DataRange
 			count int
@@ -2008,12 +2008,12 @@ type file struct {
 	offset int64  // current offset for read operations
 	info   *inode // cached inode
 
-	// direct serves reads straight from the backing device when the file's
-	// data is one contiguous range, or a flat-inline file's two. Resolved once and memoized, including
-	// the nil answer: for chunk-based files openDirect reads the chunk index
-	// to prove contiguity, which must not happen on every Read.
+	// direct serves reads straight from the backing device: a flat file's
+	// one range, or its two when it is flat-inline, and a chunk-based
+	// file's runs (runs). Resolved once and memoized, the nil answer too.
 	direct        *io.SectionReader
 	directChecked bool
+	runs          *chunkRuns
 }
 
 func (b *file) Stat() (fs.FileInfo, error) {
@@ -2140,18 +2140,266 @@ func (b *file) WriteTo(w io.Writer) (int64, error) {
 	return total, nil
 }
 
-func (*file) Close() error {
+func (b *file) Close() error {
+	if b.runs != nil {
+		b.runs.release()
+	}
+
 	return nil
 }
 
 // directReader returns a whole-file reader when the layout allows one.
 func (b *file) directReader(ino *inode) *io.SectionReader {
-	if !b.directChecked {
-		b.directChecked = true
+	if b.directChecked {
+		return b.direct
+	}
+
+	b.directChecked = true
+
+	if ino.inodeLayout != disk.LayoutChunkBased || ino.size <= 0 {
 		b.direct = b.img.openDirect(ino)
+
+		return b.direct
+	}
+
+	// A chunk-based file is read by its runs, its map as the reads come to
+	// it: openDirect would walk the map of a file that is one run to its
+	// end before the first byte. A format chunkMapOf refuses is left to
+	// the block reader, which reports it.
+	if m, err := b.img.chunkMapOf(ino); err == nil {
+		b.runs = &chunkRuns{img: b.img, ino: ino, m: m}
+		b.direct = io.NewSectionReader(b.runs, 0, ino.size)
 	}
 
 	return b.direct
+}
+
+// chunkRuns reads a chunk-based file's data a run at a time: the chunks
+// that follow each other on their device in one read of it, a run of holes
+// as zeros. It reads the map as the reads come to it, a block at a time,
+// and holds that block of it between two reads.
+//
+// It is an io.ReaderAt, and WriteTo hands it to the destination, which may
+// then read it from several goroutines at once: mu holds the window for
+// one read at a time.
+type chunkRuns struct {
+	img *image
+	ino *inode
+	m   chunkMap
+
+	mu sync.Mutex
+	// window is the map's entries from chunk first on, in a block of the
+	// image's pool, until release.
+	window *block
+	first  int
+}
+
+// ReadAt fills p from off, a position of the file that leaves p whole
+// inside it, run after run. A read that ends the file gives the map's
+// window back: a file read to its end holds nothing, closed or not.
+func (c *chunkRuns) ReadAt(p []byte, off int64) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	n := 0
+
+	for n < len(p) {
+		got, err := c.readRun(p[n:], off+int64(n))
+		n += got
+
+		if err != nil {
+			return n, err
+		}
+	}
+
+	if off+int64(n) == c.ino.size {
+		c.drop()
+	}
+
+	return n, nil
+}
+
+// release gives the map's window back to the pool.
+func (c *chunkRuns) release() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.drop()
+}
+
+// drop is release, for the one that holds mu.
+func (c *chunkRuns) drop() {
+	if c.window != nil {
+		c.img.putBlock(c.window)
+		c.window = nil
+	}
+}
+
+// entry is chunk i's entry of the map, read with as many of those after it
+// as a block holds when the window has not got it.
+func (c *chunkRuns) entry(i int) ([]byte, error) {
+	unit := c.m.unit
+
+	if c.window != nil && i >= c.first {
+		if at := (i - c.first) * unit; at+unit <= int(c.window.end) {
+			return c.window.buf[at : at+unit], nil
+		}
+	}
+
+	if c.window == nil {
+		c.window = c.img.getBlock()
+	}
+
+	room := len(c.window.buf) / unit * unit
+	want := int(min(int64(c.m.chunks-i)*int64(unit), int64(room)))
+	pos := c.m.base + int64(i)*int64(unit)
+
+	// The count before the error: the entries that were read are the map's,
+	// and what stopped the read is met again by the entry it stopped at.
+	n, err := c.img.meta.ReadAt(c.window.buf[:want], pos)
+	n -= n % unit
+	c.first, c.window.end = i, int32(n) // #nosec G115 -- at most a block, at most 1<<16
+
+	switch {
+	case n >= unit:
+		return c.window.buf[:unit], nil
+	case err != nil && !errors.Is(err, io.EOF):
+		return nil, fmt.Errorf("failed to read chunk entry at %d: %w", pos, err)
+	default:
+		return nil, fmt.Errorf("the image ends inside the chunk map of nid %d, at %d: %w", c.ino.nid, pos, ErrCorrupt)
+	}
+}
+
+// held reports whether chunk i's entry is in the window, and gives it.
+func (c *chunkRuns) held(i int) ([]byte, bool) {
+	at := (i - c.first) * c.m.unit
+	if i >= c.m.chunks || at+c.m.unit > int(c.window.end) {
+		return nil, false
+	}
+
+	return c.window.buf[at : at+c.m.unit], true
+}
+
+// size is the bytes of chunk i: a chunk, or the file's end for the last.
+func (c *chunkRuns) size(i int) int64 {
+	if i == c.m.chunks-1 {
+		return c.ino.size - int64(i)<<c.m.bits
+	}
+
+	return int64(1) << c.m.bits
+}
+
+// readRun fills the head of p with the run of chunks at off, as far as the
+// chunks follow each other on one device, or are holes, and the window
+// holds their entries; it returns how much that was, at least a byte.
+//
+// Each chunk is placed by the address it begins at and held whole to its
+// device, as Stat's ranges are. One that runs past its device is read a
+// block at a time, up to the block the device ends in: the blocks before
+// it are the file's.
+func (c *chunkRuns) readRun(p []byte, off int64) (int, error) {
+	img := c.img
+	i := int(off >> c.m.bits)
+
+	entry, err := c.entry(i)
+	if err != nil {
+		return 0, err
+	}
+
+	within := off - int64(i)<<c.m.bits
+	run := c.size(i) - within
+	deviceID, block := img.chunkEntry(entry)
+
+	if ^block == 0 {
+		p = p[:min(int64(len(p)), c.holes(i, run, int64(len(p))))]
+		clear(p)
+
+		return len(p), nil
+	}
+
+	dev, at, err := img.locate(deviceID, int64(block)<<img.sb.BlkSizeBits)
+	if err != nil {
+		return 0, fmt.Errorf("failed to map device for nid %d: %w", c.ino.nid, err)
+	}
+
+	blockSize := int64(1) << img.sb.BlkSizeBits
+
+	if img.boundOnDevice(dev, at, c.size(i)) == nil {
+		run = c.follows(i, dev, at, run, int64(len(p)))
+	} else {
+		run = min(run, blockSize-off&(blockSize-1))
+
+		// The block to its end, whatever the read asks of it: a block the
+		// device does not hold whole is not the file's by a small read
+		// and refused to a large one.
+		if bound := img.boundOnDevice(dev, at+within, run); bound != nil {
+			return 0, fmt.Errorf("nid %d: %w", c.ino.nid, bound)
+		}
+	}
+
+	p = p[:min(int64(len(p)), run)]
+
+	// The count before the error: an io.ReaderAt may answer a full read
+	// that ends at its last byte with io.EOF, and that read is the run.
+	n, err := img.deviceReader(dev).ReadAt(p, at+within)
+	if n == len(p) {
+		return n, nil
+	}
+
+	// The device ended inside the run: what it holds of it is the file's.
+	if err != nil && !errors.Is(err, io.EOF) {
+		return n, fmt.Errorf("failed to read block for nid %d: %w", c.ino.nid, err)
+	}
+
+	return n, fmt.Errorf("the device ends inside a block of nid %d: %w", c.ino.nid, ErrCorrupt)
+}
+
+// holes is run, the bytes of a hole from chunk i on, with those of the
+// holes that follow it in the window, until it is most or more.
+func (c *chunkRuns) holes(i int, run, most int64) int64 {
+	for j := i + 1; run < most; j++ {
+		next, ok := c.held(j)
+		if !ok {
+			break
+		}
+
+		if _, block := c.img.chunkEntry(next); ^block != 0 {
+			break
+		}
+
+		run += c.size(j)
+	}
+
+	return run
+}
+
+// follows is run, the bytes of chunk i from where it is read, with those of
+// the chunks after it in the window that follow it on dev, where it begins
+// at at, each held whole to the device, until it is most or more.
+func (c *chunkRuns) follows(i int, dev uint16, at, run, most int64) int64 {
+	img := c.img
+
+	for j := i + 1; run < most; j++ {
+		next, ok := c.held(j)
+		if !ok {
+			break
+		}
+
+		deviceID, block := img.chunkEntry(next)
+		if ^block == 0 {
+			break
+		}
+
+		nextDev, nextAt, err := img.locate(deviceID, int64(block)<<img.sb.BlkSizeBits)
+		if err != nil || nextDev != dev || nextAt != at+int64(j-i)<<c.m.bits ||
+			img.boundOnDevice(nextDev, nextAt, c.size(j)) != nil {
+			break
+		}
+
+		run += c.size(j)
+	}
+
+	return run
 }
 
 // wrongType is the error for an inode whose type is not the one it was
