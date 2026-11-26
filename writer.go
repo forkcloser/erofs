@@ -1,7 +1,7 @@
 package erofs
 
 import (
-	"bytes"
+	"bufio"
 	"cmp"
 	"encoding/binary"
 	"errors"
@@ -20,11 +20,6 @@ import (
 // larger block sizes are unmountable on common platforms (aarch64 caps
 // page size at 64 KiB) and the reader rejects BlkSizeBits > 16.
 const maxBlockSize = 1 << 16
-
-// maxMetaBufferPrealloc bounds the metadata buffer's initial capacity. It is
-// a hint only, so exceeding it costs a few reallocations rather than
-// correctness.
-const maxMetaBufferPrealloc = 1 << 30 // 1 GiB
 
 // errMetaOverrun is a planLayout invariant broken at write time: the
 // metadata written so far has run past the nid slot it had to end at.
@@ -298,14 +293,15 @@ func (w *erofsWriter) writeSeekable(out io.WriteSeeker) error {
 		return err
 	}
 
-	// Buffer and write metadata.
-	meta := w.newMetaBuffer()
+	// The metadata goes out as it is serialized, never held whole: it is
+	// every inode, attribute, directory and inline file of the image.
+	meta := bufio.NewWriterSize(out, len(w.copyBuf))
 	if err := w.writeMetadataInodes(meta); err != nil {
 		return err
 	}
 
-	if _, err := meta.WriteTo(out); err != nil {
-		return err
+	if err := meta.Flush(); err != nil {
+		return err //nolint:wrapcheck // the output's own error, as every write of the image returns it
 	}
 
 	// Seek back and write the real block 0 (superblock).
@@ -327,34 +323,6 @@ func (w *erofsWriter) direntBuf(n int) []byte {
 	clear(w.dirBuf)
 
 	return w.dirBuf
-}
-
-// newMetaBuffer returns a pre-sized bytes.Buffer for metadata serialization.
-func (w *erofsWriter) newMetaBuffer() *bytes.Buffer {
-	totalMetaBytes := 0
-
-	for _, e := range w.entries {
-		isz := disk.SizeInodeExtended
-		if e.compact {
-			isz = disk.SizeInodeCompact
-		}
-
-		sz := inodeSlotAlign(isz + e.xattrSize + e.chunkPad + e.trailingSize)
-
-		totalMetaBytes += sz
-	}
-	// SB area + metadata padded to block boundary. The capacity is only a
-	// sizing hint — bytes.Buffer grows as needed — so clamping it is free and
-	// keeps an implausible entry size from requesting a huge allocation, or a
-	// negative one once the arithmetic overflows.
-	capacity := w.blockSize + ((totalMetaBytes + w.blockSize - 1) & ^(w.blockSize - 1))
-	if capacity < w.blockSize || capacity > maxMetaBufferPrealloc {
-		capacity = w.blockSize
-	}
-
-	buf := bytes.NewBuffer(make([]byte, 0, capacity))
-
-	return buf
 }
 
 // assignDataBlocks assigns data block addresses to flat-plain entries.
