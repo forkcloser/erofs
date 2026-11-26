@@ -203,6 +203,12 @@ that cannot be opened, or has become shorter, fails `Close`; one that has
 grown is copied as it was found, its first bytes; and a name that holds
 another file by then is read as that file, under the metadata of the first.
 
+A `CopyFrom` that fails once it has begun to copy has left a part of its
+source in the tree, so the `Writer` has failed with it: every later call that
+would change it returns that error, and `Close` returns it and writes no
+image. `Stat` and `Open` still answer for what it holds. A `CopyFrom` refused
+before it copies anything does not fail the `Writer`.
+
 Paths given to the writer are cleaned: `x`, `/x` and `./x` name the same
 entry. The reader is stricter and follows the `fs.FS` convention exactly.
 

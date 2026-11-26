@@ -1,7 +1,6 @@
 package erofs_test
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -73,15 +72,14 @@ func numbered(file byte, n int) []byte {
 	return out
 }
 
-// TestContractAFileWhoseCopyFailedIsNotInTheImage: with a data file a
+// TestContractAFileWhoseCopyFailedIsNotInTheTree: with a data file a
 // file's data is read during CopyFrom, and a file whose read fails or ends
 // part of the way fails the copy. Its entry was in the tree by then, with
-// the size it declared and the data file holding less: a Writer closed
-// after that wrote an image where the file read another file's bytes, or
-// one its own reader refuses. The entry now goes with the failure: the
-// Writer does not find it, and the image a later Close writes holds what
-// was copied whole, each file with its own bytes.
-func TestContractAFileWhoseCopyFailedIsNotInTheImage(t *testing.T) {
+// the size it declared and the data file holding less. The entry goes with
+// the failure, so that what the Writer reads back is what it holds; and the
+// Writer has failed: a later copy and Close return the copy's error, and
+// Close writes no image.
+func TestContractAFileWhoseCopyFailedIsNotInTheTree(t *testing.T) {
 	t.Parallel()
 
 	for _, declared := range []int{10, 4097, 10000} {
@@ -103,7 +101,6 @@ func TestContractAFileWhoseCopyFailedIsNotInTheImage(t *testing.T) {
 					w := erofs.Create(out, erofs.WithDataFile(df), erofs.WithBuildTime(corpus.BuildTime, 0))
 
 					before := numbered(1, 5000)
-					after := numbered(101, 9000)
 
 					failing := failingRead{
 						MapFS: fstest.MapFS{
@@ -127,37 +124,26 @@ func TestContractAFileWhoseCopyFailedIsNotInTheImage(t *testing.T) {
 						t.Errorf("Stat of the file whose copy failed: %v; want ErrNotExist", serr)
 					}
 
-					later := fstest.MapFS{"z": &fstest.MapFile{Data: after, Mode: 0o644}}
-					if cerr := errors.Join(w.CopyFrom(later), w.Close()); cerr != nil {
-						t.Fatalf("a later copy and Close: %v", cerr)
+					if info, serr := w.Stat("/a"); serr != nil || info.Size() != int64(len(before)) {
+						t.Errorf(
+							"Stat of the file copied whole before it: %v, %v; want its %d bytes",
+							info,
+							serr,
+							len(before),
+						)
 					}
 
-					fsys, err := erofs.Open(bytes.NewReader(out.Bytes()), erofs.WithExtraDevices(df))
-					if err != nil {
-						t.Fatalf("the image: %v", err)
+					later := fstest.MapFS{"z": &fstest.MapFile{Data: numbered(101, 9000), Mode: 0o644}}
+					if cerr := w.CopyFrom(later); !errors.Is(cerr, want) {
+						t.Errorf("a later copy: %v; want the failed copy's error", cerr)
 					}
 
-					var names []string
-
-					err = fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
-						if err != nil || p == "." {
-							return err
-						}
-
-						names = append(names, p)
-
-						_, err = d.Info()
-
-						return err
-					})
-					if err != nil || fmt.Sprint(names) != "[a z]" {
-						t.Errorf("the image holds %v, %v; want a and z", names, err)
+					if cerr := w.Close(); !errors.Is(cerr, want) {
+						t.Errorf("Close: %v; want the failed copy's error", cerr)
 					}
 
-					for file, content := range map[string][]byte{"a": before, "z": after} {
-						if got, rerr := fs.ReadFile(fsys, file); rerr != nil || !bytes.Equal(got, content) {
-							t.Errorf("%s reads %d bytes, %v; want its own %d", file, len(got), rerr, len(content))
-						}
+					if len(out.Bytes()) != 0 {
+						t.Errorf("Close wrote an image of %d bytes; want none", len(out.Bytes()))
 					}
 				})
 			}
