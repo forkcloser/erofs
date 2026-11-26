@@ -9,7 +9,7 @@ import (
 	"io/fs"
 	"testing"
 
-	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/go-erofs"
 )
 
 // laidOverMappedRange is an image of eight 4 KiB blocks and its one extra

@@ -17,11 +17,11 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/forkcloser/erofs"
-	"github.com/forkcloser/erofs/internal/builder"
-	"github.com/forkcloser/erofs/internal/corpus"
-	"github.com/forkcloser/erofs/internal/disk"
-	"github.com/forkcloser/erofs/internal/erofsspec"
+	"github.com/forkcloser/go-erofs"
+	"github.com/forkcloser/go-erofs/internal/builder"
+	"github.com/forkcloser/go-erofs/internal/corpus"
+	"github.com/forkcloser/go-erofs/internal/disk"
+	"github.com/forkcloser/go-erofs/internal/erofsspec"
 )
 
 // The writer's contract, from the sources that state it: the Writer, File,

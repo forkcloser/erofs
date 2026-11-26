@@ -5,7 +5,7 @@ package erofs
 import (
 	"io/fs"
 
-	"github.com/forkcloser/erofs/internal/builder"
+	"github.com/forkcloser/go-erofs/internal/builder"
 )
 
 // entryFromSys extracts metadata from info.Sys(). On platforms with no

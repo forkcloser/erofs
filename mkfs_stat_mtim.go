@@ -6,7 +6,7 @@ import (
 	"io/fs"
 	"syscall"
 
-	"github.com/forkcloser/erofs/internal/builder"
+	"github.com/forkcloser/go-erofs/internal/builder"
 )
 
 // entryFromSys extracts metadata from info.Sys(). Returns nil if the type is

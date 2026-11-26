@@ -4,7 +4,7 @@ import (
 	"cmp"
 	"slices"
 
-	"github.com/forkcloser/erofs/internal/disk"
+	"github.com/forkcloser/go-erofs/internal/disk"
 )
 
 // inodeFileSize returns the value an entry writes to i_size.

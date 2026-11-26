@@ -9,7 +9,7 @@ import (
 	"io/fs"
 	"testing"
 
-	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/go-erofs"
 )
 
 // laidAsMkfs is an empty root in an image laid out as mkfs.erofs lays its

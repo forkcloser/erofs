@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/go-erofs"
 )
 
 // errTestBufferFull is a write past a testBuffer's limit.

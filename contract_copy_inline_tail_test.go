@@ -8,7 +8,7 @@ import (
 	"io/fs"
 	"testing"
 
-	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/go-erofs"
 )
 
 // inlineFiles is an image of files "f00000".. of size bytes each, small

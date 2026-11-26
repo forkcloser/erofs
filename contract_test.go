@@ -66,10 +66,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/forkcloser/erofs"
-	"github.com/forkcloser/erofs/internal/corpus"
-	"github.com/forkcloser/erofs/internal/disk"
-	"github.com/forkcloser/erofs/internal/erofsspec"
+	"github.com/forkcloser/go-erofs"
+	"github.com/forkcloser/go-erofs/internal/corpus"
+	"github.com/forkcloser/go-erofs/internal/disk"
+	"github.com/forkcloser/go-erofs/internal/erofsspec"
 )
 
 // kernelMaxLinks is MAXSYMLINKS in fs/namei.c, the hop bound the

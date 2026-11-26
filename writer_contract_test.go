@@ -23,8 +23,8 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/forkcloser/erofs"
-	"github.com/forkcloser/erofs/internal/builder"
+	"github.com/forkcloser/go-erofs"
+	"github.com/forkcloser/go-erofs/internal/builder"
 )
 
 // The writer refuses what its reader and the kernel refuse, and what it

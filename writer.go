@@ -12,8 +12,8 @@ import (
 	"os"
 	"slices"
 
-	"github.com/forkcloser/erofs/internal/builder"
-	"github.com/forkcloser/erofs/internal/disk"
+	"github.com/forkcloser/go-erofs/internal/builder"
+	"github.com/forkcloser/go-erofs/internal/disk"
 )
 
 // tailWindow is the most of a source image one read for an inline end

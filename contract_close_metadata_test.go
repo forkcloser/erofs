@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/go-erofs"
 )
 
 // errSinkWhence is a Seek of a sink from somewhere it does not know.

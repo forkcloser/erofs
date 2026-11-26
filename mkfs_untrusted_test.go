@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/forkcloser/erofs/internal/disk"
+	"github.com/forkcloser/go-erofs/internal/disk"
 )
 
 // seekBuf is a minimal in-memory io.WriteSeeker + io.ReaderAt.

@@ -10,8 +10,8 @@ import (
 	"math"
 	"slices"
 
-	"github.com/forkcloser/erofs/internal/builder"
-	"github.com/forkcloser/erofs/internal/disk"
+	"github.com/forkcloser/go-erofs/internal/builder"
+	"github.com/forkcloser/go-erofs/internal/disk"
 )
 
 // maxDirBytes is the most a directory of a source image may declare as its

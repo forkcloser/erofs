@@ -20,8 +20,8 @@ import (
 	"io/fs"
 	"testing"
 
-	"github.com/forkcloser/erofs"
-	"github.com/forkcloser/erofs/internal/disk"
+	"github.com/forkcloser/go-erofs"
+	"github.com/forkcloser/go-erofs/internal/disk"
 )
 
 // TestWriterNoInlineData: by default a file that fits beside its inode is

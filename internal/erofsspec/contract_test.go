@@ -16,8 +16,8 @@ import (
 	"hash/crc32"
 	"testing"
 
-	"github.com/forkcloser/erofs/internal/corpus"
-	"github.com/forkcloser/erofs/internal/erofsspec"
+	"github.com/forkcloser/go-erofs/internal/corpus"
+	"github.com/forkcloser/go-erofs/internal/erofsspec"
 )
 
 // TestAnchoredToCommitted: every committed image parses back to its tree.

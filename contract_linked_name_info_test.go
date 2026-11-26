@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/forkcloser/erofs"
-	"github.com/forkcloser/erofs/internal/corpus"
+	"github.com/forkcloser/go-erofs"
+	"github.com/forkcloser/go-erofs/internal/corpus"
 )
 
 // describe is what an info says: its name, and the file.

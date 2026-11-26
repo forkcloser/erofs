@@ -10,7 +10,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/go-erofs"
 )
 
 const (

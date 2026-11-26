@@ -7,7 +7,7 @@ import (
 	"io/fs"
 	"syscall"
 
-	"github.com/forkcloser/erofs/internal/builder"
+	"github.com/forkcloser/go-erofs/internal/builder"
 )
 
 // statInt is any integer a syscall.Stat_t field might be: the same field is

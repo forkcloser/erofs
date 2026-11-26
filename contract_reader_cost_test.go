@@ -21,8 +21,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/forkcloser/erofs"
-	"github.com/forkcloser/erofs/internal/erofsspec"
+	"github.com/forkcloser/go-erofs"
+	"github.com/forkcloser/go-erofs/internal/erofsspec"
 )
 
 // errLaidOffset is a read before the start of a laidImage.
