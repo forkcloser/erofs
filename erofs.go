@@ -1072,9 +1072,10 @@ func (img *image) deviceBlocks() []uint64 {
 }
 
 // openDirect returns a reader covering a file's entire data range, so it can
-// be read in one go instead of a block at a time. Returns nil when the layout
-// cannot be expressed as one contiguous physical range: a sparse or fragmented
-// chunk file, a multi-block inline file, or a compressed one.
+// be read in one go instead of a block at a time: one contiguous physical
+// range, or two for a flat-inline file, its blocks and the last one beside
+// its inode. Returns nil when the layout cannot be expressed so: a sparse or
+// fragmented chunk file, or a compressed one.
 //
 //nolint:gocognit // one case per inode layout, each the contiguity rule loadBlock applies to that layout
 func (img *image) openDirect(ino *inode) *io.SectionReader {
@@ -1100,11 +1101,11 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 
 		return io.NewSectionReader(img.deviceReader(dev), off, ino.size)
 	case disk.LayoutFlatInline:
-		// Last block is inline after the inode; earlier blocks at dataBlkAddr.
-		// Only use direct read for single-block files (all data inline).
-		if ino.size > blockSize {
-			return nil
-		}
+		// The last block is inline after the inode, a whole one when the
+		// size is a multiple of the block's; the blocks before it are at the
+		// start block, one run as a flat-plain file's are.
+		head := (ino.size - 1) &^ (blockSize - 1)
+		tail := ino.size - head
 
 		// #nosec G115 -- readInfo bounded the nid through checkNid
 		inodeAddr := img.metaStartPos() + int64(ino.nid)*disk.SizeInodeCompact
@@ -1113,15 +1114,28 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 		// loadBlock rejects that outright. flatDataOffset folds in xsize,
 		// which i_xattr_icount drives up to 262148, so without the same check
 		// here a file's contents alias whatever follows its block.
-		if trailingAddr&(blockSize-1)+ino.size > blockSize {
+		if trailingAddr&(blockSize-1)+tail > blockSize {
 			return nil
 		}
 
-		if img.checkImageRange(trailingAddr, ino.size) != nil {
+		if img.checkImageRange(trailingAddr, tail) != nil {
 			return nil
 		}
 
-		return io.NewSectionReader(img.meta, trailingAddr, ino.size)
+		inline := io.NewSectionReader(img.meta, trailingAddr, tail)
+		if head == 0 {
+			return inline
+		}
+		// Placed whole, as loadBlock places it: an address past the devices,
+		// the null one among them, is left to the block reader to report.
+		dev, off, err := img.locateStart(ino, head)
+		if err != nil {
+			return nil
+		}
+
+		blocks := io.NewSectionReader(img.deviceReader(dev), off, head)
+
+		return io.NewSectionReader(headThenTail{blocks, inline}, 0, ino.size)
 	case disk.LayoutChunkBased:
 		// Chunk-based files store data at the physical block addresses
 		// listed in the chunk index. For contiguous single-device files,
@@ -1218,6 +1232,43 @@ func (img *image) openDirect(ino *inode) *io.SectionReader {
 	default:
 		return nil
 	}
+}
+
+// headThenTail is the data of a flat-inline file of more than a block: the
+// blocks at its start block, then its last block, beside its inode.
+type headThenTail struct {
+	head, tail *io.SectionReader
+}
+
+func (d headThenTail) ReadAt(p []byte, off int64) (int, error) {
+	n := 0
+
+	if left := d.head.Size() - off; left > 0 {
+		want := int(min(int64(len(p)), left))
+
+		var err error
+
+		n, err = d.head.ReadAt(p[:want], off)
+		if n < want {
+			// The device ended inside the blocks: its end, which the
+			// caller tells from the file's.
+			if err == nil {
+				err = io.EOF
+			}
+
+			return n, err
+		}
+
+		if n == len(p) {
+			return n, nil
+		}
+
+		off = d.head.Size()
+	}
+
+	m, err := d.tail.ReadAt(p[n:], off-d.head.Size())
+
+	return n + m, err
 }
 
 func (*image) readMetadata(r io.Reader) ([]byte, error) {
@@ -2027,7 +2078,7 @@ type file struct {
 	info   *inode // cached inode
 
 	// direct serves reads straight from the backing device when the file's
-	// data is one contiguous range. Resolved once and memoized, including
+	// data is one contiguous range, or a flat-inline file's two. Resolved once and memoized, including
 	// the nil answer: for chunk-based files openDirect reads the chunk index
 	// to prove contiguity, which must not happen on every Read.
 	direct        *io.SectionReader
