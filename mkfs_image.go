@@ -1287,13 +1287,13 @@ func holedData(f *file, ino *inode, blockSize int64) ([]builder.Chunk, io.Reader
 
 	var (
 		chunks []builder.Chunk
-		data   = &rangesReader{f: f}
 		next   uint64 // the first block no chunk covers yet
 		stored uint64 // blocks of data so far
 		pos    int64  // the logical byte the range starts at
 	)
 
-	// The blocks from next to end are data: a chunk, and a range to read.
+	// The blocks from next to end are data: a chunk, which is also what
+	// rangesReader reads.
 	keep := func(end uint64) {
 		if end == next {
 			return
@@ -1301,8 +1301,6 @@ func holedData(f *file, ino *inode, blockSize int64) ([]builder.Chunk, io.Reader
 
 		chunks = append(chunks, deviceChunks(stored, end-next, 0)...)
 		stored += end - next
-		// #nosec G115 -- block numbers of a file whose size fits an int64
-		data.ranges = append(data.ranges, [2]int64{int64(next) * blockSize, min(int64(end)*blockSize, ino.size)})
 		next = end
 	}
 
@@ -1324,7 +1322,11 @@ func holedData(f *file, ino *inode, blockSize int64) ([]builder.Chunk, io.Reader
 
 	keep(blocks)
 
-	return chunks, data, nil
+	// The list is the entry's until Close and the reader's: one array for
+	// both, at its length, and not as append grew it.
+	chunks = slices.Clone(chunks)
+
+	return chunks, &rangesReader{f: f, chunks: chunks, blockSize: blockSize, size: ino.size}, nil
 }
 
 // wholeBlocks is the blocks that lie whole between two bytes of a file of
@@ -1341,22 +1343,37 @@ func wholeBlocks(from, to, size, blockSize int64) (first, last uint64) {
 	return first, last
 }
 
-// rangesReader reads ranges of a file of an image, each from its first byte
-// to its last, one after the other.
+// rangesReader reads the data of a file of an image that has holes: the
+// blocks its chunks lay out as data, one run after the other, and none of
+// its holes.
+//
+// The chunks are the entry's own list, which Close moves to their blocks in
+// the new image while this still reads by them: only what it never changes
+// is read here, which chunk is a hole and how many blocks each is.
 type rangesReader struct {
-	f      *file
-	ranges [][2]int64 // the logical bytes [from, to) still to read
-	left   int64      // of the range being read
+	f         *file
+	chunks    []builder.Chunk // the runs still to read or to skip
+	blockSize int64
+	size      int64 // the file's, where its last block ends
+	block     int64 // the file's block the next run begins at
+	left      int64 // of the run being read
 }
 
 func (r *rangesReader) Read(p []byte) (int, error) {
 	for r.left == 0 {
-		if len(r.ranges) == 0 {
+		if len(r.chunks) == 0 {
 			return 0, io.EOF
 		}
 
-		r.f.offset, r.left = r.ranges[0][0], r.ranges[0][1]-r.ranges[0][0]
-		r.ranges = r.ranges[1:]
+		run := r.chunks[0]
+		r.chunks = r.chunks[1:]
+
+		from := r.block * r.blockSize
+		r.block += int64(run.Count)
+
+		if run.PhysicalBlock != builder.NullPhysicalBlock {
+			r.f.offset, r.left = from, min(r.block*r.blockSize, r.size)-from
+		}
 	}
 
 	if int64(len(p)) > r.left {
@@ -1370,8 +1387,8 @@ func (r *rangesReader) Read(p []byte) (int, error) {
 }
 
 // Close gives back what the file holds of its map. Whoever reads the data
-// closes it when it is done: the last range may end before the file does,
-// so that no read of it ends the file.
+// closes it when it is done: the last run may end before the file does, so
+// that no read of it ends the file.
 func (r *rangesReader) Close() error {
 	return r.f.Close()
 }
