@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/forkcloser/erofs"
-	"github.com/forkcloser/erofs/internal/corpus"
+	"github.com/forkcloser/go-erofs"
+	"github.com/forkcloser/go-erofs/internal/corpus"
 )
 
 var errNoWrite = errors.New("the data file takes no write")

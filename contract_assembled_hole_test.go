@@ -5,9 +5,9 @@ import (
 	"io/fs"
 	"testing"
 
-	"github.com/forkcloser/erofs"
-	"github.com/forkcloser/erofs/internal/corpus"
-	"github.com/forkcloser/erofs/internal/erofsspec"
+	"github.com/forkcloser/go-erofs"
+	"github.com/forkcloser/go-erofs/internal/corpus"
+	"github.com/forkcloser/go-erofs/internal/erofsspec"
 )
 
 // TestAssembledHoleIsAHoleUnderEitherInode: the assembler's Hole is a flat

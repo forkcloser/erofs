@@ -7,8 +7,8 @@ import (
 	"io/fs"
 	"testing"
 
-	"github.com/forkcloser/erofs"
-	"github.com/forkcloser/erofs/internal/corpus"
+	"github.com/forkcloser/go-erofs"
+	"github.com/forkcloser/go-erofs/internal/corpus"
 )
 
 // copyWithData is the copy of src, with its data, as an image and as the tree it

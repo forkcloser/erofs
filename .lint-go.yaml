@@ -12,7 +12,7 @@ golangci:
       # superblock, bn for a block number. A function is about one of them,
       # and is long because it walks the on-disk layout field by field;
       # spelled out, the name prefixes every line and says nothing more.
-      # forkcloser/xz disables it for its codec on the same grounds.
+      # forkcloser/go-xz disables it for its codec on the same grounds.
       - varnamelen
     exclusions:
       rules:
@@ -64,8 +64,8 @@ golangci:
         ignore-package-globs:
           # This module's own packages: their errors already say what they
           # refuse.
-          - github.com/forkcloser/erofs
-          - github.com/forkcloser/erofs/*
+          - github.com/forkcloser/go-erofs
+          - github.com/forkcloser/go-erofs/*
           # os errors are *PathError and *LinkError: the operation and the
           # path are already in them.
           - os

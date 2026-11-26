@@ -9,7 +9,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/go-erofs"
 )
 
 // misnaming is a tree one of whose directories lists one of its entries

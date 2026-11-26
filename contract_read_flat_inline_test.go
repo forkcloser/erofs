@@ -8,7 +8,7 @@ import (
 	"io/fs"
 	"testing"
 
-	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/go-erofs"
 )
 
 // flatInlineContent is the byte at each place of a laidOneFlatInline file.

@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/forkcloser/erofs/internal/corpus"
-	"github.com/forkcloser/erofs/internal/erofsspec"
+	"github.com/forkcloser/go-erofs/internal/corpus"
+	"github.com/forkcloser/go-erofs/internal/erofsspec"
 )
 
 // regenerate rewrites testdata from this host's mkfs.erofs instead of

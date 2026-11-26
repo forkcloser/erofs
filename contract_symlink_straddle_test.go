@@ -7,7 +7,7 @@ import (
 	"io/fs"
 	"testing"
 
-	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/go-erofs"
 )
 
 // symlinkAt is an image of 512-byte blocks whose metadata starts at block 3

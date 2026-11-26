@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/forkcloser/erofs"
-	"github.com/forkcloser/erofs/internal/corpus"
-	"github.com/forkcloser/erofs/internal/erofsspec"
+	"github.com/forkcloser/go-erofs"
+	"github.com/forkcloser/go-erofs/internal/corpus"
+	"github.com/forkcloser/go-erofs/internal/erofsspec"
 )
 
 // attributedImage is an image of empty files "f00000".. in its root, each

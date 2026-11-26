@@ -10,7 +10,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/forkcloser/erofs/internal/disk"
+	"github.com/forkcloser/go-erofs/internal/disk"
 )
 
 // xattrSplit splits a full xattr name into (NameIndex, suffix), by the

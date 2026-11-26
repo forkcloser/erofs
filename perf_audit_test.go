@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/forkcloser/erofs/internal/corpus"
+	"github.com/forkcloser/go-erofs/internal/corpus"
 )
 
 // countingReaderAt counts ReadAt calls to quantify syscall amplification.

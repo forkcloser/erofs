@@ -8,9 +8,9 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/forkcloser/erofs"
-	"github.com/forkcloser/erofs/internal/corpus"
-	"github.com/forkcloser/erofs/internal/erofsspec"
+	"github.com/forkcloser/go-erofs"
+	"github.com/forkcloser/go-erofs/internal/corpus"
+	"github.com/forkcloser/go-erofs/internal/erofsspec"
 )
 
 // hiddenAndListed is an image of one file, f, whose attributes are of both

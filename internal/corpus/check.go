@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/forkcloser/erofs/internal/erofsspec"
+	"github.com/forkcloser/go-erofs/internal/erofsspec"
 )
 
 // Check holds the reference's view of an image to the tree it was built

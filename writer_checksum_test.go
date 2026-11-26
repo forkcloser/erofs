@@ -22,8 +22,8 @@ import (
 	"io/fs"
 	"testing"
 
-	"github.com/forkcloser/erofs"
-	"github.com/forkcloser/erofs/internal/disk"
+	"github.com/forkcloser/go-erofs"
+	"github.com/forkcloser/go-erofs/internal/disk"
 )
 
 // TestWriterSuperblockChecksum: every image the Writer produces carries the

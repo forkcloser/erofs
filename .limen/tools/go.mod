@@ -1,7 +1,7 @@
 // The Go-source analyzers the shared recipes run, pinned as tool
 // directives in a module of their own so their dependency graph never
 // reaches the project's go.mod (book/tooling.md).
-module github.com/forkcloser/erofs/tools
+module github.com/forkcloser/go-erofs/tools
 
 go 1.26.8
 

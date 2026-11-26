@@ -7,7 +7,7 @@ import (
 	"testing"
 	"testing/fstest"
 
-	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/go-erofs"
 )
 
 // sourceFiles is how many files the trees of these tests have.

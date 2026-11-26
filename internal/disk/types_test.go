@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/forkcloser/erofs/internal/disk"
+	"github.com/forkcloser/go-erofs/internal/disk"
 )
 
 // The Unmarshal methods hand-decode layouts that binary.Decode derives from

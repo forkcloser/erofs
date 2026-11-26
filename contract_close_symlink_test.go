@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/go-erofs"
 )
 
 // closeAllocatesForLinks is the bytes Close allocates for a Writer given

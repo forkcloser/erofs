@@ -21,7 +21,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/go-erofs"
 )
 
 // TestReaderSharedXattrOutsideImage: a shared xattr id that points outside

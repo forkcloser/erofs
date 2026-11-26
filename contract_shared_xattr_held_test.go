@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/forkcloser/erofs"
-	"github.com/forkcloser/erofs/internal/corpus"
+	"github.com/forkcloser/go-erofs"
+	"github.com/forkcloser/go-erofs/internal/corpus"
 )
 
 // sharing is an image of 64 KiB blocks whose shared xattr area holds the

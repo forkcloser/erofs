@@ -6,8 +6,8 @@ import (
 	"io/fs"
 	"testing"
 
-	"github.com/forkcloser/erofs"
-	"github.com/forkcloser/erofs/internal/corpus"
+	"github.com/forkcloser/go-erofs"
+	"github.com/forkcloser/go-erofs/internal/corpus"
 )
 
 // twoBlocksImage is an image holding /dir/blocks, two whole blocks of fill:

@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/forkcloser/erofs"
-	"github.com/forkcloser/erofs/internal/corpus"
-	"github.com/forkcloser/erofs/internal/erofsspec"
+	"github.com/forkcloser/go-erofs"
+	"github.com/forkcloser/go-erofs/internal/corpus"
+	"github.com/forkcloser/go-erofs/internal/erofsspec"
 )
 
 // The package's fuzz targets, each held to the reference reader as its

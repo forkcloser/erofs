@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/forkcloser/erofs"
+	"github.com/forkcloser/go-erofs"
 )
 
 // closeAllocatesWithAttrs is the bytes Close allocates for a Writer given

@@ -27,9 +27,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/forkcloser/erofs"
-	"github.com/forkcloser/erofs/internal/corpus"
-	"github.com/forkcloser/erofs/internal/disk"
+	"github.com/forkcloser/go-erofs"
+	"github.com/forkcloser/go-erofs/internal/corpus"
+	"github.com/forkcloser/go-erofs/internal/disk"
 )
 
 // The reader follows the kernel's rules where an image departs from what
