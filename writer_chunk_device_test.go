@@ -22,7 +22,6 @@ import (
 	"testing"
 
 	"github.com/forkcloser/go-erofs"
-	"github.com/forkcloser/go-erofs/internal/corpus"
 	"github.com/forkcloser/go-erofs/internal/disk"
 )
 
@@ -37,54 +36,50 @@ import (
 func TestCopyFromChunkOnMappedDevice(t *testing.T) {
 	t.Parallel()
 
-	for _, src := range corpus.Committed(t) {
-		if src.Name != "small-blobdev-512" {
-			continue
-		}
+	src := committed(t, "small-blobdev-512")
 
-		edited := bytes.Clone(src.Img)
-		edited[3010] = 0x5a
+	edited := bytes.Clone(src.Img)
+	edited[3010] = 0x5a
 
-		source := openWithDevices(t, edited, src.Blob)
+	source := openWithDevices(t, edited, src.Blob)
 
-		want, err := fs.ReadFile(source, "d/sub/e07")
-		if err != nil || len(want) != 1 {
-			t.Fatalf("test premise broken: e07 through the blob's mapped range: %q, %v", want, err)
-		}
+	want, err := fs.ReadFile(source, "d/sub/e07")
+	if err != nil || len(want) != 1 {
+		t.Fatalf("test premise broken: e07 through the blob's mapped range: %q, %v", want, err)
+	}
 
-		var buf testBuffer
+	var buf testBuffer
 
-		w := erofs.Create(&buf)
-		if err = w.CopyFrom(source, erofs.MetadataOnly()); err != nil {
-			t.Fatal(err)
-		}
+	w := erofs.Create(&buf)
+	if err = w.CopyFrom(source, erofs.MetadataOnly()); err != nil {
+		t.Fatal(err)
+	}
 
-		if err = w.Close(); err != nil {
-			t.Fatal(err)
-		}
+	if err = w.Close(); err != nil {
+		t.Fatal(err)
+	}
 
-		copied := openWithDevices(t, buf.Bytes(), edited, src.Blob)
+	copied := openWithDevices(t, buf.Bytes(), edited, src.Blob)
 
-		got, err := fs.ReadFile(copied, "d/sub/e07")
-		if err != nil || !bytes.Equal(got, want) {
-			t.Fatalf("the copy reads e07 as %q, %v; want %q", got, err, want)
-		}
+	got, err := fs.ReadFile(copied, "d/sub/e07")
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("the copy reads e07 as %q, %v; want %q", got, err, want)
+	}
 
-		sameTree(t, source, copied)
+	sameTree(t, source, copied)
 
-		// Block 60 lies past both the image's 13 blocks and the blob's 47
-		// from block 13: Stat refuses the source, and so must the copy.
-		edited[3012] = 0x3c
-		source = openWithDevices(t, edited, src.Blob)
+	// Block 60 lies past both the image's 13 blocks and the blob's 47
+	// from block 13: Stat refuses the source, and so must the copy.
+	edited[3012] = 0x3c
+	source = openWithDevices(t, edited, src.Blob)
 
-		if _, err := fs.Stat(source, "d/sub/e07"); !errors.Is(err, erofs.ErrCorrupt) {
-			t.Fatalf("test premise broken: Stat of a chunk past every device: %v", err)
-		}
+	if _, err := fs.Stat(source, "d/sub/e07"); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Fatalf("test premise broken: Stat of a chunk past every device: %v", err)
+	}
 
-		w = erofs.Create(&buf)
-		if err := w.CopyFrom(source, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrCorrupt) {
-			t.Fatalf("CopyFrom(MetadataOnly) of a chunk past every device: %v; want ErrCorrupt", err)
-		}
+	w = erofs.Create(&buf)
+	if err := w.CopyFrom(source, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrCorrupt) {
+		t.Fatalf("CopyFrom(MetadataOnly) of a chunk past every device: %v; want ErrCorrupt", err)
 	}
 }
 
@@ -101,37 +96,33 @@ func TestCopyFromChunkOnMappedDevice(t *testing.T) {
 func TestCopyFromChunkPastExplicitDevice(t *testing.T) {
 	t.Parallel()
 
-	for _, src := range corpus.Committed(t) {
-		if src.Name != "small-blobdev-512" {
-			continue
+	src := committed(t, "small-blobdev-512")
+
+	for _, tc := range []struct {
+		name  string
+		path  string
+		edits map[int]byte
+	}{
+		{"a chunk at block 100 of a 47-block device", "d/sub/e07", map[int]byte{3012: 0x64}},
+		{"a chunk of 952 bytes starting at the device's block 46", "multi", map[int]byte{1620: 46}},
+		{"the same through the mapped range, block 59 on device 0", "multi", map[int]byte{1618: 0x5a, 1620: 59}},
+	} {
+		edited := bytes.Clone(src.Img)
+		for at, b := range tc.edits {
+			edited[at] = b
 		}
 
-		for _, tc := range []struct {
-			name  string
-			path  string
-			edits map[int]byte
-		}{
-			{"a chunk at block 100 of a 47-block device", "d/sub/e07", map[int]byte{3012: 0x64}},
-			{"a chunk of 952 bytes starting at the device's block 46", "multi", map[int]byte{1620: 46}},
-			{"the same through the mapped range, block 59 on device 0", "multi", map[int]byte{1618: 0x5a, 1620: 59}},
-		} {
-			edited := bytes.Clone(src.Img)
-			for at, b := range tc.edits {
-				edited[at] = b
-			}
+		source := openWithDevices(t, edited, src.Blob)
 
-			source := openWithDevices(t, edited, src.Blob)
+		if _, err := fs.Stat(source, tc.path); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("test premise broken: Stat of %s: %v", tc.name, err)
+		}
 
-			if _, err := fs.Stat(source, tc.path); !errors.Is(err, erofs.ErrCorrupt) {
-				t.Fatalf("test premise broken: Stat of %s: %v", tc.name, err)
-			}
+		var buf testBuffer
 
-			var buf testBuffer
-
-			w := erofs.Create(&buf)
-			if err := w.CopyFrom(source, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrCorrupt) {
-				t.Fatalf("CopyFrom(MetadataOnly) of %s: %v; want ErrCorrupt", tc.name, err)
-			}
+		w := erofs.Create(&buf)
+		if err := w.CopyFrom(source, erofs.MetadataOnly()); !errors.Is(err, erofs.ErrCorrupt) {
+			t.Fatalf("CopyFrom(MetadataOnly) of %s: %v; want ErrCorrupt", tc.name, err)
 		}
 	}
 }
@@ -147,16 +138,12 @@ func TestCopyFromChunkPastExplicitDevice(t *testing.T) {
 func TestCopyFromFlatPastDevice(t *testing.T) {
 	t.Parallel()
 
-	for _, src := range corpus.Committed(t) {
-		if src.Name != "small-b512" {
-			continue
-		}
+	src := committed(t, "small-b512")
 
-		edited := bytes.Clone(src.Img)
-		edited[6538] = 0x5b
+	edited := bytes.Clone(src.Img)
+	edited[6538] = 0x5b
 
-		refusedByBoth(t, edited, "d/sub/e14")
-	}
+	refusedByBoth(t, edited, "d/sub/e14")
 
 	img := buildImage(t, func(w *erofs.Writer) { writeFile(t, w, "/a", bytes.Repeat([]byte("a"), 5000)) })
 	binary.LittleEndian.PutUint32(img[inodeOffset(t, img, "a")+16:], disk.NullAddr)

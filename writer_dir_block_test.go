@@ -22,7 +22,6 @@ import (
 	"testing"
 
 	"github.com/forkcloser/go-erofs"
-	"github.com/forkcloser/go-erofs/internal/corpus"
 )
 
 // TestCopyFromShortDirectoryBlock: a directory whose size leaves a block
@@ -34,16 +33,12 @@ import (
 func TestCopyFromShortDirectoryBlock(t *testing.T) {
 	t.Parallel()
 
-	for _, im := range corpus.Committed(t) {
-		if im.Name != "b512" {
-			continue
-		}
+	im := committed(t, "b512")
 
-		edited := bytes.Clone(im.Img)
-		edited[1768] = 0x06
+	edited := bytes.Clone(im.Img)
+	edited[1768] = 0x06
 
-		shortDirRefusedByBoth(t, edited)
-	}
+	shortDirRefusedByBoth(t, edited)
 
 	img := buildImage(t, func(w *erofs.Writer) {
 		if err := w.Mkdir("/d", 0o755); err != nil {
