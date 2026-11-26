@@ -43,12 +43,11 @@ type Writer struct {
 	wErr         error               // sticky error: once set, all subsequent ops return it
 	root         *fsEntry            // root directory
 	byPath       map[string]*fsEntry // path → entry (all types)
-	// aliases lists, for an entry that holds an inode with other names, the
-	// entries that are those names: what removing it must hand the inode
-	// to. Only such entries have a key. A name removed since stays listed,
-	// marked removed, as it stays among its directory's children, until the
-	// inode's last other name goes or a promotion passes over the list.
-	aliases map[*fsEntry][]*fsEntry
+	// aliases holds, for an entry whose inode has other names, the entries
+	// that are those names: what a removed first name's place is given to.
+	// Only such entries have a key. A name removed since stays in until it
+	// comes out or the removed outnumber the live.
+	aliases map[*fsEntry]*aliasNames
 
 	devices []uint64 // per-device block counts (one per MetadataOnly source)
 
@@ -1085,11 +1084,7 @@ func (fsys *Writer) Stat(name string) (fs.FileInfo, error) {
 		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
 	}
 
-	if e.linkTo != nil {
-		e = e.linkTo // hardlink: stat the shared inode
-	}
-
-	return &writerFileInfo{entry: e}, nil
+	return infoOf(e), nil
 }
 
 // Open opens the named file for reading. For regular files, the file must
@@ -1131,7 +1126,7 @@ func (fsys *Writer) Open(name string) (fs.File, error) {
 		switch {
 		case size == 0:
 		case e.holedInDataFile:
-			return &readFile{entry: e, reader: io.NewSectionReader(
+			return &readFile{entry: e, path: name, reader: io.NewSectionReader(
 				chunkedData{fsys.dataFile, e.chunks, int64(fsys.resolveBlockSize())}, 0, size,
 			)}, nil
 		case e.reopen != nil:
@@ -1140,23 +1135,27 @@ func (fsys *Writer) Open(name string) (fs.File, error) {
 				return nil, fmt.Errorf("mkfs: open %s where it was copied from: %w", name, err)
 			}
 
-			return &readFile{entry: e, reader: &copiedBytes{src: src, left: size}, source: src}, nil
+			return &readFile{entry: e, path: name, reader: &copiedBytes{src: src, left: size}, source: src}, nil
 		case e.metadataOnly || e.directData != nil:
 			// Neither the spool nor the data file holds it: reading them
 			// at this entry's offset, zero, reads another file's bytes.
 			return nil, fmt.Errorf("mkfs: open %s: its data is with its source, which gave no way to open it again: %w",
 				name, ErrNotImplemented)
 		case fsys.dataFile != nil:
-			return &readFile{entry: e, reader: io.NewSectionReader(fsys.dataFile, e.dataStartOff, size)}, nil
+			return &readFile{
+				entry:  e,
+				path:   name,
+				reader: io.NewSectionReader(fsys.dataFile, e.dataStartOff, size),
+			}, nil
 		case fsys.spool != nil:
-			return &readFile{entry: e, reader: io.NewSectionReader(fsys.spool, e.dataStartOff, size)}, nil
+			return &readFile{entry: e, path: name, reader: io.NewSectionReader(fsys.spool, e.dataStartOff, size)}, nil
 		}
 
-		return &readFile{entry: e}, nil
+		return &readFile{entry: e, path: name}, nil
 
 	default:
 		// Symlinks, devices, etc.: stat-only, no readable data.
-		return &readFile{entry: e}, nil
+		return &readFile{entry: e, path: name}, nil
 	}
 }
 
@@ -1501,12 +1500,28 @@ func (fi *entryFileInfo) ModTime() time.Time { return fi.info.ModTime() }
 func (fi *entryFileInfo) IsDir() bool        { return fi.info.IsDir() }
 func (fi *entryFileInfo) Sys() any           { return fi.sys }
 
-// writerFileInfo implements fs.FileInfo for an fsEntry.
+// writerFileInfo implements fs.FileInfo for an fsEntry: name is the name
+// the info was asked or listed under, and entry the one that holds the
+// file, which for a file's second name is another's (linkTo). The name is
+// kept, never read again from the entry: the entry that holds a file takes
+// another name when its own is removed and the file has others
+// (promoteAlias).
 type writerFileInfo struct {
 	entry *fsEntry
+	name  string
 }
 
-func (fi *writerFileInfo) Name() string { return path.Base(fi.entry.path) }
+// infoOf is the info of the file e names, under e's name.
+func infoOf(e *fsEntry) *writerFileInfo {
+	fi := &writerFileInfo{entry: e, name: path.Base(e.path)}
+	if e.linkTo != nil {
+		fi.entry = e.linkTo
+	}
+
+	return fi
+}
+
+func (fi *writerFileInfo) Name() string { return fi.name }
 
 // Size reports e.size as fs.FileInfo spells it.
 // #nosec G115 -- e.size fits int64: File counts it in an int64, and add and copyFromImage bound it
@@ -1582,14 +1597,16 @@ func (e *fsEntry) linkCount() uint32 {
 
 // readFile implements fs.File for reading back a finalized file's data.
 type readFile struct {
-	entry  *fsEntry
+	entry *fsEntry
+	// path is the name the file was opened under, one of the entry's.
+	path   string
 	reader io.Reader // nil for empty files or non-regular types
 	source io.Closer // the file a copied entry was opened again as, or nil
 	closed bool
 }
 
 func (f *readFile) Stat() (fs.FileInfo, error) {
-	return &writerFileInfo{entry: f.entry}, nil
+	return &writerFileInfo{entry: f.entry, name: path.Base(f.path)}, nil
 }
 
 func (f *readFile) Read(p []byte) (int, error) {
@@ -1613,7 +1630,7 @@ func (f *readFile) Close() error {
 
 	if f.source != nil {
 		if err := f.source.Close(); err != nil {
-			return fmt.Errorf("mkfs: close %s where it was copied from: %w", f.entry.path, err)
+			return fmt.Errorf("mkfs: close %s where it was copied from: %w", f.path, err)
 		}
 	}
 
@@ -1662,7 +1679,7 @@ type readDir struct {
 }
 
 func (d *readDir) Stat() (fs.FileInfo, error) {
-	return &writerFileInfo{entry: d.entry}, nil
+	return infoOf(d.entry), nil
 }
 
 func (d *readDir) Read([]byte) (int, error) {
@@ -1718,7 +1735,7 @@ func (d *readDir) ReadDir(n int) ([]fs.DirEntry, error) {
 func (d *readDir) collectChildren() []fs.DirEntry {
 	children := make([]fs.DirEntry, 0, len(d.entry.children))
 	for _, e := range d.entry.children {
-		children = append(children, &dirEntry{entry: e})
+		children = append(children, &dirEntry{entry: e, name: path.Base(e.path)})
 	}
 
 	slices.SortFunc(children, func(a, b fs.DirEntry) int {
@@ -1731,13 +1748,21 @@ func (d *readDir) collectChildren() []fs.DirEntry {
 // dirEntry implements fs.DirEntry for an fsEntry.
 type dirEntry struct {
 	entry *fsEntry
+	// name is the entry's when it was listed: see writerFileInfo.
+	name string
 }
 
-func (de *dirEntry) Name() string { return path.Base(de.entry.path) }
+func (de *dirEntry) Name() string { return de.name }
 func (de *dirEntry) IsDir() bool  { return de.entry.mode&disk.StatTypeMask == disk.StatTypeDir }
 
-func (de *dirEntry) Type() fs.FileMode          { return disk.EroFSModeToGoFileMode(de.entry.mode).Type() }
-func (de *dirEntry) Info() (fs.FileInfo, error) { return &writerFileInfo{entry: de.entry}, nil }
+func (de *dirEntry) Type() fs.FileMode { return disk.EroFSModeToGoFileMode(de.entry.mode).Type() }
+
+func (de *dirEntry) Info() (fs.FileInfo, error) {
+	fi := infoOf(de.entry)
+	fi.name = de.name
+
+	return fi, nil
+}
 
 // addRegular adds the regular file at fpath (p once normalized) whose data
 // the source did not hand over in be: as chunk indexes in metadata-only
@@ -2377,88 +2402,185 @@ func (fsys *Writer) removeSubtree(e *fsEntry) {
 // unlinkEntry drops one name. It is the single place an entry becomes
 // removed, so the hardlink bookkeeping in both directions lives here:
 //
-//   - removing an alias decrements its target's live-alias count;
-//   - removing a target that still has live aliases must not orphan the
-//     inode — the aliases still name it, exactly as unlink(2) leaves a
-//     multiply-linked file alive. One surviving alias is promoted to
-//     carry the inode (data, metadata, chunks) and the rest are
-//     repointed at it, so nothing downstream ever sees a dangling linkTo.
+//   - removing one of a file's other names takes it off the count of them;
+//   - removing a file's first name while it has others must not orphan the
+//     inode: the others still name it, exactly as unlink(2) leaves a
+//     multiply-linked file alive. The file goes on under one of them
+//     (promoteAlias), and nothing downstream ever sees a dangling linkTo.
 func (fsys *Writer) unlinkEntry(e *fsEntry) {
-	fsys.dropName(e)
-	detach(e)
+	detach(fsys.dropName(e))
 }
 
-// dropName is unlinkEntry less the entry's place among its parent's
-// children, for a walk over those children, which empties or sifts the list
-// itself once it is done.
-func (fsys *Writer) dropName(e *fsEntry) {
-	e.removed = true
+// dropName is unlinkEntry less the place among the parent's children, for
+// a walk over those children, which empties or sifts the list itself once
+// it is done. It returns the entry that is gone, at the name that was e's:
+// e, or the entry of the name its file went on under (promoteAlias).
+func (fsys *Writer) dropName(e *fsEntry) *fsEntry {
 	delete(fsys.byPath, e.path)
 
-	if target := e.linkTo; target != nil {
-		// The name stays in the target's list, marked removed: taken out
-		// here, each name of an inode cost the list's length, and all of
-		// them its square. promoteAlias passes over it.
-		target.extraLinks--
-		if target.extraLinks == 0 {
-			delete(fsys.aliases, target)
-		}
+	gone := e
 
-		return
+	switch {
+	case e.linkTo != nil:
+		// The name stays among the target's, marked removed: taken out
+		// here, each name of an inode cost their number, and all of them
+		// its square. promoteAlias and aliased pass over it.
+		fsys.oneNameFewer(e.linkTo)
+	case e.extraLinks > 0:
+		gone = fsys.promoteAlias(e)
 	}
 
-	if e.extraLinks > 0 {
-		fsys.promoteAlias(e)
+	gone.removed = true
+
+	return gone
+}
+
+// oneNameFewer takes one off the count of target's other names, and drops
+// the record of them with the last.
+func (fsys *Writer) oneNameFewer(target *fsEntry) {
+	target.extraLinks--
+	if target.extraLinks == 0 {
+		delete(fsys.aliases, target)
 	}
 }
 
-// promoteAlias hands target's inode to one of its surviving aliases, which
-// the Writer keeps listed: found by a walk of the tree, removing every
-// target under a directory cost the square of their number. The lowest
-// path wins, so the outcome, and thus the image, is the same whatever
-// order the links were made in.
+// promoteAlias keeps the file of a first name that is going under another
+// of its names: the lowest path, so that the outcome, and thus the image,
+// is the same whatever order the links were made in. The file stays in the
+// entry that holds it, which takes that name and its place in the tree;
+// the name's own entry takes the name that is going, and is returned as
+// what is gone. Nothing else moves: the file's other names point at the
+// entry that holds it still, where handing the file to another entry cost
+// a pass over all of them, and removing them first name first the square
+// of their number.
 //
-// A name under a removed directory survives nothing: a directory is removed
-// before what it holds, and such a name made the heir, every name of one
-// inode in a removed directory would take the inode in its turn.
-func (fsys *Writer) promoteAlias(target *fsEntry) {
-	names := slices.DeleteFunc(fsys.aliases[target], func(a *fsEntry) bool {
-		return a.removed || a.underRemoved()
-	})
-	delete(fsys.aliases, target)
+// A name under a removed directory takes nothing: a directory is removed
+// before what it holds, and its names go with it. With no name to take
+// the file, target is what is gone.
+func (fsys *Writer) promoteAlias(target *fsEntry) *fsEntry {
+	// No record, no other name.
+	names := fsys.aliases[target]
+	if names == nil {
+		return target
+	}
 
-	if len(names) == 0 {
-		target.extraLinks = 0
+	names.order()
+
+	var heir *fsEntry
+
+	for heir == nil && len(names.byPath) > 0 {
+		if a := names.lowest(); !takesNothing(a) {
+			heir = a
+		}
+	}
+
+	if heir == nil {
+		return target
+	}
+
+	target.path, heir.path = heir.path, target.path
+	target.parent, heir.parent = heir.parent, target.parent
+	target.at, heir.at = heir.at, target.at
+	target.parent.children[target.at], heir.parent.children[heir.at] = target, heir
+	fsys.byPath[target.path] = target
+	fsys.oneNameFewer(target)
+
+	return heir
+}
+
+// aliasNames is the other names of one inode. A name linked waits, at no
+// cost but its place in a list, until a first name is removed: only then
+// are the names put in order, byPath a heap with the lowest path first.
+type aliasNames struct {
+	byPath  []*fsEntry
+	waiting []*fsEntry
+}
+
+// takesNothing reports a name no file goes on under: one removed, or one
+// under a removed directory, which is removed before what it holds.
+func takesNothing(a *fsEntry) bool {
+	return a.removed || a.underRemoved()
+}
+
+// order moves the names that wait into the heap, less those that take
+// nothing: with a directory going, they are all of its names.
+func (n *aliasNames) order() {
+	n.waiting = slices.DeleteFunc(n.waiting, takesNothing)
+
+	if len(n.byPath) == 0 {
+		n.byPath, n.waiting = n.waiting, n.byPath
+		n.heapify()
 
 		return
 	}
 
-	heir := slices.MinFunc(names, func(a, b *fsEntry) int {
-		return cmp.Compare(a.path, b.path)
-	})
-	rest := slices.DeleteFunc(names, func(a *fsEntry) bool { return a == heir })
-
-	// The heir takes over the inode wholesale, keeping only its own name
-	// and place in the tree.
-	heirPath, heirParent, heirAt := heir.path, heir.parent, heir.at
-	*heir = *target
-	heir.path, heir.parent, heir.at = heirPath, heirParent, heirAt
-	heir.linkTo = nil
-	heir.removed = false
-
-	// #nosec G115 -- each alias was counted into target.extraLinks, a uint32
-	heir.extraLinks = uint32(len(rest))
-	for _, a := range rest {
-		a.linkTo = heir
+	for _, a := range n.waiting {
+		n.byPath = append(n.byPath, a)
+		n.up(len(n.byPath) - 1)
 	}
 
-	if len(rest) > 0 {
-		fsys.aliases[heir] = rest
+	clear(n.waiting)
+	n.waiting = n.waiting[:0]
+}
+
+// lowest takes the lowest path out of the heap, which holds one.
+func (n *aliasNames) lowest() *fsEntry {
+	last := len(n.byPath) - 1
+	top := n.byPath[0]
+
+	n.byPath[0] = n.byPath[last]
+	clear(n.byPath[last:])
+	n.byPath = n.byPath[:last]
+	n.down(0)
+
+	return top
+}
+
+// sift drops the removed names.
+func (n *aliasNames) sift() {
+	removed := func(a *fsEntry) bool { return a.removed }
+
+	n.waiting = slices.DeleteFunc(n.waiting, removed)
+	n.byPath = slices.DeleteFunc(n.byPath, removed)
+	n.heapify()
+}
+
+func (n *aliasNames) heapify() {
+	for i := len(n.byPath)/2 - 1; i >= 0; i-- {
+		n.down(i)
 	}
-	// The old target is now a dead husk: nothing points at it and it owns
-	// nothing. Zero the link count so a stale reference cannot double-count.
-	target.extraLinks = 0
-	target.children = nil
+}
+
+func (n *aliasNames) up(i int) {
+	for i > 0 {
+		parent := (i - 1) / 2
+		if n.byPath[parent].path <= n.byPath[i].path {
+			return
+		}
+
+		n.byPath[parent], n.byPath[i] = n.byPath[i], n.byPath[parent]
+		i = parent
+	}
+}
+
+func (n *aliasNames) down(i int) {
+	for {
+		least := 2*i + 1
+		if least >= len(n.byPath) {
+			return
+		}
+
+		if right := least + 1; right < len(n.byPath) && n.byPath[right].path < n.byPath[least].path {
+			least = right
+		}
+
+		if n.byPath[i].path <= n.byPath[least].path {
+			return
+		}
+
+		n.byPath[i], n.byPath[least] = n.byPath[least], n.byPath[i]
+		i = least
+	}
 }
 
 // addAlias registers p as another name for target's inode — what Link does,
@@ -2496,19 +2618,24 @@ func (fsys *Writer) addAlias(p string, target *fsEntry) error {
 // aliased records alias as one more name of target's inode.
 func (fsys *Writer) aliased(target, alias *fsEntry) {
 	if fsys.aliases == nil {
-		fsys.aliases = make(map[*fsEntry][]*fsEntry)
+		fsys.aliases = make(map[*fsEntry]*aliasNames)
 	}
 
-	// unlinkEntry leaves a removed name in the list, and the list is all
-	// that holds its entry then: once the removed outnumber the live they
-	// go, at a cost each removal has paid for, so that a name linked and
-	// removed over and over keeps nothing.
 	names := fsys.aliases[target]
-	if len(names) > 2*int(target.extraLinks) {
-		names = slices.DeleteFunc(names, func(a *fsEntry) bool { return a.removed })
+	if names == nil {
+		names = &aliasNames{}
+		fsys.aliases[target] = names
 	}
 
-	fsys.aliases[target] = append(names, alias)
+	// A removed name stays among the others, which are all that holds its
+	// entry then: once the removed outnumber the live they go, at a cost
+	// each removal has paid for, so that a name linked and removed over
+	// and over keeps nothing.
+	if len(names.byPath)+len(names.waiting) > 2*int(target.extraLinks) {
+		names.sift()
+	}
+
+	names.waiting = append(names.waiting, alias)
 	target.extraLinks++
 }
 
