@@ -233,10 +233,15 @@ func WithExtraDevices(devices ...io.ReaderAt) OpenOpt {
 // an image is not validated to be a tree. A corrupt or hostile image may
 // contain a directory that is reachable from itself, and a caller that walks
 // the whole tree — [io/fs.WalkDir], for instance, which has no cycle
-// detection for any [io/fs.FS] — will descend through such a cycle
-// indefinitely. Callers walking an image from an untrusted source should
-// impose their own depth or visit limit. [Writer.CopyFrom] does this
-// internally and rejects cyclic images.
+// detection for any [io/fs.FS] — descends through such a cycle until a
+// path passes the 4096 bytes a path may have, where the walk's function is
+// handed ErrInvalid. A function that returns that error ends the walk
+// there. One that goes on walks a directory that reaches itself once for
+// each of the names it does so by, at every level: the number of those
+// names to the power of the levels, of which there are 16 for names of 255
+// bytes and 2048 for names of one. Callers walking an image from an
+// untrusted source should impose their own depth or visit limit.
+// [Writer.CopyFrom] does this internally and rejects cyclic images.
 //
 //nolint:gocognit // the superblock's checks, one after another, each naming what it refuses
 func Open(r io.ReaderAt, opts ...OpenOpt) (fs.FS, error) {
