@@ -530,7 +530,7 @@ func (fsys *Writer) copyFromImage(img *image) error {
 			xattrSize = int(xcnt-1)*disk.SizeXattrEntry + disk.SizeXattrBodyHeader
 		}
 
-		var xattrs map[string]string
+		var xattrs []xattr
 
 		if xattrSize > 0 {
 			if err := img.xattrsListable(cur.nid); err != nil {
@@ -542,14 +542,16 @@ func (fsys *Writer) copyFromImage(img *image) error {
 				return fmt.Errorf("xattrs for nid %d: %w", cur.nid, err)
 			}
 
-			xattrs, err = parseXattrsFromBuf(xb, span, sharedXattrOff, img.listedPrefix)
+			fsys.xattrScratch, err = parseXattrsFromBuf(
+				fsys.xattrScratch[:0], xb, span, sharedXattrOff, img.listedPrefix,
+			)
 			if err != nil {
 				return fmt.Errorf("xattrs for nid %d: %w", cur.nid, err)
 			}
 			// As for any source: a name the Writer could only store hidden
 			// (an ACL's with something after it is the one an image can
 			// still list) is left out.
-			xattrs = listedXattrs(xattrs)
+			xattrs = fsys.heldXattrs(listedXattrs(fsys.xattrScratch))
 		}
 
 		trailingAddr := inodeAddr + int64(icSize) + int64(xattrSize)
@@ -1134,7 +1136,8 @@ func (*Writer) parseChunks(
 	return slices.Clip(chunks), nil
 }
 
-// parseXattrsFromBuf parses xattr entries from an in-memory buffer.
+// parseXattrsFromBuf parses xattr entries from an in-memory buffer into
+// dst, which it returns in the order of their names.
 // at provides on-demand access to the shared xattr block at sharedOff.
 // longPrefix resolves long xattr prefix indexes (NameIndex with high bit set).
 //
@@ -1151,11 +1154,12 @@ func (*Writer) parseChunks(
 //
 //nolint:gocognit // the xattr body decoded field by field: shared references, then inline entries
 func parseXattrsFromBuf(
+	dst []xattr,
 	buf []byte,
 	span func(off, n int64) ([]byte, error),
 	sharedOff int64,
 	prefixOf func(uint8) (string, bool),
-) (map[string]string, error) {
+) ([]xattr, error) {
 	if len(buf) < disk.SizeXattrBodyHeader {
 		return nil, fmt.Errorf("xattr body of %d bytes too small: %w", len(buf), ErrCorrupt)
 	}
@@ -1164,17 +1168,6 @@ func parseXattrsFromBuf(
 	xh.Unmarshal(buf)
 
 	pos := disk.SizeXattrBodyHeader
-
-	xattrs := make(map[string]string)
-	set := func(name, value string) error {
-		if _, dup := xattrs[name]; dup {
-			return fmt.Errorf("duplicate xattr %q: %w", name, ErrCorrupt)
-		}
-
-		xattrs[name] = value
-
-		return nil
-	}
 
 	// Resolve shared xattr references.
 	for range int(xh.SharedCount) {
@@ -1203,9 +1196,7 @@ func parseXattrsFromBuf(
 		}
 
 		if prefix, listed := prefixOf(xe.NameIndex); listed {
-			if err := set(prefix+string(body[:xe.NameLen]), string(body[xe.NameLen:])); err != nil {
-				return nil, err
-			}
+			dst = append(dst, xattr{name: prefix + string(body[:xe.NameLen]), value: string(body[xe.NameLen:])})
 		}
 	}
 
@@ -1225,10 +1216,10 @@ func parseXattrsFromBuf(
 		}
 
 		if prefix, listed := prefixOf(xe.NameIndex); listed {
-			name := prefix + string(buf[pos:pos+int(xe.NameLen)])
-			if err := set(name, string(buf[pos+int(xe.NameLen):pos+entryLen])); err != nil {
-				return nil, err
-			}
+			dst = append(dst, xattr{
+				name:  prefix + string(buf[pos:pos+int(xe.NameLen)]),
+				value: string(buf[pos+int(xe.NameLen) : pos+entryLen]),
+			})
 		}
 
 		pos += entryLen
@@ -1239,11 +1230,15 @@ func parseXattrsFromBuf(
 		}
 	}
 
-	if len(xattrs) == 0 {
-		return nil, nil //nolint:nilnil // an empty xattr body is no map at all, not an error
+	slices.SortFunc(dst, byXattrName)
+
+	for i := 1; i < len(dst); i++ {
+		if dst[i].name == dst[i-1].name {
+			return nil, fmt.Errorf("duplicate xattr %q: %w", dst[i].name, ErrCorrupt)
+		}
 	}
 
-	return xattrs, nil
+	return dst, nil
 }
 
 // checkFlatHole holds a flat file at the null address to the blocks a copy

@@ -4,9 +4,9 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"hash/maphash"
 	"io"
 	"io/fs"
-	"maps"
 	"math"
 	"math/bits"
 	"os"
@@ -75,6 +75,15 @@ type Writer struct {
 	// directories are not in it: one that two paths reach, as under a bind
 	// mount, is a directory at each, as mkfs.erofs has it.
 	copyDirs map[uint64]string
+	// copyXattrs holds the attributes of the entries of one CopyFrom, by a
+	// hash of their names and values, so that entries of the same
+	// attributes, as the files of a labelled tree are, share one array of
+	// them. A key holds the first attributes that hashed to it.
+	copyXattrs map[uint64][]xattr
+	xattrSeed  maphash.Seed
+	// xattrScratch is where a copy puts an entry's attributes in order
+	// before it knows whether an earlier entry has the same ones.
+	xattrScratch []xattr
 
 	// openFile is the file returned by the most recent Create that has not
 	// been closed. Data is appended to one shared stream, so at most one
@@ -130,6 +139,7 @@ func Create(out io.WriteSeeker, opts ...CreateOpt) *Writer {
 		hasBuildTime: o.hasBuildTime,
 		root:         root,
 		byPath:       map[string]*fsEntry{"/": root},
+		xattrSeed:    maphash.MakeSeed(),
 		dataFile:     o.dataFile,
 		tempDir:      o.tempDir,
 		noInlineData: o.noInlineData,
@@ -584,16 +594,18 @@ func (fsys *Writer) Setxattr(name, attr, value string) error {
 		return err
 	}
 
-	// The map may be one a source handed, its own and shared by other
-	// entries of the copy: the first write goes to a map of the Writer's.
-	if !e.xattrsOwned {
-		owned := make(map[string]string, len(e.xattrs)+1)
-		maps.Copy(owned, e.xattrs)
+	at, found := xattrAt(e.xattrs, attr)
+	// The array may be one a copy gave, which every entry of the copy that
+	// has the same attributes shares: a write goes to a new one.
+	set := make([]xattr, 0, len(e.xattrs)+1)
+	set = append(set, e.xattrs[:at]...)
+	set = append(set, xattr{name: attr, value: value})
 
-		e.xattrs, e.xattrsOwned = owned, true
+	if found {
+		at++
 	}
 
-	e.xattrs[attr] = value
+	e.xattrs = append(set, e.xattrs[at:]...)
 
 	return nil
 }
@@ -792,9 +804,6 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 	if !root.IsDir() {
 		return fmt.Errorf("mkfs: the source's root: %w", ErrNotDirectory)
 	}
-	// A copy hands the root a map of its source's, in place: whatever the
-	// root holds from here on is not known to be the Writer's.
-	fsys.root.xattrsOwned = false
 	// Reset per-CopyFrom state.
 	fsys.copyMetadataOnly = false
 	fsys.copyMerge = false
@@ -803,6 +812,10 @@ func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {
 	fsys.copySourceIsImage = false
 
 	fsys.copyLinks = make(map[hardlinkKey]*fsEntry)
+	fsys.copyXattrs = map[uint64][]xattr{}
+	// Let go of with the copy: it would keep the attributes of entries
+	// removed since.
+	defer func() { fsys.copyXattrs, fsys.xattrScratch = nil, nil }()
 
 	fsys.copyDirs = make(map[uint64]string)
 	for _, opt := range opts {
@@ -1269,13 +1282,12 @@ type fsEntry struct {
 	nlinkSet bool // true if SetNlink was called
 	size     uint64
 	rdev     uint32
-	xattrs   map[string]string
-	// xattrsOwned: xattrs is a map the Writer made. One a source handed is
-	// read and never written.
-	xattrsOwned bool
-	linkTarget  string
-	chunks      []builder.Chunk
-	contiguous  bool // data blocks are contiguous; flat-plain is sufficient
+	// xattrs is never written in place: the entries a copy found with the
+	// same attributes share one array of them.
+	xattrs     []xattr
+	linkTarget string
+	chunks     []builder.Chunk
+	contiguous bool // data blocks are contiguous; flat-plain is sufficient
 	// chunksOfData: the chunks lay the file out over directData, which
 	// leaves its holes out; Close stores that data in this image and
 	// places the chunks on it.
@@ -1433,7 +1445,7 @@ type erofsEntry struct {
 	dataBytes    int
 
 	// Extended attributes
-	xattrs map[string]string
+	xattrs []xattr
 
 	// aliasOf marks a hardlink dirent: this entry contributes a directory
 	// entry (name + shared nid) but NO inode of its own — planLayout skips
@@ -1549,13 +1561,16 @@ func (fi *writerFileInfo) Nlink() uint64 { return uint64(fi.entry.linkCount()) }
 func (fi *writerFileInfo) Rdev() uint64  { return uint64(fi.entry.rdev) }
 
 // GetAllXattr is a copy of the entry's attributes.
-func (fi *writerFileInfo) GetAllXattr() map[string]string { return maps.Clone(fi.entry.xattrs) }
+func (fi *writerFileInfo) GetAllXattr() map[string]string { return xattrMap(fi.entry.xattrs) }
 
 // GetXattr is one attribute of the entry.
 func (fi *writerFileInfo) GetXattr(name string) (string, bool) {
-	v, ok := fi.entry.xattrs[name]
+	at, ok := xattrAt(fi.entry.xattrs, name)
+	if !ok {
+		return "", false
+	}
 
-	return v, ok
+	return fi.entry.xattrs[at].value, true
 }
 
 func (fi *writerFileInfo) stat() *Stat {
@@ -1570,7 +1585,7 @@ func (fi *writerFileInfo) stat() *Stat {
 		Mtime:   e.mtime,
 		MtimeNs: e.mtimeNs,
 		Nlink:   uint64(e.linkCount()),
-		Xattrs:  maps.Clone(e.xattrs),
+		Xattrs:  xattrMap(e.xattrs),
 	}
 }
 
@@ -1986,12 +2001,21 @@ func (fsys *Writer) add(p string, info fs.FileInfo) error {
 
 	// A source's attribute the kernel would list on no mount is left out,
 	// as an image's own is, and fails no copy: Setxattr alone refuses one.
-	xattrs := listedXattrs(be.Xattrs)
-	for name, value := range xattrs {
-		if err := validateXattr(name, value); err != nil {
+	fsys.xattrScratch = fsys.xattrScratch[:0]
+	for name, value := range be.Xattrs {
+		fsys.xattrScratch = append(fsys.xattrScratch, xattr{name: name, value: value})
+	}
+
+	slices.SortFunc(fsys.xattrScratch, byXattrName)
+
+	listed := listedXattrs(fsys.xattrScratch)
+	for _, x := range listed {
+		if err := validateXattr(x.name, x.value); err != nil {
 			return fmt.Errorf("mkfs: %s: %w", p, err)
 		}
 	}
+
+	xattrs := fsys.heldXattrs(listed)
 	// Sys() is the only route for ownership, but a modification time has a
 	// portable home in fs.FileInfo itself. A source that carries no
 	// platform stat — embed.FS, fstest.MapFS, os.DirFS anywhere entryFromSys
@@ -2145,6 +2169,41 @@ func (fsys *Writer) toDataFile(p string, fe *fsEntry, data io.Reader, size uint6
 	}
 
 	return f.Close()
+}
+
+// heldXattrs is attrs, an entry's attributes in the order of their names, as
+// the Writer holds them: in the array an earlier entry of this copy has when
+// its attributes were the same ones, and else in one of their own. attrs is
+// the caller's to use again.
+func (fsys *Writer) heldXattrs(attrs []xattr) []xattr {
+	if len(attrs) == 0 {
+		return nil
+	}
+
+	var h maphash.Hash
+
+	h.SetSeed(fsys.xattrSeed)
+
+	for _, x := range attrs {
+		_, _ = h.WriteString(x.name)
+		_ = h.WriteByte(0)
+		_, _ = h.WriteString(x.value)
+		_ = h.WriteByte(0)
+	}
+
+	key := h.Sum64()
+
+	held, taken := fsys.copyXattrs[key]
+	if taken && slices.Equal(held, attrs) {
+		return held
+	}
+
+	held = slices.Clone(attrs)
+	if !taken {
+		fsys.copyXattrs[key] = held
+	}
+
+	return held
 }
 
 // checkNoOpenFile reports an error when a file from Create is still open.

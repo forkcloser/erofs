@@ -156,12 +156,9 @@ func (w *erofsWriter) checkLimits() error {
 			}
 		}
 		// Setxattr validates at the API boundary, but xattrs also arrive
-		// through CopyFrom, where the source picks the lengths. Iterated in
-		// map order: every key is checked either way, and sorting here cost a
-		// slice and a sort per entry to no purpose. writeXattrs still sorts,
-		// where the on-disk order actually matters.
-		for name, value := range e.xattrs {
-			if err := validateXattr(name, value); err != nil {
+		// through CopyFrom, where the source picks the lengths.
+		for _, x := range e.xattrs {
+			if err := validateXattr(x.name, x.value); err != nil {
 				return fmt.Errorf("mkfs: %s: %w", e.path, err)
 			}
 		}
@@ -747,9 +744,9 @@ func (w *erofsWriter) writeXattrs(buf io.Writer, e *erofsEntry) error {
 		return err
 	}
 
-	for _, name := range sortedXattrKeys(e.xattrs) {
-		value := e.xattrs[name]
-		nameIndex, suffix := xattrSplit(name)
+	for _, x := range e.xattrs {
+		value := x.value
+		nameIndex, suffix := xattrSplit(x.name)
 
 		var xent [disk.SizeXattrEntry]byte
 
