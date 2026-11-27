@@ -758,8 +758,14 @@ func holeSizeIsBounded(
 }
 
 // patchDirentNid rewrites every 8-byte dirent nid slot equal to from so it
-// points at to, turning a valid tree into a cyclic graph.
-func patchDirentNid(buf []byte, from, to uint64) int {
+// points at to, turning a valid tree into a cyclic graph. The slots are
+// found by their bytes, so their number is the caller's to state: the
+// entry that names the inode, and for a directory its own "." and the
+// ".." of each directory in it, which the rewritten entry leaves out of
+// reach. Another count is bytes that were no dirent's.
+func patchDirentNid(t *testing.T, buf []byte, from, to uint64, slots int) {
+	t.Helper()
+
 	var want, repl [8]byte
 	binary.LittleEndian.PutUint64(want[:], from)
 	binary.LittleEndian.PutUint64(repl[:], to)
@@ -774,7 +780,9 @@ func patchDirentNid(buf []byte, from, to uint64) int {
 		}
 	}
 
-	return n
+	if n != slots {
+		t.Fatalf("test premise broken: nid %d is in %d slots of the image, want %d", from, n, slots)
+	}
 }
 
 // direntNameMax is EROFS_NAME_LEN: the kernel refuses to look up a longer
@@ -835,13 +843,14 @@ func buildCycle(t *testing.T, nameLen int, toRoot bool) []byte {
 		t.Fatal(err)
 	}
 
+	// e's entry and its ".", or d's with the ".." of e besides.
+	slots := 2
+
 	if toRoot {
-		eNid, dNid = dNid, uint64(i.sb.RootNid)
+		eNid, dNid, slots = dNid, uint64(i.sb.RootNid), 3
 	}
 
-	if patchDirentNid(buf, eNid, dNid) == 0 {
-		t.Fatal("could not construct a directory cycle")
-	}
+	patchDirentNid(t, buf, eNid, dNid, slots)
 
 	return buf
 }
@@ -1287,9 +1296,7 @@ func buildSymlinkCycleImage(t *testing.T, target string) []byte {
 		t.Fatal(err)
 	}
 
-	if patchDirentNid(buf, aNid, uint64(i.sb.RootNid)) == 0 {
-		t.Fatal("could not construct a directory cycle")
-	}
+	patchDirentNid(t, buf, aNid, uint64(i.sb.RootNid), 2)
 
 	return buf
 }
@@ -1357,7 +1364,9 @@ func TestResolveWorkIsBounded(t *testing.T) {
 func TestResolveRejectsOverlongPath(t *testing.T) {
 	t.Parallel()
 
-	buf := buildSymlinkCycleImage(t, "/a/l")
+	// Not a target of four bytes: the link's i_size would read as "a"'s
+	// nid, 4, and be patched with it.
+	buf := buildSymlinkCycleImage(t, "/a/a/l")
 
 	cr := &countingReaderAt{ra: bytes.NewReader(buf)}
 
@@ -1368,13 +1377,10 @@ func TestResolveRejectsOverlongPath(t *testing.T) {
 
 	before := cr.calls
 
+	// The caller's argument, not the image's fault.
 	_, err = img.Open(strings.Repeat("a/", maxPathLen) + "l")
-	if err == nil {
-		t.Fatal("Open accepted a path over PATH_MAX")
-	}
-
-	if !errors.Is(err, ErrInvalid) {
-		t.Errorf("err = %v, want it to wrap ErrInvalid", err)
+	if !errors.Is(err, ErrInvalid) || errors.Is(err, ErrCorrupt) {
+		t.Fatalf("Open of a path over PATH_MAX: %v, want ErrInvalid and not ErrCorrupt", err)
 	}
 
 	if n := cr.calls - before; n > 1 {
@@ -1554,12 +1560,13 @@ func (s *strictReaderAt) ReadAt(p []byte, off int64) (int, error) {
 
 // exerciseUntrusted drives every read path over an image, ignoring errors:
 // the point is what offsets reach the reader, not what the calls return.
+// The image has to open for any of them to be driven.
 func exerciseUntrusted(t *testing.T, buf []byte) {
 	t.Helper()
 
 	img, err := Open(&strictReaderAt{t: t, buf: buf})
 	if err != nil {
-		return
+		t.Fatalf("test premise broken: the tampered image does not open: %v", err)
 	}
 
 	_ = fs.WalkDir(img, ".", func(p string, d fs.DirEntry, err error) error {
@@ -1610,9 +1617,7 @@ func TestUntrustedNidStaysInBounds(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if patchDirentNid(buf, fNid, 1<<58) == 0 {
-		t.Fatal("could not patch the dirent nid")
-	}
+	patchDirentNid(t, buf, fNid, 1<<58, 1)
 
 	exerciseUntrusted(t, buf)
 }
