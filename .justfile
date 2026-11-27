@@ -15,7 +15,17 @@ export TMPDIR := env_var_or_default('TMPDIR', env_var_or_default('TEMP', '/tmp')
 # The FIRST recipe defined here becomes `just`'s default.
 lint: do::lint::go::default do::lint::go::deadcode do::lint::default
 fix: do::fix::go::default do::fix::default
-test: mkfs-erofs do::test::go::unit do::test::go::race do::test::go::cover
+# The suites with mkfs.erofs and fsck.erofs on PATH and required: a test that
+# needs one fails without it here, where it skips, or takes no verdict, on a
+# lane that runs the Go recipes alone. fsck.erofs is not built for windows.
+test: mkfs-erofs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export EROFS_REQUIRE_MKFS=1
+    [ "$(go env GOOS)" = windows ] || export EROFS_REQUIRE_FSCK=1
+    just do test go unit
+    just do test go race
+    just do test go cover
 bench: do::perf::go::bench
 
 # The mkfs.erofs the image-backed tests run, and the fsck.erofs that reads
@@ -46,7 +56,7 @@ mkfs-erofs:
     mv -f ".build/mkfs-erofs/${name}/mkfs.erofs${x}" ".build/mkfs-erofs/bin/mkfs.erofs${x}"
     # fsck.erofs is in the archive where it builds, which is everywhere but
     # windows. An archive without it there fails here: the tests take its
-    # verdict where it is on PATH and say nothing where it is not.
+    # verdict where it is on PATH, and `just test` requires it there.
     rm -f .build/mkfs-erofs/bin/fsck.erofs
     [ "$(go env GOOS)" = windows ] || mv -f ".build/mkfs-erofs/${name}/fsck.erofs" .build/mkfs-erofs/bin/
     echo "mkfs.erofs: $(".build/mkfs-erofs/bin/mkfs.erofs${x}" -V 2>&1 | head -n 1) at .build/mkfs-erofs/bin"
