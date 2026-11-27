@@ -67,8 +67,9 @@ The reader is stricter than the kernel in the following places; all but the
 last two are divergences the differential names: a dirent whose type disagrees
 with its inode's mode is `ErrCorrupt`, where the kernel serves each as it is;
 a dirent nid with bits 59 to 63 set is `ErrCorrupt`, where the kernel's shift
-drops them and reads another inode; a symlink target longer than 4096 bytes is
-refused, where the kernel reads what fits, and one that is empty or holds a
+drops them and reads another inode; a symlink target longer than 4095 bytes is
+`ErrCorrupt`, where the kernel serves one beside its inode whole and one in a
+data block cut to a page less a byte, and one that is empty or holds a
 NUL is `ErrCorrupt`, where the kernel makes a C string of it; an extended
 attribute name an inode lists twice is `ErrCorrupt`, where the kernel lists
 both and serves the first; a file whose map runs past its device is refused at
@@ -233,7 +234,7 @@ or whose minor is over 1048575 is refused, `ErrInvalid`.
 The reader accepts block sizes from 512 bytes to 64 KiB. Compressed inodes
 and 48-bit chunk addressing are rejected with
 `ErrNotImplemented`. The bounds that protect a caller from a hostile image
-report `ErrInvalid`: symlink targets and paths of at most 4096 bytes, 255
+report `ErrInvalid`: paths of at most 4096 bytes, 255
 symlink hops per resolution, a chunk-index map of at most 64 MiB per file,
 and `fs.ReadFile` refusing files over 128 MiB (open and `io.Copy` those).
 The writer refuses, `ErrInvalid`, a file name over 255 bytes, which no lookup

@@ -3508,10 +3508,11 @@ const (
 	// maxNameLen is EROFS_NAME_LEN: the kernel's lookup refuses a longer
 	// name with ENAMETOOLONG.
 	maxNameLen = 255
-	// maxSymlinkTarget is what the kernel's readlink delivers at most: a
-	// page less its terminator. The reader reads back up to a page, so a
-	// writer held to one less never writes what the reader or the kernel
-	// would cut.
+	// maxSymlinkTarget is the longest target the writer stores and the
+	// reader serves, a longer one being a corrupt image to it: PATH_MAX
+	// less its terminator, the most symlink(2) takes, and what the
+	// kernel's page_get_link delivers of a target in a data block on
+	// 4 KiB pages.
 	maxSymlinkTarget = 4095
 	nullAddr         = 0xFFFFFFFF // marks a hole/sparse chunk
 

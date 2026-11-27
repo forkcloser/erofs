@@ -598,21 +598,14 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		// i_size sizes the buffer a directory or a link's target is read
 		// into whole, and an image whose source reports no length is as long
 		// as its superblock says. One directory gets the budget the whole
-		// metadata region has. A target is bounded as the copy with its data
-		// bounds it: the reader's page, then the writer's one byte less,
-		// which the reader reads and Symlink refuses.
+		// metadata region has. A target is bounded as ReadLink bounds it.
 		if typ == disk.StatTypeDir && size > maxDirBytes {
 			return fmt.Errorf("directory nid %d declares %d bytes, over the %d byte limit: %w",
 				cur.nid, size, int64(maxDirBytes), ErrInvalid)
 		}
 
-		if typ == disk.StatTypeSymlink && size > maxSymlinkSize {
-			return fmt.Errorf("nid %d: symlink target size %d out of range: %w", cur.nid, size, ErrCorrupt)
-		}
-
 		if typ == disk.StatTypeSymlink && size > maxSymlinkTarget {
-			return fmt.Errorf("nid %d: symlink target is %d bytes, over the %d byte limit: %w",
-				cur.nid, size, maxSymlinkTarget, ErrInvalid)
+			return fmt.Errorf("nid %d: symlink target size %d out of range: %w", cur.nid, size, ErrCorrupt)
 		}
 
 		if trailingAddr%int64(blockSize)+tail > int64(blockSize) {

@@ -22,9 +22,9 @@ package erofs_test
 //     disagree with the format or point outside it is ErrCorrupt, which
 //     matches ErrInvalid too; a bad argument is ErrInvalid alone; a failing
 //     reader's error passes through untouched; a symlink target of more
-//     than 4096 bytes, a path of more than 4096 bytes, more than 255 link
-//     hops, a chunk map over 64 MiB and io/fs.ReadFile over 128 MiB are
-//     ErrInvalid.
+//     than 4095 bytes is ErrCorrupt; a path of more than 4096 bytes, more
+//     than 255 link hops, a chunk map over 64 MiB and io/fs.ReadFile over
+//     128 MiB are ErrInvalid.
 //   - Stat: Mode, Size, Rdev, Ino, UID, GID, Mtime, MtimeNs, Nlink and
 //     Xattrs are the raw inode fields; the FileInfo implements UID, GID,
 //     Ino, Nlink, Rdev, GetAllXattr, GetXattr and DataRange, each returning
@@ -1012,7 +1012,7 @@ func committed(tb testing.TB, name string) corpus.Image {
 // reader refuses it as ErrNotImplemented or ErrCorrupt. The documented
 // rules under which the reference reads and the reader refuses: a feature
 // the package names as ErrNotImplemented (extended inode slots, the 48-bit
-// layout), a symlink target over 4096 bytes (ErrInvalid), a duplicated or
+// layout), a symlink target over 4095 bytes (ErrCorrupt), a duplicated or
 // unresolvable xattr name, an empty or NUL-bearing symlink target, a file
 // whose map runs past its device, refused at Stat where the kernel fails
 // at the read, and an image shorter than its superblock's block count,
@@ -1212,9 +1212,9 @@ func judge(ref, got verdict) string {
 		case (got.class == "invalid" || got.class == "corrupt") && ref.longSymlink:
 			// The kernel has no bound on a symlink's size at fill time
 			// (page_get_link reads what fits); the package refuses a
-			// target over PATH_MAX as corrupt where the size is the
-			// inode's and as invalid where it is a path's, a bound it
-			// states, kept as a documented divergence.
+			// target of PATH_MAX bytes or more as corrupt where the size
+			// is the inode's and as invalid where it is a path's, a bound
+			// it states, kept as a documented divergence.
 			return ""
 		case got.class == "corrupt" && (ref.dupXattr || ref.badTarget || ref.extentsOut || ref.direntType || ref.nidHigh || ref.nidOut || !ref.complete):
 			return ""
@@ -1269,7 +1269,7 @@ type verdict struct {
 	err            error
 	tree           string
 	notImplemented bool // the image uses a feature the package documents as ErrNotImplemented
-	longSymlink    bool // a symlink target over the package's 4096-byte bound: the kernel reads it, the reader refuses
+	longSymlink    bool // a symlink target over the package's 4095-byte bound: the kernel reads it, the reader refuses
 	sharedOut      bool // the superblock's shared-xattr start past the image: the kernel fails on use, the reader at Open
 	dupXattr       bool // an inode names one xattr twice, which the README says is refused
 	badTarget      bool // a symlink whose stored target is empty or holds a NUL, which the package refuses
@@ -2287,7 +2287,7 @@ func referenceVerdict(img, blob []byte) verdict {
 			v.notImplemented = true
 		}
 
-		if in.IsSymlink() && in.Size > 4096 {
+		if in.IsSymlink() && in.Size > erofsspec.TargetMax {
 			v.longSymlink = true
 		}
 
@@ -2310,7 +2310,7 @@ func referenceVerdict(img, blob []byte) verdict {
 		// one or one with a NUL inside resolves to nothing or less; the
 		// package refuses both as corrupt, a rule it keeps over the
 		// kernel's.
-		if in.IsSymlink() && in.Size <= 4096 {
+		if in.IsSymlink() && in.Size <= erofsspec.TargetMax {
 			if raw, rerr := ref.ReadAt(in, 0, in.Size); rerr == nil && (len(raw) == 0 || bytes.IndexByte(raw, 0) >= 0) {
 				v.badTarget = true
 			}

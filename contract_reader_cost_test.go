@@ -921,17 +921,17 @@ func TestContractReaderResolveHoldsEveryHopToThePathLimit(t *testing.T) {
 // TestContractReaderResolveLooksUpAtMost255Paths: one resolution looks up
 // at most 255 times 2048 names in all, 255 hops of the longest path there
 // is, the walk of the name it was given included. A name of 2048 components
-// ending in a link back to the same 2048 components reaches that budget one
-// path before it has followed its 256th link, and is ErrLoop there. Each
-// name looked up is one read of its directory's inode, the root's or
-// "a"'s, which is what is counted.
+// ending in a link back to 2047 of them, the longest target there is,
+// reaches that budget one path before it has followed its 256th link, and
+// is ErrLoop there. Each name looked up is one read of its directory's
+// inode, the root's or "a"'s, which is what is counted.
 func TestContractReaderResolveLooksUpAtMost255Paths(t *testing.T) {
 	t.Parallel()
 
 	const budget = 255 * 2048
 
 	name := strings.Repeat("a/", 2047) + "l"
-	src := laidLinkLoop(12, "/"+name)
+	src := laidLinkLoop(12, "/"+strings.Repeat("a/", 2046)+"l")
 
 	fsys, err := erofs.Open(src)
 	if err != nil {
