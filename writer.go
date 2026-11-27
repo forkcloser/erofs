@@ -63,7 +63,6 @@ type erofsWriter struct {
 	// noInlineData keeps every regular file's data in whole blocks: no
 	// tail packed beside the inode.
 	noInlineData bool
-	chunkBits    uint8  // log2(chunkSize / blockSize); chunkSize = blockSize << chunkBits
 	copyBuf      []byte // reusable buffer for io.CopyBuffer
 	// tailWin is the window of image tailOf at tailAt that the inline ends
 	// of a metadata-only copy's files are read from (inlineEnd).
@@ -89,19 +88,9 @@ func inodeSlotAlign(size int) int {
 	return (size + disk.SizeInodeSlot - 1) &^ (disk.SizeInodeSlot - 1)
 }
 
-// entryChunkBits returns the chunk bits for a specific entry.
-// Contiguous entries use a larger chunk size to minimize chunk indexes.
-func (w *erofsWriter) entryChunkBits(e *erofsEntry) uint8 {
-	if e.chunkBits > 0 {
-		return e.chunkBits
-	}
-
-	return w.chunkBits
-}
-
 // entryChunkSize returns the chunk size in bytes for a specific entry.
 func (w *erofsWriter) entryChunkSize(e *erofsEntry) int {
-	return w.blockSize << w.entryChunkBits(e)
+	return w.blockSize << e.chunkBits
 }
 
 // maxChunkIndexEntries backstops the chunk-index map a single inode may
@@ -276,7 +265,7 @@ func alignedBits(block uint64) uint8 {
 // minChunkBits returns the minimum chunkBits such that file size fits in
 // one chunk (chunkSize >= size). Capped at 31 (LayoutChunkFormatBits max).
 func (w *erofsWriter) minChunkBits(size uint64) uint8 {
-	fit := w.chunkBits
+	var fit uint8
 	// #nosec G115 -- the block size is positive, 512 to 1<<16
 	for uint64(w.blockSize)<<fit < size && fit < 31 {
 		fit++
@@ -689,7 +678,7 @@ func (w *erofsWriter) writeInode(buf io.Writer, e *erofsEntry) error {
 	switch e.mode & disk.StatTypeMask {
 	case disk.StatTypeReg:
 		if e.layout == disk.LayoutChunkBased {
-			inodeData = disk.LayoutChunkFormatIndexes | uint32(w.entryChunkBits(e))
+			inodeData = disk.LayoutChunkFormatIndexes | uint32(e.chunkBits)
 		} else if e.layout == disk.LayoutFlatPlain && e.size > 0 {
 			inodeData = e.dataBlkAddr
 		}
