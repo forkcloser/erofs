@@ -742,10 +742,12 @@ func (w *erofsWriter) writeInode(buf io.Writer, e *erofsEntry) error {
 func (w *erofsWriter) writeXattrs(buf io.Writer, e *erofsEntry) error {
 	w.xattrBody(e.xattrs, true)
 
-	// XattrHeader: 4-byte name filter + 1-byte shared count + 7 reserved = 12 bytes
+	// XattrHeader: 4-byte name filter + 1-byte shared count + 7 reserved = 12 bytes.
+	// The filter stays zero, which says of no name that it is absent: a
+	// set bit denies a name to getxattr once an image has XATTR_FILTER.
 	var xhdr [12]byte
-	binary.LittleEndian.PutUint32(xhdr[0:4], math.MaxUint32) // name filter unused
-	xhdr[4] = uint8(len(w.bodyIDs))                          // #nosec G115 -- xattrBody shares at most maxSharedXattrs
+
+	xhdr[4] = uint8(len(w.bodyIDs)) // #nosec G115 -- xattrBody shares at most maxSharedXattrs
 
 	if _, err := buf.Write(xhdr[:]); err != nil {
 		return err
