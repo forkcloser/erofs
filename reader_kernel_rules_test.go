@@ -23,6 +23,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -963,6 +964,96 @@ func TestReaderFastSymlinkTarget(t *testing.T) {
 
 	if _, lerr := fs.Lstat(fsys, "l"); !errors.Is(lerr, erofs.ErrCorrupt) {
 		t.Fatalf("Lstat of a fast symlink of size zero: %v; want ErrCorrupt", lerr)
+	}
+}
+
+// TestReaderSymlinkTargetBound: a symlink target over 4095 bytes is
+// ErrCorrupt from ReadLink and from a copy in both modes, on an inode
+// Lstat serves, where the kernel reads it: beside its inode, in a block
+// that holds both, it serves a target of any length whole
+// (erofs_fill_symlink), as the reference does here; one in a data block it
+// cuts to a page less a byte (page_get_link), which
+// TestContractCopyOfALinkTargetAtItsBounds walks. The package serves no
+// target symlink(2) could not have made.
+func TestReaderSymlinkTargetBound(t *testing.T) {
+	t.Parallel()
+
+	const (
+		most      = 4095
+		blockSize = 16384
+	)
+
+	var buf testBuffer
+
+	w := erofs.Create(&buf, erofs.WithBlockSize(blockSize))
+	if err := w.Symlink(strings.Repeat("t", most), "/l"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	src := buf.Bytes()
+
+	// The Writer packs the target beside its extended inode, which carries
+	// no xattrs here; i_size is the eight bytes at offset 8.
+	at := inodeOffset(t, src, "l")
+	target := at + disk.SizeInodeExtended
+
+	if format := binary.LittleEndian.Uint16(src[at:]); format != disk.LayoutFlatInline<<1|1 {
+		t.Fatalf("test premise broken: l reads i_format %#x; want an extended flat-inline inode", format)
+	}
+
+	if string(src[target:target+most]) != strings.Repeat("t", most) {
+		t.Fatal("test premise broken: the target is not beside the inode")
+	}
+
+	for _, length := range []int{most, most + 1, 5000} {
+		t.Run(strconv.Itoa(length), func(t *testing.T) {
+			t.Parallel()
+
+			if target%blockSize+length > blockSize ||
+				bytes.Count(src[target+most:target+length], []byte{0}) != length-most {
+				t.Fatalf("test premise broken: no %d bytes of padding in the block after the target", length-most)
+			}
+
+			img := bytes.Clone(src)
+			copy(img[target:], strings.Repeat("t", length))
+			binary.LittleEndian.PutUint64(img[at+8:], uint64(length))
+
+			im := corpus.Image{Name: t.Name(), Img: img}
+			b := wBuilt{img: img, ref: parseImage(t, im), fsys: openImage(t, im)}
+
+			// The kernel's answer: the whole target.
+			if got, err := b.ref.Target(b.inodeOf(t, "l")); err != nil || len(got) != length {
+				t.Fatalf("reference target: %d bytes, %v; want %d", len(got), err, length)
+			}
+
+			if _, err := fs.Lstat(b.fsys, "l"); err != nil {
+				t.Fatalf("Lstat: %v", err)
+			}
+
+			got, err := fs.ReadLink(b.fsys, "l")
+
+			switch {
+			case length > most && !errors.Is(err, erofs.ErrCorrupt):
+				t.Errorf("ReadLink: %d bytes, %v; want ErrCorrupt", len(got), err)
+			case length <= most && (err != nil || len(got) != length):
+				t.Errorf("ReadLink: %d bytes, %v; want %d", len(got), err, length)
+			}
+
+			for _, metadataOnly := range []bool{false, true} {
+				_, err := copyOpened(b.fsys, metadataOnly, img, nil)
+
+				switch {
+				case length > most && !errors.Is(err, erofs.ErrCorrupt):
+					t.Errorf("CopyFrom%s: %v, want ErrCorrupt", copyMode(metadataOnly), err)
+				case length <= most && err != nil:
+					t.Errorf("CopyFrom%s: %v", copyMode(metadataOnly), err)
+				}
+			}
+		})
 	}
 }
 

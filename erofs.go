@@ -35,12 +35,13 @@
 // The reader accepts block sizes from 512 bytes to 64 KiB and rejects
 // compressed inodes and 48-bit chunk addressing with [ErrNotImplemented].
 // An image whose on-disk structures disagree with the
-// format or point outside it is reported as [ErrCorrupt]. Bounds that
-// protect a caller from a hostile image, each reported as [ErrInvalid]
-// alone: a symlink target of at most 4096 bytes, a path of at most 4096
-// bytes, at most 255 symlink hops per resolution, a chunk-index map of at
-// most 64 MiB per file, and [io/fs.ReadFile] refusing files over 128 MiB
-// (use [io/fs.FS.Open] and io.Copy for larger ones). The writer stores
+// format or point outside it is reported as [ErrCorrupt], and so is a
+// symlink target of more than 4095 bytes, which no symlink call makes.
+// Bounds that protect a caller from a hostile image, each reported as
+// [ErrInvalid] alone: a path of at most 4096 bytes, at most 255 symlink
+// hops per resolution, a chunk-index map of at most 64 MiB per file, and
+// [io/fs.ReadFile] refusing files over 128 MiB (use [io/fs.FS.Open] and
+// io.Copy for larger ones). The writer stores
 // xattr names of at most 255 bytes after their prefix and values of at most
 // 65535 bytes, the on-disk field widths.
 //
@@ -1700,10 +1701,6 @@ func (img *image) putBlock(b *block) {
 
 const maxSymlinks = 255
 
-// maxSymlinkSize is the maximum size of a symlink target.
-// Linux PATH_MAX is 4096; we use the same limit.
-const maxSymlinkSize = 4096
-
 // maxResolveComponents bounds the total number of path components a single
 // resolve may walk, summed across every symlink hop.
 //
@@ -1714,11 +1711,11 @@ const maxSymlinkSize = 4096
 // total work is quadratic in the accumulated length — an 8 KiB image drove
 // 13 million reads and 16 seconds of CPU through a single Open.
 //
-// A path holds at most maxSymlinkSize/2 components (PATH_MAX bytes, and no
+// A path holds at most maxPathLen/2 components (PATH_MAX bytes, and no
 // component occupies fewer than two bytes with its separator), and a
 // legitimate resolution walks no more than one whole path per hop. The budget
 // is that product, so nothing a real filesystem can express is refused.
-const maxResolveComponents = maxSymlinks * (maxSymlinkSize / 2)
+const maxResolveComponents = maxSymlinks * (maxPathLen / 2)
 
 // readLink reads the symlink target for the given nid.
 func (img *image) linkTarget(nid uint64, name string) (string, error) {
@@ -1737,7 +1734,7 @@ func (img *image) linkTarget(nid uint64, name string) (string, error) {
 		return "", fmt.Errorf("empty symlink target: %w", ErrCorrupt)
 	}
 
-	if fi.size < 0 || fi.size > maxSymlinkSize {
+	if fi.size < 0 || fi.size > maxSymlinkTarget {
 		return "", fmt.Errorf("symlink target size %d out of range: %w", fi.size, ErrCorrupt)
 	}
 

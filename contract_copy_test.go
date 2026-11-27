@@ -3244,12 +3244,11 @@ func TestContractCopyOfASymlinkInChunks(t *testing.T) {
 }
 
 // TestContractCopyOfALinkTargetAtItsBounds: a copy, in both modes, holds
-// a symlink target of 4095 bytes, the most Symlink stores; refuses one of
-// 4096, which the reader reads, as ErrInvalid and not as a corrupt source;
-// and refuses one of 4097 as ErrCorrupt, as ReadLink does. The
-// metadata-only copy reads the target itself, into a buffer of the inode's
-// i_size. The source is small-chunk-512's d/s rewritten flat-plain, its
-// target "a…" in blocks appended to the image.
+// a symlink target of 4095 bytes, the most Symlink stores and ReadLink
+// serves, and refuses one of 4096 or 4097 as ErrCorrupt, as ReadLink
+// does. The metadata-only copy reads the target itself, into a buffer of
+// the inode's i_size. The source is small-chunk-512's d/s rewritten
+// flat-plain, its target "a…" in blocks appended to the image.
 func TestContractCopyOfALinkTargetAtItsBounds(t *testing.T) {
 	t.Parallel()
 
@@ -3291,9 +3290,9 @@ func TestContractCopyOfALinkTargetAtItsBounds(t *testing.T) {
 			target, err := fs.ReadLink(source, "d/s")
 
 			switch {
-			case length > 4096 && !errors.Is(err, erofs.ErrCorrupt):
-				t.Fatalf("ReadLink d/s: %v, want ErrCorrupt (the premise)", err)
-			case length <= 4096 && (err != nil || len(target) != int(length)):
+			case length > 4095 && !errors.Is(err, erofs.ErrCorrupt):
+				t.Fatalf("ReadLink d/s: %v, want ErrCorrupt", err)
+			case length <= 4095 && (err != nil || len(target) != int(length)):
 				t.Fatalf("ReadLink d/s: %d bytes, %v; want %d (the premise: the reader reads it)",
 					len(target), err, length)
 			}
@@ -3302,13 +3301,9 @@ func TestContractCopyOfALinkTargetAtItsBounds(t *testing.T) {
 				made, err := copyOpened(source, metadataOnly, img, nil)
 
 				switch {
-				case length > 4096:
+				case length > 4095:
 					if !errors.Is(err, erofs.ErrCorrupt) {
 						t.Errorf("CopyFrom%s: %v, want ErrCorrupt", copyMode(metadataOnly), err)
-					}
-				case length == 4096:
-					if !errors.Is(err, erofs.ErrInvalid) || errors.Is(err, erofs.ErrCorrupt) {
-						t.Errorf("CopyFrom%s: %v, want ErrInvalid and not ErrCorrupt", copyMode(metadataOnly), err)
 					}
 				case err != nil:
 					t.Errorf("CopyFrom%s: %v", copyMode(metadataOnly), err)
