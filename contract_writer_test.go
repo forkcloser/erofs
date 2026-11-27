@@ -1390,6 +1390,7 @@ func TestContractWriterRemoveAndLink(t *testing.T) {
 		"RemoveAll /":            fs.ErrInvalid,
 		"RemoveAll through file": erofs.ErrNotDirectory,
 		"Link missing":           fs.ErrNotExist,
+		"Link dir":               erofs.ErrIsDirectory,
 		"Link":                   nil,
 		"Link orig":              nil,
 		"Remove orig":            nil,
@@ -1401,10 +1402,6 @@ func TestContractWriterRemoveAndLink(t *testing.T) {
 		if err := errs[call]; !errors.Is(err, target) && !(target == nil && err == nil) {
 			t.Errorf("%s: %v, want %v", call, err, target)
 		}
-	}
-
-	if errs["Link dir"] == nil {
-		t.Error("Link of a directory succeeded")
 	}
 
 	f, h := b.inodeOf(t, "f"), b.inodeOf(t, "h")
@@ -1568,8 +1565,8 @@ func TestContractWriterLinkOfSpecialInodes(t *testing.T) {
 		over, atRoot = w.Link("file", "dir"), w.Link("file", "/")
 	})
 
-	if over == nil || atRoot == nil {
-		t.Errorf("Link over an existing name: %v, at the root: %v; want both refused", over, atRoot)
+	if !errors.Is(over, fs.ErrExist) || !errors.Is(atRoot, fs.ErrExist) {
+		t.Errorf("Link over an existing name: %v, at the root: %v; want ErrExist of both", over, atRoot)
 	}
 
 	root, err := b.ref.Inode(b.ref.Super.RootNid)
@@ -1883,8 +1880,8 @@ func TestContractWriterLifecycle(t *testing.T) {
 		t.Errorf("second Close of a file: %v, want fs.ErrClosed", err)
 	}
 
-	if _, err := w.Create("/f"); err == nil {
-		t.Error("a second Create of a written name succeeded")
+	if _, err := w.Create("/f"); !errors.Is(err, fs.ErrExist) {
+		t.Errorf("a second Create of a written name: %v, want ErrExist", err)
 	}
 
 	if err := w.Mkdir("/d", 0o755); err != nil {

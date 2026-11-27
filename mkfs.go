@@ -30,6 +30,14 @@ import (
 // "/" all name the root. This is deliberately more forgiving than the
 // [fs.FS] convention the reader enforces.
 //
+// A method that creates a name refuses one that exists, whatever it names,
+// as [fs.ErrExist], the root included but for Mkdir, which sets the root's
+// permissions; a name beneath what is not a directory as [ErrNotDirectory];
+// a name it is to act on and does not find as [fs.ErrNotExist]; a directory
+// given to Link as [ErrIsDirectory]; and a name, a target or a value the
+// image cannot hold as [ErrInvalid]. A creating method that refuses leaves
+// the tree as it was, the directories on the way to the name unmade.
+//
 // A Writer holds the tree it is given in memory until Close, and no file's
 // data: under 2 KiB, and for each name the name's path and under 512 bytes,
 // or under 768 for a file of an image copied with its data. On top of that
