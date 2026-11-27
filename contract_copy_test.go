@@ -2786,10 +2786,10 @@ func TestContractWriterReadsAHoledFileBackFromItsDataFile(t *testing.T) {
 // metadata-only into a writer with its own data file: the copy's devices
 // are the writer's data file, the source image and the source's device,
 // in that order, and the copied file reads the source image's block, not
-// the data file's block at the same address. The source image's slot in
-// the copy has mapped address 0, which a device-0 address is never
-// matched against (erofs_map_dev skips a slot without uniaddr), so the
-// writer's own file keeps its bytes.
+// the data file's block at the same address. Each device of the copy is
+// mapped after the copy's own blocks, so no address of the image itself
+// is one a slot's range takes (erofs_map_dev matches a device-0 address
+// against each mapped range), and the writer's own file keeps its bytes.
 func TestContractMetadataOnlyCopyOfAChunkOnTheSourceImageItself(t *testing.T) {
 	t.Parallel()
 
@@ -2847,17 +2847,14 @@ func TestContractMetadataOnlyCopyOfAChunkOnTheSourceImageItself(t *testing.T) {
 
 	sb.Unmarshal(copied.Img[disk.SuperBlockOffset:])
 
-	zero := false
-
 	for i := range int(sb.ExtraDevices) {
 		var slot disk.DeviceSlot
 
 		slot.Unmarshal(copied.Img[int(sb.DevtSlotOff)*disk.SizeDeviceSlot+i*disk.SizeDeviceSlot:])
-		zero = zero || slot.MappedBlkAddr == 0
-	}
 
-	if !zero {
-		t.Fatal("no slot of the copy has mapped address 0: the shape this case holds is gone")
+		if slot.MappedBlkAddr < sb.Blocks {
+			t.Errorf("device %d is mapped at block %d, inside the image's own %d", i+1, slot.MappedBlkAddr, sb.Blocks)
+		}
 	}
 
 	ref, fsys := parseImage(t, copied), openImage(t, copied)

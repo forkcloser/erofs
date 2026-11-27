@@ -158,7 +158,10 @@ of the result, followed by the image's own extra devices: every file's blocks
 stay where they are and the result's chunk indexes point at them; only a
 file's inline tail, shorter than a block, is copied, as one block. Open the
 result with `WithExtraDevices` over the source images in copy order, each
-followed by its own devices.
+followed by its own devices. Each device is mapped after the result and the
+devices before it, as `mkfs.erofs` maps them: the result followed by its
+devices in that order, each as long as its blocks, is also one device, which
+the kernel reads when it is mounted with no device given.
 
 That tail is the file's data: `Close` reads it from the source image when it
 writes the result, and the `Writer` holds none of it until then. A source

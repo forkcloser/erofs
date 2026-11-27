@@ -511,7 +511,15 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 	// slot besides.
 	sb.Marshal(sbArea[disk.SuperBlockOffset:])
 
-	// Write device slots right after superblock.
+	// Write device slots right after superblock, each device mapped after
+	// the image and the devices before it, as mkfs.erofs lays them. Mounted
+	// with no device given, the kernel takes the image and its devices for
+	// one, and reads an address on a device at the slot's mapped address
+	// plus it: with none it reads the image's own block there. A device
+	// whose mapped address would not fit the slot's 32 bits gets none, and
+	// is read given, not as part of one.
+	mapped := uint64(totalBlocks) // #nosec G115 -- checkLimits bounded the block count to 32 bits
+
 	for i, blocks := range w.devices {
 		if blocks > math.MaxUint32 {
 			return fmt.Errorf("device %d block count %d exceeds 32-bit limit: %w", i+1, blocks, ErrInvalid)
@@ -520,6 +528,13 @@ func (w *erofsWriter) writeBlock0(buf io.Writer) error {
 		devSlot := disk.DeviceSlot{
 			Blocks: uint32(blocks),
 		}
+
+		if mapped <= math.MaxUint32 {
+			devSlot.MappedBlkAddr = uint32(mapped)
+		}
+
+		mapped += blocks
+
 		off := disk.SuperBlockOffset + disk.SizeSuperBlock + i*disk.SizeDeviceSlot
 		devSlot.Marshal(sbArea[off:])
 	}
