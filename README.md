@@ -95,7 +95,9 @@ can be held to one.
 - **Create** EROFS images from directories or any `fs.FS`
 - **Merge** multiple filesystem sources with overlay whiteout support
 - **Metadata-only** mode for container layer indexing (chunk-based references to original data)
-- Pure Go, no CGO — uses only the standard library
+- Pure Go, no CGO — uses only the standard library and
+  [go-xos](https://github.com/forkcloser/go-xos), the standard library's `os`
+  with the share mode it lacks on Windows, for the Writer's temporary file
 
 ### Status
 

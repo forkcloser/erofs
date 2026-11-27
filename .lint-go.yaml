@@ -24,6 +24,12 @@ golangci:
           linters:
             - mnd
             - goconst
+        # The tests and their support open the files of a test's own
+        # directory, which no other process renames or removes.
+        - path: (_test\.go|^internal/corpus/)
+          linters:
+            - forbidigo
+          text: go-xos
         # internal/erofsspec is the reference reader of the on-disk format:
         # its literals are the format's field offsets, widths and bit
         # positions in the specification's shape (erofs_fs.h), each cited
@@ -69,3 +75,17 @@ golangci:
           # os errors are *PathError and *LinkError: the operation and the
           # path are already in them.
           - os
+      depguard:
+        rules:
+          main:
+            allow:
+              # The Writer's temporary file, with the share mode os lacks on
+              # Windows.
+              - github.com/forkcloser/go-xos
+      forbidigo:
+        forbid:
+          # The package reads an io.ReaderAt and writes an io.Writer; the one
+          # file it opens itself is the Writer's spool, through xos, whose
+          # handles let a file be removed or renamed while open on Windows.
+          - pattern: '^os\.(Open|OpenFile|Create|CreateTemp|ReadFile|WriteFile|ReadDir|Rename)$'
+            msg: "open files through github.com/forkcloser/go-xos"

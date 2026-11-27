@@ -1955,7 +1955,9 @@ func TestContractWriterEmptyImage(t *testing.T) {
 // TestContractWriterTempDirHoldsTheSpool: "WithTempDir (where the spool
 // lives otherwise)": with no data file, a file's bytes are spooled under the
 // given directory, so a directory that does not exist fails the write, and
-// an existing one carries the image to a whole read-back.
+// an existing one carries the image to a whole read-back and holds nothing
+// once the Writer is closed, on Windows either, where a file cannot be
+// removed while os holds it open.
 func TestContractWriterTempDirHoldsTheSpool(t *testing.T) {
 	t.Parallel()
 
@@ -1988,8 +1990,10 @@ func TestContractWriterTempDirHoldsTheSpool(t *testing.T) {
 	t.Run("present", func(t *testing.T) {
 		t.Parallel()
 
+		dir := t.TempDir()
+
 		out := &testBuffer{}
-		w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0), erofs.WithTempDir(t.TempDir()))
+		w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0), erofs.WithTempDir(dir))
 		writeNode(t, w, nodes[0])
 
 		if err := w.Close(); err != nil {
@@ -1998,6 +2002,10 @@ func TestContractWriterTempDirHoldsTheSpool(t *testing.T) {
 
 		im := corpus.Image{Name: "spooled", Img: out.Bytes(), Tree: nodes}
 		corpus.CheckTree(t, im, parseImage(t, im), nodes, true)
+
+		if left, err := os.ReadDir(dir); err != nil || len(left) != 0 {
+			t.Errorf("the spool's directory holds %v after Close (%v); want nothing", left, err)
+		}
 	})
 }
 

@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/forkcloser/go-xos"
+
 	"github.com/forkcloser/go-erofs/internal/builder"
 	"github.com/forkcloser/go-erofs/internal/disk"
 )
@@ -3268,7 +3270,10 @@ func (fsys *Writer) ensureSpool() error {
 		return nil
 	}
 
-	tmp, err := os.CreateTemp(fsys.tempDir, "erofs-mkfs-*")
+	// Through xos: on Windows a file os opens cannot be removed while it is
+	// open, the remove below fails, and the spool stays in the directory
+	// after Close.
+	tmp, err := xos.CreateTemp(fsys.tempDir, "erofs-mkfs-*")
 	if err != nil {
 		return fmt.Errorf("mkfs: create spool: %w", err)
 	}
