@@ -1465,6 +1465,63 @@ func copyAgrees(src []byte, srcExtra [][]byte, dst []byte, dstExtra [][]byte) st
 	return ""
 }
 
+// TestContractCopyOfAnInodeWithoutContent: a FIFO, like a device or a
+// socket, has no content, and its i_size and its layout are fields nothing
+// reads by: the kernel serves the inode whatever they hold, and so does
+// Lstat. A copy, in both modes, keeps the inode as it is: a size past the
+// end of the image is no directory's that would not fit, and a flat-inline
+// layout whose tail would cross its block has no tail. The first input is
+// the fuzzer's: small-chunk-512's d/p given a size of 196608 bytes.
+func TestContractCopyOfAnInodeWithoutContent(t *testing.T) {
+	t.Parallel()
+
+	src := committed(t, "small-chunk-512")
+	at := inodeOffset(t, src.Img, "d/p")
+
+	// i_size is the eight bytes at offset 8 of an extended inode.
+	format := binary.LittleEndian.Uint16(src.Img[at:])
+	if format&1 == 0 {
+		t.Fatalf("test premise broken: d/p reads i_format %#x; want an extended inode", format)
+	}
+
+	for name, edit := range map[string]func(img []byte){
+		"a size past the image": func(img []byte) { binary.LittleEndian.PutUint64(img[at+8:], 196608) },
+		"a tail past its block": func(img []byte) {
+			binary.LittleEndian.PutUint16(img[at:], format&^disk.InodeFormatLayoutMask|disk.LayoutFlatInline<<1)
+			binary.LittleEndian.PutUint64(img[at+8:], 500)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			img := bytes.Clone(src.Img)
+			edit(img)
+
+			source, err := erofs.Open(bytes.NewReader(img))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if info, err := fs.Lstat(source, "d/p"); err != nil || info.Mode()&fs.ModeNamedPipe == 0 {
+				t.Fatalf("Lstat d/p: %v, %v; want the FIFO (the premise: the reader serves it)", info, err)
+			}
+
+			for _, metadataOnly := range []bool{false, true} {
+				made, err := copyOpened(source, metadataOnly, img, nil)
+				if err != nil {
+					t.Errorf("CopyFrom%s: %v", copyMode(metadataOnly), err)
+
+					continue
+				}
+
+				if d := copyAgrees(img, nil, made.Img, made.Extra()); d != "" {
+					t.Errorf("CopyFrom%s: the copy is not the source: %s", copyMode(metadataOnly), d)
+				}
+			}
+		})
+	}
+}
+
 // TestContractCopyRefusesAShortSourceRead: a generic source whose data
 // reader yields fewer bytes than its declared size is refused, at CopyFrom
 // or at the Close that lays the image out, whether the file would be

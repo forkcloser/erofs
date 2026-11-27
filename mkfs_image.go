@@ -584,13 +584,18 @@ func (fsys *Writer) copyFromImage(img *image) error {
 		// reader's loadBlock refuses that outright, and without the same
 		// rule here the copy would take whatever follows the block as the
 		// directory's entries or the link's target.
+		// A device, a FIFO and a socket have no content: their size and
+		// their layout are fields nothing reads by, which the kernel and
+		// the reader serve whatever they hold, and the copy keeps.
+		readWhole := typ == disk.StatTypeDir || typ == disk.StatTypeSymlink
+
 		tail := int64(0)
-		if layout == disk.LayoutFlatInline && size > 0 {
+		if (readWhole || typ == disk.StatTypeReg) && layout == disk.LayoutFlatInline && size > 0 {
 			// #nosec G115 -- size is at most math.MaxInt64, checked above
 			tail = int64(size) - (int64(size)-1)/int64(blockSize)*int64(blockSize)
 		}
 
-		if typ != disk.StatTypeReg && size > uint64(totalBytes) {
+		if readWhole && size > uint64(totalBytes) {
 			return fmt.Errorf("nid %d declares %d bytes, larger than the %d byte image: %w",
 				cur.nid, size, totalBytes, ErrCorrupt)
 		}
