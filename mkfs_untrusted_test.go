@@ -229,8 +229,8 @@ func TestUntrustedBlockCountIsRejected(t *testing.T) {
 		t.Fatal("Open accepted a superblock declaring far more blocks than the image holds")
 	}
 
-	if !errors.Is(err, ErrInvalid) {
-		t.Errorf("err = %v, want it to wrap ErrInvalid", err)
+	if !errors.Is(err, ErrCorrupt) {
+		t.Errorf("err = %v, want ErrCorrupt", err)
 	}
 
 	t.Logf("rejected with %v (allocated %d bytes)", err, grew)
@@ -929,8 +929,8 @@ func TestUntrustedDirectoryCycleTerminates(t *testing.T) {
 			t.Fatal("CopyFrom accepted an image with a directory cycle")
 		}
 
-		if !errors.Is(err, ErrInvalid) {
-			t.Errorf("err = %v, want it to wrap ErrInvalid", err)
+		if !errors.Is(err, ErrCorrupt) {
+			t.Errorf("err = %v, want ErrCorrupt", err)
 		}
 
 		t.Logf("rejected with %v (allocated %d bytes)", err, grew)
@@ -983,8 +983,8 @@ func TestUntrustedDirectoryCycleFullImageTerminates(t *testing.T) {
 			t.Fatal("full-image CopyFrom accepted an image with a directory cycle")
 		}
 
-		if !errors.Is(err, ErrInvalid) {
-			t.Errorf("err = %v, want it to wrap ErrInvalid", err)
+		if !errors.Is(err, ErrCorrupt) {
+			t.Errorf("err = %v, want ErrCorrupt", err)
 		}
 		// What has to stay bounded is resident memory, which is what an OOM
 		// is made of.
@@ -1123,15 +1123,9 @@ func TestCopyFromNegativeSize(t *testing.T) {
 	w := Create(out)
 
 	err := w.CopyFrom(badSizeFS{size: -1})
-	if err == nil {
-		err = w.Close()
+	if !errors.Is(err, ErrInvalid) || errors.Is(err, ErrCorrupt) {
+		t.Fatalf("CopyFrom of a source with Size() == -1: %v, want ErrInvalid and not ErrCorrupt", err)
 	}
-
-	if err == nil {
-		t.Fatal("CopyFrom/Close accepted a source with Size() == -1")
-	}
-
-	t.Logf("rejected: %v", err)
 }
 
 // TestEmptySymlinkTargetRejected covers a symlink whose i_size is 0.
@@ -1201,17 +1195,21 @@ func TestEmptySymlinkTargetRejected(t *testing.T) {
 
 	if target, err := img.(*image).ReadLink("sub/el"); err == nil {
 		t.Errorf("ReadLink(sub/el) = %q, want an error", target)
-	} else if !errors.Is(err, ErrInvalid) {
-		t.Errorf("ReadLink err = %v, want it to wrap ErrInvalid", err)
+	} else if !errors.Is(err, ErrCorrupt) {
+		t.Errorf("ReadLink err = %v, want ErrCorrupt", err)
 	}
 
 	if fi, err := fs.Stat(img, "sub/el"); err == nil {
 		t.Errorf("Stat(sub/el) = mode=%v isdir=%v, want an error (it resolved to the root)",
 			fi.Mode(), fi.IsDir())
+	} else if !errors.Is(err, ErrCorrupt) {
+		t.Errorf("Stat(sub/el) err = %v, want ErrCorrupt", err)
 	}
 
 	if data, err := fs.ReadFile(img, "sub/el/secret"); err == nil {
 		t.Errorf("ReadFile(sub/el/secret) = %q, want an error (the path was re-rooted at /)", data)
+	} else if !errors.Is(err, ErrCorrupt) {
+		t.Errorf("ReadFile(sub/el/secret) err = %v, want ErrCorrupt", err)
 	}
 }
 
@@ -1302,14 +1300,16 @@ func TestResolveWorkIsBounded(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		target string
+		want   error
 	}{
 		// Relative: every hop prepends the prefix already walked, so the
-		// path grows and the work per hop grows with it.
-		{"relative", strings.Repeat("a/", 500) + "l"},
+		// path grows and the work per hop grows with it, until the path is
+		// over its limit.
+		{"relative", strings.Repeat("a/", 500) + "l", ErrInvalid},
 		// Absolute: the prefix is not prepended, so the path keeps its
 		// length. Just under PATH_MAX is the most expensive shape that
 		// survives the per-hop cap — the steady state the budget must hold.
-		{"absolute", "/" + strings.Repeat("a/", (maxPathLen-4)/2) + "l"},
+		{"absolute", "/" + strings.Repeat("a/", (maxPathLen-4)/2) + "l", ErrLoop},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1323,8 +1323,9 @@ func TestResolveWorkIsBounded(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if _, err := img.Open("l"); err == nil {
-				t.Fatal("Open resolved a cyclic symlink chain")
+			// A chain of links that never ends is a valid image.
+			if _, err := img.Open("l"); !errors.Is(err, tc.want) || errors.Is(err, ErrCorrupt) {
+				t.Fatalf("Open of a cyclic symlink chain: %v, want %v and not ErrCorrupt", err, tc.want)
 			}
 
 			if cr.calls > budget {
@@ -1427,8 +1428,8 @@ func TestDirentNameIsABaseName(t *testing.T) {
 		for _, e := range ents {
 			t.Errorf("ReadDir returned name %q, want an error", e.Name())
 		}
-	} else if !errors.Is(err, ErrInvalid) {
-		t.Errorf("ReadDir err = %v, want it to wrap ErrInvalid", err)
+	} else if !errors.Is(err, ErrCorrupt) {
+		t.Errorf("ReadDir err = %v, want ErrCorrupt", err)
 	}
 
 	err = fs.WalkDir(img, ".", func(p string, _ fs.DirEntry, err error) error {
@@ -1442,8 +1443,8 @@ func TestDirentNameIsABaseName(t *testing.T) {
 
 		return nil
 	})
-	if err == nil {
-		t.Error("WalkDir walked an image with a separator in a dirent name")
+	if !errors.Is(err, ErrCorrupt) {
+		t.Errorf("WalkDir of an image with a separator in a dirent name: %v, want ErrCorrupt", err)
 	}
 }
 
@@ -1501,8 +1502,8 @@ func TestMergeWhiteoutCannotEscapeItsDirectory(t *testing.T) {
 		t.Fatal("merge accepted a dirent name containing a path separator")
 	}
 
-	if !errors.Is(err, ErrInvalid) {
-		t.Errorf("err = %v, want it to wrap ErrInvalid", err)
+	if !errors.Is(err, ErrCorrupt) {
+		t.Errorf("err = %v, want ErrCorrupt", err)
 	}
 
 	for _, p := range []string{"/keep", "/etc"} {
@@ -1932,7 +1933,9 @@ func TestShortReadIsNotZeroFilled(t *testing.T) {
 			len(got), bytes.Equal(got, make([]byte, len(got))))
 	}
 
-	t.Logf("rejected: %v", err)
+	if !errors.Is(err, ErrCorrupt) {
+		t.Errorf("ReadFile err = %v, want ErrCorrupt", err)
+	}
 }
 
 // TestXattrPrefixAndDuplicates covers the two ways an image can put the same
@@ -2166,8 +2169,8 @@ func TestCopyFromImageXattrParity(t *testing.T) {
 			t.Fatal("CopyFrom accepted a duplicated xattr key")
 		}
 
-		if !errors.Is(err, ErrInvalid) {
-			t.Errorf("err = %v, want it to wrap ErrInvalid", err)
+		if !errors.Is(err, ErrCorrupt) {
+			t.Errorf("err = %v, want ErrCorrupt", err)
 		}
 	})
 }
@@ -2244,15 +2247,15 @@ func TestEmptyDirentNameIsRejected(t *testing.T) {
 		}
 
 		t.Errorf("ReadDir returned %q, want an error", names)
-	} else if !errors.Is(err, ErrInvalid) {
-		t.Errorf("ReadDir err = %v, want it to wrap ErrInvalid", err)
+	} else if !errors.Is(err, ErrCorrupt) {
+		t.Errorf("ReadDir err = %v, want ErrCorrupt", err)
 	}
 
 	err = Create(&seekBuf{}).CopyFrom(img, MetadataOnly())
 	if err == nil {
 		t.Error("CopyFrom accepted an empty dirent name")
-	} else if !errors.Is(err, ErrInvalid) {
-		t.Errorf("CopyFrom err = %v, want it to wrap ErrInvalid", err)
+	} else if !errors.Is(err, ErrCorrupt) {
+		t.Errorf("CopyFrom err = %v, want ErrCorrupt", err)
 	}
 }
 
@@ -2328,16 +2331,16 @@ func TestFlatPlainAddressIsBounded(t *testing.T) {
 				t.Fatalf("tampered image failed to open: %v", err)
 			}
 
-			if _, err := fs.Stat(img, "big"); !errors.Is(err, ErrInvalid) {
-				t.Errorf("Stat err = %v, want ErrInvalid (the address is published as DataRange.Offset)", err)
+			if _, err := fs.Stat(img, "big"); !errors.Is(err, ErrCorrupt) {
+				t.Errorf("Stat err = %v, want ErrCorrupt (the address is published as DataRange.Offset)", err)
 			}
 
-			if _, err := fs.ReadFile(img, "big"); !errors.Is(err, ErrInvalid) {
-				t.Errorf("ReadFile err = %v, want ErrInvalid", err)
+			if _, err := fs.ReadFile(img, "big"); !errors.Is(err, ErrCorrupt) {
+				t.Errorf("ReadFile err = %v, want ErrCorrupt", err)
 			}
 
-			if err := Create(&seekBuf{}).CopyFrom(img); err == nil {
-				t.Error("CopyFrom copied a file whose data lies outside the image")
+			if err := Create(&seekBuf{}).CopyFrom(img); !errors.Is(err, ErrCorrupt) {
+				t.Errorf("CopyFrom of a file whose data lies outside the image: %v, want ErrCorrupt", err)
 			}
 		})
 	}
@@ -2346,7 +2349,9 @@ func TestFlatPlainAddressIsBounded(t *testing.T) {
 // TestCopyFromImageInlineCrossingBlock bumps an inline symlink's size so its
 // target would run past the inode's block. The reader refuses that; the
 // metadata-only copy used to take the bytes that followed as the target, or
-// an empty one when nothing followed.
+// an empty one when nothing followed. The bytes that follow are made a
+// target anything would take, so that nothing but the block's edge refuses
+// them.
 func TestCopyFromImageInlineCrossingBlock(t *testing.T) {
 	t.Parallel()
 
@@ -2361,7 +2366,14 @@ func TestCopyFromImageInlineCrossingBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	buf := out.buf
+	// One block more, for the target to run into: the link's inode is the
+	// last thing in the image. sb.Blocks sits at offset 36 within the
+	// superblock, and the checksum is switched off, the tamper leaving it
+	// stale.
+	buf := make([]byte, len(out.buf)+4096)
+	copy(buf, out.buf)
+	binary.LittleEndian.PutUint32(buf[disk.SuperBlockOffset+36:], uint32(len(buf)/4096))
+	buf[disk.SuperBlockOffset+8] &^= disk.FeatureCompatSBChksum
 
 	img0, err := Open(bytes.NewReader(buf))
 	if err != nil {
@@ -2380,12 +2392,28 @@ func TestCopyFromImageInlineCrossingBlock(t *testing.T) {
 		t.Fatalf("test premise broken: format %#x, want a flat-inline inode", format)
 	}
 	// i_size starts at byte 8 of both inode formats: a uint32 in a compact
-	// inode, a uint64 in an extended one. Claim a whole block.
+	// inode, a uint64 in an extended one. Claim a byte short of a block:
+	// still inline, still a target the package takes, and past the end of
+	// the block from anywhere after an inode.
+	inline := inodeOff + disk.SizeInodeCompact
+
 	if format&0x01 == 0 {
-		binary.LittleEndian.PutUint32(buf[inodeOff+8:], 4096)
+		binary.LittleEndian.PutUint32(buf[inodeOff+8:], 4095)
 	} else {
-		binary.LittleEndian.PutUint64(buf[inodeOff+8:], 4096)
+		binary.LittleEndian.PutUint64(buf[inodeOff+8:], 4095)
+		inline = inodeOff + disk.SizeInodeExtended
 	}
+
+	if xattrs := binary.LittleEndian.Uint16(buf[inodeOff+2:]); xattrs != 0 {
+		t.Fatalf("test premise broken: the link has xattrs (i_xattr_icount %d)", xattrs)
+	}
+
+	if inline+4095 > int64(len(buf)) || inline%4096+4095 <= 4096 {
+		t.Fatalf("test premise broken: 4095 bytes from %d do not cross a block inside the %d byte image",
+			inline, len(buf))
+	}
+
+	copy(buf[inline:], bytes.Repeat([]byte{'a'}, 4095))
 
 	img, err := Open(bytes.NewReader(buf))
 	if err != nil {
@@ -2395,15 +2423,15 @@ func TestCopyFromImageInlineCrossingBlock(t *testing.T) {
 	var target string
 	if target, err = img.(interface {
 		ReadLink(name string) (string, error)
-	}).ReadLink("l"); err == nil {
-		t.Errorf("ReadLink returned %q, want an error", target)
+	}).ReadLink("l"); !errors.Is(err, ErrCorrupt) {
+		t.Errorf("ReadLink returned %q, %v, want ErrCorrupt", target, err)
 	}
 
 	err = Create(&seekBuf{}).CopyFrom(img, MetadataOnly())
 	if err == nil {
 		t.Error("CopyFrom accepted inline data crossing its block")
-	} else if !errors.Is(err, ErrInvalid) {
-		t.Errorf("CopyFrom err = %v, want it to wrap ErrInvalid", err)
+	} else if !errors.Is(err, ErrCorrupt) {
+		t.Errorf("CopyFrom err = %v, want ErrCorrupt", err)
 	}
 }
 
@@ -2448,14 +2476,14 @@ func TestCopyFromImageTruncatedXattr(t *testing.T) {
 		t.Fatalf("tampered image failed to open: %v", err)
 	}
 
-	if _, err = fs.Stat(img, "f"); err == nil {
-		t.Error("Stat accepted an xattr running past its area")
+	if _, err = fs.Stat(img, "f"); !errors.Is(err, ErrCorrupt) {
+		t.Errorf("Stat of an xattr running past its area: %v, want ErrCorrupt", err)
 	}
 
 	err = Create(&seekBuf{}).CopyFrom(img, MetadataOnly())
 	if err == nil {
 		t.Error("CopyFrom accepted an xattr running past its area")
-	} else if !errors.Is(err, ErrInvalid) {
-		t.Errorf("CopyFrom err = %v, want it to wrap ErrInvalid", err)
+	} else if !errors.Is(err, ErrCorrupt) {
+		t.Errorf("CopyFrom err = %v, want ErrCorrupt", err)
 	}
 }
