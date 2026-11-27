@@ -804,6 +804,10 @@ func (l listedOnce) ReadDir(name string) ([]fs.DirEntry, error) {
 // A directory an EROFS image names twice, a hard link to it or a cycle
 // through it, is refused as ErrCorrupt. A host directory that two paths
 // reach, as under a bind mount, is copied at each, as mkfs.erofs copies it.
+// A metadata-only copy holds an EROFS image to the blocks its superblock
+// counts, the image being a device of the copy by that count: an inode or
+// data the image places past them is refused as ErrCorrupt, where the
+// reader, held to its reader's length, serves it.
 // A directory that lists a name twice is refused whatever the source: a lookup
 // finds one of the two entries, and the copy would hold that one's content
 // under the other's metadata. So is one that lists what is not a name, as

@@ -3,7 +3,9 @@ package erofs_test
 import (
 	"archive/tar"
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -1141,10 +1143,16 @@ func TestContractMergeWhiteoutOfHardlinkedName(t *testing.T) {
 }
 
 // TestContractCopyFromEditedImage: a copy of an edited image, with its
-// data, is refused with ErrInvalid (ErrCorrupt included) or with
-// ErrNotImplemented, the reader's two classes, or is an image
-// the reference reads to what it reads from the source; the copy never
-// invents a tree, and never panics. The edits are the differential's kinds
+// data or metadata-only, is an image the reference reads to what it reads
+// from the source, or is refused as the reader may refuse that source: in
+// the class the differential allows the reader against the reference's
+// verdict, ErrCorrupt or ErrNotImplemented where the reference refuses or
+// a documented rule says the package does, and never of a sound image
+// otherwise. ErrInvalid alone is a limit of the writer's, and a copy has
+// three refusals of its own that CopyFrom's documentation states: a name a
+// directory lists twice, a directory under two names, and, metadata-only,
+// what the image places past the blocks its superblock counts. The copy
+// never invents a tree, and never panics. The edits are the differential's kinds
 // over the small images: one byte, every sixteenth offset of the first 4
 // KiB, two values; and a truncation every 256 bytes.
 func TestContractCopyFromEditedImage(t *testing.T) {
@@ -1172,7 +1180,11 @@ func TestContractCopyFromEditedImage(t *testing.T) {
 				count += checkEditedCopy(t, im, im.Img[:cut], fmt.Sprintf("cut to %d", cut))
 			}
 
-			t.Logf("%s: %d edited sources the package opened, each copied with its data", im.Name, count)
+			if count == 0 {
+				t.Errorf("%s: the package opened no edited source: nothing was copied", im.Name)
+			}
+
+			t.Logf("%s: %d edited sources the package opened, each copied in both modes", im.Name, count)
 		})
 	}
 }
@@ -1202,11 +1214,20 @@ func checkEditedCopy(t *testing.T, im corpus.Image, img []byte, label string) in
 	// passed through ("a failing reader"). Every other map past its image
 	// or device is a declared bound the reader refuses at Stat.
 	short := false
+
+	// "A metadata-only copy holds an EROFS image to the blocks its
+	// superblock counts", where the reader and the reference hold it to
+	// its length: what an image longer than that count places past it is
+	// the one's to refuse and the others' to read.
+	long := false
+
 	if ref, perr := erofsspec.Parse(img, im.Extra()...); perr == nil {
 		short = uint64(len(img)) < ref.Super.Blocks*uint64(ref.Super.BlockSize)
+		long = uint64(len(img)) > ref.Super.Blocks*uint64(ref.Super.BlockSize)
 	}
 
-	truncated := referenceVerdict(img, im.Blob).class == "truncated"
+	reference := referenceVerdict(img, im.Blob)
+	truncated := reference.class == "truncated"
 
 	// A directory block out of name order, a name stored twice included:
 	// ReadDir lists every name and the lookups find some of them, the
@@ -1222,10 +1243,23 @@ func checkEditedCopy(t *testing.T, im corpus.Image, img []byte, label string) in
 	// is for the source the reference does not read.
 	declared := int64(0)
 
+	// "A directory an EROFS image names twice, a hard link to it or a cycle
+	// through it, is refused as ErrCorrupt" by a copy, where the kernel
+	// serves it under each name.
+	twice := false
+	dirs := map[uint64]bool{}
+
 	if ref, perr := erofsspec.Parse(img, im.Extra()...); perr == nil {
+		dirs[ref.Super.RootNid] = true
+
 		unsorted, _ = referenceWalk(ref, func(e erofsspec.Entry) error {
 			if e.Inode != nil && e.Inode.IsRegular() && e.Inode.Size > 0 {
 				declared += min(e.Inode.Size, maxEditedCopyBytes+1)
+			}
+
+			if e.Inode != nil && e.Inode.IsDir() {
+				twice = twice || dirs[e.Inode.Nid]
+				dirs[e.Inode.Nid] = true
 			}
 
 			return nil
@@ -1247,12 +1281,30 @@ func checkEditedCopy(t *testing.T, im corpus.Image, img []byte, label string) in
 			continue
 		case cerr != nil && (errors.Is(cerr, io.ErrUnexpectedEOF) || errors.Is(cerr, io.EOF)) && short:
 			continue
-		case cerr != nil && !errors.Is(cerr, fs.ErrInvalid) && !errors.Is(cerr, erofs.ErrNotImplemented) && !errors.Is(cerr, fs.ErrNotExist):
-			// ErrNotExist is a directory block out of name order: ReadDir
-			// lists a name the lookup's binary search does not find, the
-			// reader's documented divergence, met by the copy's own Open.
-			t.Fatalf("%s %s: refused with %v, want ErrInvalid, ErrNotImplemented or ErrNotExist", im.Name, mode, cerr)
-		case cerr != nil, unsorted:
+		case cerr != nil && unsorted && (errors.Is(cerr, fs.ErrNotExist) || errors.Is(cerr, erofs.ErrCorrupt)):
+			// A directory block out of name order: ReadDir lists a name the
+			// lookup's binary search does not find, the reader's documented
+			// divergence, met by the copy's own Open; or lists a name
+			// twice, which a copy refuses whatever the source.
+			continue
+		case cerr != nil && twice && errors.Is(cerr, erofs.ErrCorrupt):
+			continue
+		case cerr != nil && metadataOnly && long && errors.Is(cerr, erofs.ErrCorrupt):
+			continue
+		case cerr != nil && readerClass(cerr) == "invalid":
+			// ErrInvalid alone: a limit of the writer's, whatever the
+			// source is.
+			continue
+		case cerr != nil:
+			// A refusal of the source is the reader's, and is held to what
+			// the reader may refuse.
+			if kind := judge(reference, verdict{class: readerClass(cerr)}); kind != "" {
+				t.Fatalf("%s %s: %s, as a copy: the reference's verdict is %s, the copy's refusal %v",
+					im.Name, mode, kind, reference.class, cerr)
+			}
+
+			continue
+		case unsorted:
 			continue
 		}
 
@@ -1348,13 +1400,22 @@ func viewOf(img []byte, extra [][]byte) (map[string]copyView, error) {
 		content := ""
 
 		switch {
-		case in.IsRegular() && in.Size <= contentMax:
-			b, rerr := ref.Read(in)
-			if rerr != nil {
-				return fmt.Errorf("%s: %w", e.Path, rerr)
+		case in.IsRegular() && in.Size <= maxEditedCopyBytes:
+			// In pieces: an edit makes a file a hole of megabytes, and the
+			// reference reads what it is asked for whole. A larger file is
+			// no copy's here, and is held by its size.
+			sum := sha256.New()
+
+			for off := int64(0); off < in.Size; off += contentMax {
+				b, rerr := ref.ReadAt(in, off, min(contentMax, in.Size-off))
+				if rerr != nil {
+					return fmt.Errorf("%s: %w", e.Path, rerr)
+				}
+
+				sum.Write(b)
 			}
 
-			content = corpus.Digest(b)
+			content = hex.EncodeToString(sum.Sum(nil))
 		case in.IsSymlink():
 			b, rerr := ref.Target(in)
 			if rerr != nil {
