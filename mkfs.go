@@ -789,8 +789,9 @@ func (l listedOnce) ReadDir(name string) ([]fs.DirEntry, error) {
 // A file's data is read when the image is written, at Close, or at once
 // into a data file: until then the Writer holds the file's name in src and
 // no descriptor, so src stays as it was until Close. A host directory's
-// files are first opened then, by name: one that cannot be opened, or has
-// become shorter, fails Close; one that has grown is copied as it was
+// files are first opened then, by name: one that cannot be opened fails
+// Close, as does one that has become shorter, with io.ErrUnexpectedEOF;
+// one that has grown is copied as it was
 // found, its first bytes; and a name that holds another file by then is
 // read as that file, under the metadata of the first. With a data file the
 // same is so at once: a file shorter than it was found fails CopyFrom, and

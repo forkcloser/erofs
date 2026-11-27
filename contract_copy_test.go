@@ -1583,11 +1583,12 @@ func TestContractCopyOfAnInodeWithoutContent(t *testing.T) {
 	}
 }
 
-// TestContractCopyRefusesAShortSourceRead: a generic source whose data
-// reader yields fewer bytes than its declared size is refused, at CopyFrom
-// or at the Close that lays the image out, whether the file would be
-// tail-packed (inline-sized) or laid out in blocks: no image is written
-// with the tail zero-filled.
+// TestContractCopyRefusesAShortSourceRead: a generic source whose file
+// yields fewer bytes than its FileInfo declares is taken by CopyFrom, which
+// reads no data, and fails the Close that lays the image out, as
+// io.ErrUnexpectedEOF and neither a bad image nor a bad argument, whether
+// the file would be tail-packed (inline-sized) or laid out in blocks: what
+// was written is no image with the tail zero-filled.
 func TestContractCopyRefusesAShortSourceRead(t *testing.T) {
 	t.Parallel()
 
@@ -1595,37 +1596,55 @@ func TestContractCopyRefusesAShortSourceRead(t *testing.T) {
 		t.Run(strconv.Itoa(size), func(t *testing.T) {
 			t.Parallel()
 
-			src := fstest.MapFS{"f": &fstest.MapFile{
-				Data: make([]byte, size),
-				Mode: 0o644,
-				Sys:  &builder.Entry{Data: &shortDataReader{data: bytes.Repeat([]byte("A"), 10)}},
-			}}
+			src := shortFS{fstest.MapFS{"f": &fstest.MapFile{Data: make([]byte, size), Mode: 0o644}}}
 
-			// The bytes are read when the image is laid out, so the short
-			// read surfaces at Close when CopyFrom accepted the entry.
-			w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(corpus.BuildTime, 0))
-			if err := w.CopyFrom(src); err == nil {
-				if err := w.Close(); err == nil {
-					t.Fatal("a source short of its declared size was written as an image")
+			out := &testBuffer{}
+			w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+			if err := w.CopyFrom(src); err != nil {
+				t.Fatalf("CopyFrom: %v; want the entry taken, its data unread until Close", err)
+			}
+
+			err := w.Close()
+			if !errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, fs.ErrInvalid) {
+				t.Fatalf("Close: %v; want io.ErrUnexpectedEOF, and not ErrInvalid", err)
+			}
+
+			if fsys, oerr := erofs.Open(bytes.NewReader(out.Bytes())); oerr == nil {
+				if got, rerr := fs.ReadFile(fsys, "f"); rerr == nil {
+					t.Errorf("what Close wrote opens, and f reads %d bytes", len(got))
 				}
 			}
 		})
 	}
 }
 
-// shortDataReader declares more than it delivers.
-type shortDataReader struct {
-	data []byte
-	pos  int
+// shortFS is a source whose file "f" ends ten bytes in, whatever its
+// FileInfo declares.
+type shortFS struct{ fstest.MapFS }
+
+func (s shortFS) Open(name string) (fs.File, error) {
+	f, err := s.MapFS.Open(name)
+	if err != nil || name != "f" {
+		return f, err
+	}
+
+	return &shortFile{File: f, left: 10}, nil
 }
 
-func (s *shortDataReader) Read(p []byte) (int, error) {
-	if s.pos >= len(s.data) {
+type shortFile struct {
+	fs.File
+
+	left int
+}
+
+func (f *shortFile) Read(p []byte) (int, error) {
+	if f.left == 0 {
 		return 0, io.EOF
 	}
 
-	n := copy(p, s.data[s.pos:])
-	s.pos += n
+	n := min(len(p), f.left)
+	f.left -= n
 
 	return n, nil
 }
