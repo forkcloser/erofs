@@ -655,7 +655,7 @@ func chownVia(tb testing.TB, w *erofs.Writer, via string, uid, gid int) error {
 func TestContractWriterSetNlink(t *testing.T) {
 	t.Parallel()
 
-	for _, n := range []uint32{1, 2, 65535, 65536, math.MaxUint32} {
+	for _, n := range []uint32{0, 1, 2, 65535, 65536, math.MaxUint32} {
 		t.Run(strconv.FormatUint(uint64(n), 10), func(t *testing.T) {
 			t.Parallel()
 
@@ -697,6 +697,11 @@ func TestContractWriterSetxattr(t *testing.T) {
 		{"user.empty", "", true},
 		{"trusted.t", "1", true},
 		{"security.s", "1", true},
+		// The 255 bytes are counted after the prefix, whichever it is.
+		{"trusted." + long, "v", true},
+		{"trusted." + long + "n", "v", false},
+		{"security." + long, "v", true},
+		{"security." + long + "n", "v", false},
 		{"system.posix_acl_access", "\x02\x00\x00\x00", true},
 		{"system.posix_acl_default", "\x02\x00\x00\x00", true},
 		// The two ACL names are whole names: the kernel reads an ACL
@@ -800,6 +805,10 @@ func TestContractWriterMknod(t *testing.T) {
 	}{
 		{"fifo", fs.ModeNamedPipe | 0o644, 0, erofsspec.ModeFifo, true},
 		{"socket", fs.ModeSocket | 0o600, 0, erofsspec.ModeSocket, true},
+		// "rdev is the device number for the two device types and is
+		// ignored otherwise."
+		{"fifo-with-a-device-number", fs.ModeNamedPipe | 0o644, 0x0105, erofsspec.ModeFifo, true},
+		{"socket-with-a-device-number", fs.ModeSocket | 0o600, 0x0105, erofsspec.ModeSocket, true},
 		{"char", fs.ModeDevice | fs.ModeCharDevice | 0o660, math.MaxUint32, erofsspec.ModeChar, true},
 		{"block", fs.ModeDevice | 0o660, 0x0801, erofsspec.ModeBlock, true},
 		{
@@ -1315,16 +1324,16 @@ func TestContractWriterBlockSizeOption(t *testing.T) {
 
 			w := erofs.Create(&testBuffer{}, erofs.WithBlockSize(n))
 
-			if err := w.Mkdir("d", 0o755); err == nil {
-				t.Errorf("Mkdir under WithBlockSize(%d) succeeded", n)
+			if err := w.Mkdir("d", 0o755); !errors.Is(err, fs.ErrInvalid) {
+				t.Errorf("Mkdir under WithBlockSize(%d): %v, want ErrInvalid", n, err)
 			}
 
-			if _, err := w.Create("f"); err == nil {
-				t.Errorf("Create under WithBlockSize(%d) succeeded", n)
+			if _, err := w.Create("f"); !errors.Is(err, fs.ErrInvalid) {
+				t.Errorf("Create under WithBlockSize(%d): %v, want ErrInvalid", n, err)
 			}
 
-			if err := w.Close(); err == nil {
-				t.Errorf("Close under WithBlockSize(%d) succeeded", n)
+			if err := w.Close(); !errors.Is(err, fs.ErrInvalid) {
+				t.Errorf("Close under WithBlockSize(%d): %v, want ErrInvalid", n, err)
 			}
 		})
 	}
