@@ -172,11 +172,6 @@ type lstatFS struct{ fs.FS }
 
 func (l lstatFS) Stat(name string) (fs.FileInfo, error) { return fs.Lstat(l.FS, name) }
 
-// statFS adapts an image's fs.FS so that Stat follows symlinks.
-type statFS struct{ fs.FS }
-
-func (s statFS) Stat(name string) (fs.FileInfo, error) { return fs.Stat(s.FS, name) }
-
 // take is the snapshot of name through so. The Stat fields come from
 // Sys(), "the raw erofs stat data returned by Sys() on fs.FileInfo
 // values"; a FileInfo without it is reported once and compared on what it
@@ -263,10 +258,11 @@ func readEntries(tb testing.TB, so statOpener, name string) []string {
 // TestContractWriterServesBeforeCloseWhatOpenServesAfter: "Stat and Open
 // read entries back before Close"; what they report for every path of the
 // tree is what the package's reader reports from the image, the FileInfo,
-// the Stat fields, a regular file's bytes and a directory's entries alike.
-// Inode numbers and directory sizes exist at layout, so before Close they
-// are 0 and not compared. A symlink is compared with Lstat or Stat,
-// whichever the writer's Stat stands for.
+// the Stat fields, their accessors, a regular file's bytes and a
+// directory's entries alike. Inode numbers, directory sizes and the place
+// of a file's data exist at layout: before Close the first two are 0 and
+// there is no DataRange. Stat follows no symlink, so each path is compared
+// with the image's Lstat.
 func TestContractWriterServesBeforeCloseWhatOpenServesAfter(t *testing.T) {
 	t.Parallel()
 
@@ -286,6 +282,27 @@ func TestContractWriterServesBeforeCloseWhatOpenServesAfter(t *testing.T) {
 	before := map[string]snapshot{}
 	for _, p := range paths {
 		before[p] = take(t, w, p)
+
+		info, err := w.Stat(p)
+		if err != nil {
+			t.Fatalf("%s: Stat: %v", p, err)
+		}
+
+		st, ok := info.Sys().(*erofs.Stat)
+		if !ok {
+			continue
+		}
+
+		checkAccessors(t, p, info, st)
+
+		if st.Ino != 0 || (info.IsDir() && info.Size() != 0) {
+			t.Errorf("%s: inode %d, size %d before Close; want 0 for an inode and for a directory's size",
+				p, st.Ino, info.Size())
+		}
+
+		if _, ok := info.(interface{ DataRange() []erofs.DataRange }); ok {
+			t.Errorf("%s: a DataRange before Close, when no data has a place", p)
+		}
 	}
 
 	// "Stat is the raw erofs stat data returned by Sys() on fs.FileInfo
@@ -305,20 +322,12 @@ func TestContractWriterServesBeforeCloseWhatOpenServesAfter(t *testing.T) {
 	after := map[string]snapshot{}
 
 	for _, p := range paths {
-		if before[p].mode&fs.ModeSymlink == 0 && isSymlinkNode(nodes, p) {
-			after[p] = take(t, statFS{fsys}, p)
-		} else {
-			after[p] = take(t, lstatFS{fsys}, p)
-		}
+		after[p] = take(t, lstatFS{fsys}, p)
 	}
 
 	for _, p := range paths {
 		compareSnapshots(t, p, before[p], after[p])
 	}
-}
-
-func isSymlinkNode(nodes []corpus.Node, path string) bool {
-	return slices.ContainsFunc(nodes, func(n corpus.Node) bool { return n.Path == path && n.Type == tar.TypeSymlink })
 }
 
 func compareSnapshots(t *testing.T, path string, b, a snapshot) {
@@ -398,7 +407,7 @@ func TestContractWriterCleansPaths(t *testing.T) {
 
 	x := take(t, w, "d/x")
 
-	for _, form := range []string{"/d/x", "./d/x", "d/x/", "/d/./x", "d//x"} {
+	for _, form := range []string{"/d/x", "./d/x", "d/x/", "/d/x/", "./d/x/.", "/d/./x", "d//x"} {
 		if got := take(t, w, form); got.mode != x.mode || got.size != x.size || !bytes.Equal(got.content, x.content) {
 			t.Errorf("Stat(%q) is not Stat(\"d/x\")", form)
 		}
@@ -406,7 +415,7 @@ func TestContractWriterCleansPaths(t *testing.T) {
 
 	root := take(t, w, ".")
 
-	for _, form := range []string{"", "/", "./", "/."} {
+	for _, form := range []string{"", "/", "./", "/.", "d/..", "./d/.."} {
 		info, err := w.Stat(form)
 		if err != nil {
 			t.Errorf("Stat(%q): %v, want the root", form, err)
@@ -711,6 +720,8 @@ func TestContractWriterSetxattr(t *testing.T) {
 		{"lustre.lov", "v", false},
 		{"system.other", "v", false},
 		{"user.", "v", false},
+		{"trusted.", "v", false},
+		{"security.", "v", false},
 		{"", "v", false},
 	}
 
@@ -1149,6 +1160,15 @@ func TestContractWriterDirectoryBlocks(t *testing.T) {
 			"Mkdir":   func(w *erofs.Writer, n string) error { return w.Mkdir(n, 0o755) },
 			"Symlink": func(w *erofs.Writer, n string) error { return w.Symlink("x", n) },
 			"Mknod":   func(w *erofs.Writer, n string) error { return w.Mknod(n, fs.ModeNamedPipe|0o644, 0) },
+			"Link": func(w *erofs.Writer, n string) error {
+				if err := writeRegular(w, corpus.Node{Path: "f", Mode: 0o644}); err != nil {
+					return fmt.Errorf("the file to link: %w", err)
+				}
+
+				return w.Link("f", n)
+			},
+			// The name of a directory that would have to be made on the way.
+			"a parent": func(w *erofs.Writer, n string) error { return w.Mkdir(n+"/x", 0o755) },
 			"CopyFrom": func(w *erofs.Writer, n string) error {
 				return w.CopyFrom(fstest.MapFS{n: &fstest.MapFile{Data: []byte("c"), Mode: 0o644}})
 			},

@@ -530,14 +530,20 @@ func checkInfo(t *testing.T, name string, info fs.FileInfo, in *erofsspec.Inode)
 	}
 
 	checkAccessors(t, name, info, st)
+
+	// The eighth, held to the reference's extents by checkRanges.
+	if _, ok := info.(interface{ DataRange() []erofs.DataRange }); !ok {
+		t.Errorf("%s: FileInfo lacks DataRange", name)
+	}
 }
 
-// checkAccessors: the single-method interfaces the Stat doc lists return
-// the Stat's values.
+// checkAccessors: the FileInfo's own methods and the single-method
+// interfaces the Stat doc lists return the Stat's values, DataRange apart,
+// which the Writer's FileInfo has not.
 func checkAccessors(t *testing.T, name string, info fs.FileInfo, st *erofs.Stat) {
 	t.Helper()
 
-	type accessors interface { //nolint:interfacebloat // the Stat doc's eight accessors, held together
+	type accessors interface { //nolint:interfacebloat // the Stat doc's accessors, held together
 		UID() uint32
 		GID() uint32
 		Ino() uint64
@@ -545,7 +551,16 @@ func checkAccessors(t *testing.T, name string, info fs.FileInfo, st *erofs.Stat)
 		Rdev() uint64
 		GetAllXattr() map[string]string
 		GetXattr(name string) (string, bool)
-		DataRange() []erofs.DataRange
+	}
+
+	// "Mode has no accessor interface: use fs.FileInfo.Mode, which returns
+	// the same value"; Size is the FileInfo's; "Mtime and MtimeNs are the
+	// raw seconds and nanoseconds; fs.FileInfo.ModTime returns them as a
+	// time.Time".
+	if when := time.Unix(int64(st.Mtime), int64(st.MtimeNs)); info.Mode() != st.Mode || info.Size() != st.Size ||
+		!info.ModTime().Equal(when) {
+		t.Errorf("%s: the FileInfo's mode %v, size %d and time %v disagree with Stat's %v, %d and %v",
+			name, info.Mode(), info.Size(), info.ModTime(), st.Mode, st.Size, when)
 	}
 
 	a, ok := info.(accessors)
