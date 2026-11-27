@@ -3,7 +3,9 @@ package erofs_test
 import (
 	"archive/tar"
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -1176,10 +1178,16 @@ func TestContractMergeWhiteoutOfHardlinkedName(t *testing.T) {
 }
 
 // TestContractCopyFromEditedImage: a copy of an edited image, with its
-// data, is refused with ErrInvalid (ErrCorrupt included) or with
-// ErrNotImplemented, the reader's two classes, or is an image
-// the reference reads to what it reads from the source; the copy never
-// invents a tree, and never panics. The edits are the differential's kinds
+// data or metadata-only, is an image the reference reads to what it reads
+// from the source, or is refused as the reader may refuse that source: in
+// the class the differential allows the reader against the reference's
+// verdict, ErrCorrupt or ErrNotImplemented where the reference refuses or
+// a documented rule says the package does, and never of a sound image
+// otherwise. ErrInvalid alone is a limit of the writer's, and a copy has
+// three refusals of its own that CopyFrom's documentation states: a name a
+// directory lists twice, a directory under two names, and, metadata-only,
+// what the image places past the blocks its superblock counts. The copy
+// never invents a tree, and never panics. The edits are the differential's kinds
 // over the small images: one byte, every sixteenth offset of the first 4
 // KiB, two values; and a truncation every 256 bytes.
 func TestContractCopyFromEditedImage(t *testing.T) {
@@ -1207,7 +1215,11 @@ func TestContractCopyFromEditedImage(t *testing.T) {
 				count += checkEditedCopy(t, im, im.Img[:cut], fmt.Sprintf("cut to %d", cut))
 			}
 
-			t.Logf("%s: %d edited sources the package opened, each copied with its data", im.Name, count)
+			if count == 0 {
+				t.Errorf("%s: the package opened no edited source: nothing was copied", im.Name)
+			}
+
+			t.Logf("%s: %d edited sources the package opened, each copied in both modes", im.Name, count)
 		})
 	}
 }
@@ -1237,11 +1249,20 @@ func checkEditedCopy(t *testing.T, im corpus.Image, img []byte, label string) in
 	// passed through ("a failing reader"). Every other map past its image
 	// or device is a declared bound the reader refuses at Stat.
 	short := false
+
+	// "A metadata-only copy holds an EROFS image to the blocks its
+	// superblock counts", where the reader and the reference hold it to
+	// its length: what an image longer than that count places past it is
+	// the one's to refuse and the others' to read.
+	long := false
+
 	if ref, perr := erofsspec.Parse(img, im.Extra()...); perr == nil {
 		short = uint64(len(img)) < ref.Super.Blocks*uint64(ref.Super.BlockSize)
+		long = uint64(len(img)) > ref.Super.Blocks*uint64(ref.Super.BlockSize)
 	}
 
-	truncated := referenceVerdict(img, im.Blob).class == "truncated"
+	reference := referenceVerdict(img, im.Blob)
+	truncated := reference.class == "truncated"
 
 	// A directory block out of name order, a name stored twice included:
 	// ReadDir lists every name and the lookups find some of them, the
@@ -1257,10 +1278,23 @@ func checkEditedCopy(t *testing.T, im corpus.Image, img []byte, label string) in
 	// is for the source the reference does not read.
 	declared := int64(0)
 
+	// "A directory an EROFS image names twice, a hard link to it or a cycle
+	// through it, is refused as ErrCorrupt" by a copy, where the kernel
+	// serves it under each name.
+	twice := false
+	dirs := map[uint64]bool{}
+
 	if ref, perr := erofsspec.Parse(img, im.Extra()...); perr == nil {
+		dirs[ref.Super.RootNid] = true
+
 		unsorted, _ = referenceWalk(ref, func(e erofsspec.Entry) error {
 			if e.Inode != nil && e.Inode.IsRegular() && e.Inode.Size > 0 {
 				declared += min(e.Inode.Size, maxEditedCopyBytes+1)
+			}
+
+			if e.Inode != nil && e.Inode.IsDir() {
+				twice = twice || dirs[e.Inode.Nid]
+				dirs[e.Inode.Nid] = true
 			}
 
 			return nil
@@ -1282,12 +1316,30 @@ func checkEditedCopy(t *testing.T, im corpus.Image, img []byte, label string) in
 			continue
 		case cerr != nil && (errors.Is(cerr, io.ErrUnexpectedEOF) || errors.Is(cerr, io.EOF)) && short:
 			continue
-		case cerr != nil && !errors.Is(cerr, fs.ErrInvalid) && !errors.Is(cerr, erofs.ErrNotImplemented) && !errors.Is(cerr, fs.ErrNotExist):
-			// ErrNotExist is a directory block out of name order: ReadDir
-			// lists a name the lookup's binary search does not find, the
-			// reader's documented divergence, met by the copy's own Open.
-			t.Fatalf("%s %s: refused with %v, want ErrInvalid, ErrNotImplemented or ErrNotExist", im.Name, mode, cerr)
-		case cerr != nil, unsorted:
+		case cerr != nil && unsorted && (errors.Is(cerr, fs.ErrNotExist) || errors.Is(cerr, erofs.ErrCorrupt)):
+			// A directory block out of name order: ReadDir lists a name the
+			// lookup's binary search does not find, the reader's documented
+			// divergence, met by the copy's own Open; or lists a name
+			// twice, which a copy refuses whatever the source.
+			continue
+		case cerr != nil && twice && errors.Is(cerr, erofs.ErrCorrupt):
+			continue
+		case cerr != nil && metadataOnly && long && errors.Is(cerr, erofs.ErrCorrupt):
+			continue
+		case cerr != nil && readerClass(cerr) == "invalid":
+			// ErrInvalid alone: a limit of the writer's, whatever the
+			// source is.
+			continue
+		case cerr != nil:
+			// A refusal of the source is the reader's, and is held to what
+			// the reader may refuse.
+			if kind := judge(reference, verdict{class: readerClass(cerr)}); kind != "" {
+				t.Fatalf("%s %s: %s, as a copy: the reference's verdict is %s, the copy's refusal %v",
+					im.Name, mode, kind, reference.class, cerr)
+			}
+
+			continue
+		case unsorted:
 			continue
 		}
 
@@ -1383,13 +1435,22 @@ func viewOf(img []byte, extra [][]byte) (map[string]copyView, error) {
 		content := ""
 
 		switch {
-		case in.IsRegular() && in.Size <= contentMax:
-			b, rerr := ref.Read(in)
-			if rerr != nil {
-				return fmt.Errorf("%s: %w", e.Path, rerr)
+		case in.IsRegular() && in.Size <= maxEditedCopyBytes:
+			// In pieces: an edit makes a file a hole of megabytes, and the
+			// reference reads what it is asked for whole. A larger file is
+			// no copy's here, and is held by its size.
+			sum := sha256.New()
+
+			for off := int64(0); off < in.Size; off += contentMax {
+				b, rerr := ref.ReadAt(in, off, min(contentMax, in.Size-off))
+				if rerr != nil {
+					return fmt.Errorf("%s: %w", e.Path, rerr)
+				}
+
+				sum.Write(b)
 			}
 
-			content = corpus.Digest(b)
+			content = hex.EncodeToString(sum.Sum(nil))
 		case in.IsSymlink():
 			b, rerr := ref.Target(in)
 			if rerr != nil {
@@ -1500,11 +1561,69 @@ func copyAgrees(src []byte, srcExtra [][]byte, dst []byte, dstExtra [][]byte) st
 	return ""
 }
 
-// TestContractCopyRefusesAShortSourceRead: a generic source whose data
-// reader yields fewer bytes than its declared size is refused, at CopyFrom
-// or at the Close that lays the image out, whether the file would be
-// tail-packed (inline-sized) or laid out in blocks: no image is written
-// with the tail zero-filled.
+// TestContractCopyOfAnInodeWithoutContent: a FIFO, like a device or a
+// socket, has no content, and its i_size and its layout are fields nothing
+// reads by: the kernel serves the inode whatever they hold, and so does
+// Lstat. A copy, in both modes, keeps the inode as it is: a size past the
+// end of the image is no directory's that would not fit, and a flat-inline
+// layout whose tail would cross its block has no tail. The first input is
+// the fuzzer's: small-chunk-512's d/p given a size of 196608 bytes.
+func TestContractCopyOfAnInodeWithoutContent(t *testing.T) {
+	t.Parallel()
+
+	src := committed(t, "small-chunk-512")
+	at := inodeOffset(t, src.Img, "d/p")
+
+	// i_size is the eight bytes at offset 8 of an extended inode.
+	format := binary.LittleEndian.Uint16(src.Img[at:])
+	if format&1 == 0 {
+		t.Fatalf("test premise broken: d/p reads i_format %#x; want an extended inode", format)
+	}
+
+	for name, edit := range map[string]func(img []byte){
+		"a size past the image": func(img []byte) { binary.LittleEndian.PutUint64(img[at+8:], 196608) },
+		"a tail past its block": func(img []byte) {
+			binary.LittleEndian.PutUint16(img[at:], format&^disk.InodeFormatLayoutMask|disk.LayoutFlatInline<<1)
+			binary.LittleEndian.PutUint64(img[at+8:], 500)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			img := bytes.Clone(src.Img)
+			edit(img)
+
+			source, err := erofs.Open(bytes.NewReader(img))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if info, err := fs.Lstat(source, "d/p"); err != nil || info.Mode()&fs.ModeNamedPipe == 0 {
+				t.Fatalf("Lstat d/p: %v, %v; want the FIFO (the premise: the reader serves it)", info, err)
+			}
+
+			for _, metadataOnly := range []bool{false, true} {
+				made, err := copyOpened(source, metadataOnly, img, nil)
+				if err != nil {
+					t.Errorf("CopyFrom%s: %v", copyMode(metadataOnly), err)
+
+					continue
+				}
+
+				if d := copyAgrees(img, nil, made.Img, made.Extra()); d != "" {
+					t.Errorf("CopyFrom%s: the copy is not the source: %s", copyMode(metadataOnly), d)
+				}
+			}
+		})
+	}
+}
+
+// TestContractCopyRefusesAShortSourceRead: a generic source whose file
+// yields fewer bytes than its FileInfo declares is taken by CopyFrom, which
+// reads no data, and fails the Close that lays the image out, as
+// io.ErrUnexpectedEOF and neither a bad image nor a bad argument, whether
+// the file would be tail-packed (inline-sized) or laid out in blocks: what
+// was written is no image with the tail zero-filled.
 func TestContractCopyRefusesAShortSourceRead(t *testing.T) {
 	t.Parallel()
 
@@ -1512,37 +1631,55 @@ func TestContractCopyRefusesAShortSourceRead(t *testing.T) {
 		t.Run(strconv.Itoa(size), func(t *testing.T) {
 			t.Parallel()
 
-			src := fstest.MapFS{"f": &fstest.MapFile{
-				Data: make([]byte, size),
-				Mode: 0o644,
-				Sys:  &builder.Entry{Data: &shortDataReader{data: bytes.Repeat([]byte("A"), 10)}},
-			}}
+			src := shortFS{fstest.MapFS{"f": &fstest.MapFile{Data: make([]byte, size), Mode: 0o644}}}
 
-			// The bytes are read when the image is laid out, so the short
-			// read surfaces at Close when CopyFrom accepted the entry.
-			w := erofs.Create(&testBuffer{}, erofs.WithBuildTime(corpus.BuildTime, 0))
-			if err := w.CopyFrom(src); err == nil {
-				if err := w.Close(); err == nil {
-					t.Fatal("a source short of its declared size was written as an image")
+			out := &testBuffer{}
+			w := erofs.Create(out, erofs.WithBuildTime(corpus.BuildTime, 0))
+
+			if err := w.CopyFrom(src); err != nil {
+				t.Fatalf("CopyFrom: %v; want the entry taken, its data unread until Close", err)
+			}
+
+			err := w.Close()
+			if !errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, fs.ErrInvalid) {
+				t.Fatalf("Close: %v; want io.ErrUnexpectedEOF, and not ErrInvalid", err)
+			}
+
+			if fsys, oerr := erofs.Open(bytes.NewReader(out.Bytes())); oerr == nil {
+				if got, rerr := fs.ReadFile(fsys, "f"); rerr == nil {
+					t.Errorf("what Close wrote opens, and f reads %d bytes", len(got))
 				}
 			}
 		})
 	}
 }
 
-// shortDataReader declares more than it delivers.
-type shortDataReader struct {
-	data []byte
-	pos  int
+// shortFS is a source whose file "f" ends ten bytes in, whatever its
+// FileInfo declares.
+type shortFS struct{ fstest.MapFS }
+
+func (s shortFS) Open(name string) (fs.File, error) {
+	f, err := s.MapFS.Open(name)
+	if err != nil || name != "f" {
+		return f, err
+	}
+
+	return &shortFile{File: f, left: 10}, nil
 }
 
-func (s *shortDataReader) Read(p []byte) (int, error) {
-	if s.pos >= len(s.data) {
+type shortFile struct {
+	fs.File
+
+	left int
+}
+
+func (f *shortFile) Read(p []byte) (int, error) {
+	if f.left == 0 {
 		return 0, io.EOF
 	}
 
-	n := copy(p, s.data[s.pos:])
-	s.pos += n
+	n := min(len(p), f.left)
+	f.left -= n
 
 	return n, nil
 }

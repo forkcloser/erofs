@@ -799,8 +799,9 @@ func (l listedOnce) ReadDir(name string) ([]fs.DirEntry, error) {
 // A file's data is read when the image is written, at Close, or at once
 // into a data file: until then the Writer holds the file's name in src and
 // no descriptor, so src stays as it was until Close. A host directory's
-// files are first opened then, by name: one that cannot be opened, or has
-// become shorter, fails Close; one that has grown is copied as it was
+// files are first opened then, by name: one that cannot be opened fails
+// Close, as does one that has become shorter, with io.ErrUnexpectedEOF;
+// one that has grown is copied as it was
 // found, its first bytes; and a name that holds another file by then is
 // read as that file, under the metadata of the first. With a data file the
 // same is so at once: a file shorter than it was found fails CopyFrom, and
@@ -814,6 +815,10 @@ func (l listedOnce) ReadDir(name string) ([]fs.DirEntry, error) {
 // A directory an EROFS image names twice, a hard link to it or a cycle
 // through it, is refused as ErrCorrupt. A host directory that two paths
 // reach, as under a bind mount, is copied at each, as mkfs.erofs copies it.
+// A metadata-only copy holds an EROFS image to the blocks its superblock
+// counts, the image being a device of the copy by that count: an inode or
+// data the image places past them is refused as ErrCorrupt, where the
+// reader, held to its reader's length, serves it.
 // A directory that lists a name twice is refused whatever the source: a lookup
 // finds one of the two entries, and the copy would hold that one's content
 // under the other's metadata. So is one that lists what is not a name, as
