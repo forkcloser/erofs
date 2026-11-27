@@ -107,9 +107,10 @@ func (im *Image) chunkExtents(in *Inode) ([]Extent, error) {
 
 // chunkExtent is chunk i of a chunk-based inode: the map starts at the
 // first multiple of the entry size after the inode and its xattrs, one
-// entry per chunk; a 4-byte entry is a block address, an 8-byte one a
-// 48-bit address and a device id masked by the superblock's; an all-ones
-// address is a hole.
+// entry per chunk; a 4-byte entry is a block address, an 8-byte one an
+// address of 32 bits, or 48 under the 48-bit flag, and a device id masked
+// by the superblock's; an all-ones address is a hole. The flag widens the
+// 8-byte entry alone: a 4-byte entry of all ones is a hole with it too.
 func (im *Image) chunkExtent(in *Inode, i int64) (Extent, error) {
 	bs := int64(im.Super.BlockSize)
 	unit := int64(4)
@@ -119,7 +120,7 @@ func (im *Image) chunkExtent(in *Inode, i int64) (Extent, error) {
 		unit = 8
 	}
 
-	if in.ChunkFormat&ChunkFormat48Bit != 0 {
+	if unit == 8 && in.ChunkFormat&ChunkFormat48Bit != 0 {
 		addrMask = uint64(1)<<48 - 1
 	}
 
