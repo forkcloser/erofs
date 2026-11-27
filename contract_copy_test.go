@@ -949,6 +949,15 @@ func TestContractGenericSourceTimesAndOwnership(t *testing.T) {
 	if sys, ok := st.Sys().(*erofs.Stat); !ok || sys.UID != 7 || sys.GID != 8 {
 		t.Errorf("withsys: %+v, want uid 7 gid 8 from the source's Sys()", st.Sys())
 	}
+
+	in, err := lookupNoFollow(ref, "withsys")
+	if err != nil {
+		t.Fatalf("reference withsys: %v", err)
+	}
+
+	if in.UID != 7 || in.GID != 8 {
+		t.Errorf("withsys: the reference reads uid %d gid %d, want 7 and 8", in.UID, in.GID)
+	}
 }
 
 // coalesced joins adjacent DataRange entries that continue each other, a
@@ -978,7 +987,8 @@ func coalesced(ranges []erofs.DataRange) []erofs.DataRange {
 // inodes" on the device CopyFrom assigns the source (its DeviceBlocks),
 // each data entry at its offset there, each hole entry a hole; the copy's
 // DataRange answers the same slice with that device, the reference's
-// extents agree, and nothing of the data is in the image. A slice that
+// extents are that slice too, so nothing of the data is in the image, and
+// both read the device's bytes at those offsets. A slice that
 // does not cover the file "from logical byte 0 to Size-1 in order, with no
 // gaps or overlaps" is refused as ErrInvalid: a negative or unaligned
 // offset, a zero or negative size, a device the source does not own, a sum
@@ -999,7 +1009,7 @@ func TestContractGenericDataRangeIsStoredAsChunks(t *testing.T) {
 			return corpus.Image{}, err
 		}
 
-		return corpus.Image{Name: "ranges", Img: out.Bytes(), Blob: make([]byte, 1024*bs)}, nil
+		return corpus.Image{Name: "ranges", Img: out.Bytes(), Blob: corpus.Pattern(1024 * bs)}, nil
 	}
 
 	for _, c := range []struct {
@@ -1057,23 +1067,48 @@ func TestContractGenericDataRangeIsStoredAsChunks(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			var pos int64
+			var (
+				pos     int64
+				mapped  []erofs.DataRange
+				content []byte
+			)
+
 			for i, x := range exts {
 				if x.Logical != pos {
 					t.Errorf("extent %d at logical %d, want %d", i, x.Logical, pos)
 				}
 
 				pos += x.Length
+
+				if x.Hole {
+					mapped = append(mapped, erofs.DataRange{Offset: -1, Size: x.Length})
+				} else {
+					mapped = append(mapped, erofs.DataRange{Device: x.Device, Offset: x.Physical, Size: x.Length})
+				}
 			}
 
 			if pos != c.size {
 				t.Errorf("extents cover %d bytes, want %d", pos, c.size)
 			}
 
-			for _, x := range exts {
-				if !x.Hole && x.Device != 1 {
-					t.Errorf("extent %+v on device %d, want 1", x, x.Device)
+			if !slices.Equal(coalesced(mapped), coalesced(want)) {
+				t.Errorf("the reference maps %+v, want %+v (the source's, on device 1)", mapped, want)
+			}
+
+			for _, r := range c.ranges {
+				if r.Offset < 0 {
+					content = append(content, make([]byte, r.Size)...)
+				} else {
+					content = append(content, im.Blob[r.Offset:r.Offset+r.Size]...)
 				}
+			}
+
+			if read, rerr := ref.Read(in); rerr != nil || !bytes.Equal(read, content) {
+				t.Errorf("the reference reads %d bytes, %v; want the device's at the source's offsets", len(read), rerr)
+			}
+
+			if read, rerr := fs.ReadFile(fsys, "f.bin"); rerr != nil || !bytes.Equal(read, content) {
+				t.Errorf("ReadFile: %d bytes, %v; want the device's at the source's offsets", len(read), rerr)
 			}
 
 			fsckUnlessPlatformLimit(t, im)
@@ -2825,16 +2860,27 @@ func TestContractMetadataOnlyCopyOfAChunkOnTheSourceImageItself(t *testing.T) {
 		t.Fatal("no slot of the copy has mapped address 0: the shape this case holds is gone")
 	}
 
-	parseImage(t, copied)
-	fsys := openImage(t, copied)
+	ref, fsys := parseImage(t, copied), openImage(t, copied)
 
-	if got, err := fs.ReadFile(fsys, "target"); err != nil || !bytes.Equal(got, srcOut.Bytes()[:4096]) {
-		t.Errorf("target: %d bytes, %v; want the source image's first block", len(got), err)
+	for name, want := range map[string][]byte{
+		"target": srcOut.Bytes()[:4096],
+		"other":  bytes.Repeat([]byte{0xEE}, 4096),
+	} {
+		if got, err := fs.ReadFile(fsys, name); err != nil || !bytes.Equal(got, want) {
+			t.Errorf("%s: %d bytes, %v; want the source image's first block, and other's own 0xEE", name, len(got), err)
+		}
+
+		in, err := ref.Resolve(name, 0)
+		if err != nil {
+			t.Fatalf("reference %s: %v", name, err)
+		}
+
+		if got, err := ref.Read(in); err != nil || !bytes.Equal(got, want) {
+			t.Errorf("%s: the reference reads %d bytes, %v; want the same", name, len(got), err)
+		}
 	}
 
-	if got, err := fs.ReadFile(fsys, "other"); err != nil || !bytes.Equal(got, bytes.Repeat([]byte{0xEE}, 4096)) {
-		t.Errorf("other: %d bytes, %v; want its own 0xEE block", len(got), err)
-	}
+	fsckUnlessPlatformLimit(t, copied)
 }
 
 // chunkMapSourceFS is a source of one regular file, of 4096 bytes unless
