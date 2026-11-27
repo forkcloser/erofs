@@ -70,6 +70,11 @@ jobs:
             fuzz-image-corpus-${{ runner.os }}-
 
       - name: Fuzz
+        # The lane is the targets with the tools: one that would skip, or take
+        # no verdict, for want of either fails.
+        env:
+          EROFS_REQUIRE_MKFS: "1"
+          EROFS_REQUIRE_FSCK: "1"
         run: just do test go fuzz
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

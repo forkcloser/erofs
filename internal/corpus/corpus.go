@@ -654,13 +654,12 @@ func Mkfs(tb testing.TB, name string, args []string, tarball []byte) Image {
 func Fsck(tb testing.TB, im Image) {
 	tb.Helper()
 
-	if _, err := exec.LookPath("fsck.erofs"); err != nil {
-		tb.Logf("%s: fsck.erofs is not on PATH; no verdict", im.Name)
-
+	tool := fsckPath(tb, im)
+	if tool == "" {
 		return
 	}
 
-	if err := FsckVerdict(tb, im); err != nil {
+	if err := fsckRun(tb, tool, im); err != nil {
 		tb.Fatalf("%s: fsck.erofs refuses the image: %v", im.Name, err)
 	}
 }
@@ -681,13 +680,12 @@ func FsckRefuses(tb testing.TB, im Image) {
 	}
 
 	// Without the tool there is no verdict either way, not an acceptance.
-	if _, err := exec.LookPath("fsck.erofs"); err != nil {
-		tb.Logf("%s: fsck.erofs is not on PATH; no verdict", im.Name)
-
+	tool := fsckPath(tb, im)
+	if tool == "" {
 		return
 	}
 
-	if err := FsckVerdict(tb, im); err == nil {
+	if err := fsckRun(tb, tool, im); err == nil {
 		tb.Fatalf("%s: fsck.erofs accepts an image the kernel refuses", im.Name)
 	}
 }
@@ -697,10 +695,36 @@ func FsckRefuses(tb testing.TB, im Image) {
 func FsckVerdict(tb testing.TB, im Image) error {
 	tb.Helper()
 
+	tool := fsckPath(tb, im)
+	if tool == "" {
+		return nil
+	}
+
+	return fsckRun(tb, tool, im)
+}
+
+// fsckPath is fsck.erofs's path, or "" when it is not on PATH: no verdict on
+// the image, said in the test's log, unless EROFS_REQUIRE_FSCK=1 says the
+// leg was supposed to have it, where the test fails.
+func fsckPath(tb testing.TB, im Image) string {
+	tb.Helper()
+
 	tool, err := exec.LookPath("fsck.erofs")
 	if err != nil {
-		return nil //nolint:nilerr // no tool, no verdict
+		if os.Getenv("EROFS_REQUIRE_FSCK") == "1" {
+			tb.Fatal("fsck.erofs is not on PATH and EROFS_REQUIRE_FSCK=1")
+		}
+
+		tb.Logf("%s: fsck.erofs is not on PATH; no verdict", im.Name)
+
+		return ""
 	}
+
+	return tool
+}
+
+func fsckRun(tb testing.TB, tool string, im Image) error {
+	tb.Helper()
 
 	dir := tb.TempDir()
 	out := filepath.Join(dir, "out.erofs")
