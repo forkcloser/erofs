@@ -1145,8 +1145,13 @@ func (fsys *Writer) Close() error {
 	return ew.write(fsys.out)
 }
 
-// Stat returns file info for the named path. The name is cleaned the same
-// way as other Writer methods (leading slash, no trailing slash).
+// Stat returns file info for the named path, as the Writer holds it now.
+// The name is cleaned the same way as other Writer methods (leading slash,
+// no trailing slash), and no symlink is followed, in it or at its end. The
+// info's Sys() is a [Stat], and the info has the accessors that Stat's
+// documentation lists, DataRange apart: the image is laid out at Close,
+// before which an inode has no number (Ino is 0), a directory no size and a
+// file's data no place.
 func (fsys *Writer) Stat(name string) (fs.FileInfo, error) {
 	name = cleanPath(name)
 
