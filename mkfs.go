@@ -429,8 +429,8 @@ func (fsys *Writer) Symlink(oldname, newname string) error {
 // already exist and must not be a directory. On disk the two names share one
 // nid; the inode's link count is computed from the number of live names.
 // Metadata operations (Chmod, Chown, ...) through either name affect the
-// shared inode. Removing the ORIGINAL name while hardlinks to it remain is
-// not supported and surfaces as an error at Close.
+// shared inode. Removing one of its names, the first included, leaves the
+// inode to the others.
 func (fsys *Writer) Link(oldname, newname string) error {
 	if fsys.wErr != nil {
 		return fsys.wErr
@@ -823,7 +823,9 @@ func (l listedOnce) ReadDir(name string) ([]fs.DirEntry, error) {
 // files themselves has its holes read, and stored, as zeros. A flat file at
 // the null address, a hole whose size nothing in the image backs, is not
 // copied past 1<<27 blocks, ErrInvalid, where src reports this package's
-// file info for it or, with its data, opens this package's file.
+// file info for it or, with its data, opens this package's file. A
+// metadata-only copy refuses, ErrInvalid, a directory of its source image
+// that declares more than 1 GiB of entries.
 //
 //nolint:gocognit // the walk callback: one case per entry kind, each with its own metadata and data source
 func (fsys *Writer) CopyFrom(src fs.FS, opts ...CopyOpt) error {

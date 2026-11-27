@@ -235,7 +235,9 @@ and 48-bit chunk addressing are rejected with
 `ErrNotImplemented`. The bounds that protect a caller from a hostile image
 report `ErrInvalid`: symlink targets and paths of at most 4096 bytes, 255
 symlink hops per resolution, a chunk-index map of at most 64 MiB per file,
-and `fs.ReadFile` refusing files over 128 MiB (open and `io.Copy` those).
+`fs.ReadFile` refusing files over 128 MiB (open and `io.Copy` those), and a
+metadata-only copy refusing a directory of its source image that declares
+more than 1 GiB of entries.
 The writer refuses, `ErrInvalid`, a file name over 255 bytes, which no lookup
 would reach, and one with a NUL, which would read back as another name. It
 stores xattr names of at most 255 bytes after their prefix and values of at
